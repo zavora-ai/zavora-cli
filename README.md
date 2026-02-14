@@ -106,6 +106,9 @@ retrieval_backend = "disabled"
 retrieval_max_chunks = 3
 retrieval_max_chars = 4000
 retrieval_min_score = 1
+tool_confirmation_mode = "mcp-only"
+require_confirm_tool = []
+approve_tool = []
 
 [profiles.ops]
 provider = "anthropic"
@@ -149,6 +152,39 @@ Behavior:
 - Unreachable servers fail with categorized tooling errors in `mcp discover`.
 - Runtime command execution (`ask`, `chat`, `workflow single`) loads built-in tools plus discovered MCP tools.
 - If an MCP server is unavailable during runtime tool discovery, it is skipped with a warning and execution continues.
+
+## Tool Confirmation Safety Controls
+
+`zavora-cli` uses ADK-Rust tool confirmation policy controls with a safe default:
+- default mode is `mcp-only`: discovered MCP tools require explicit approval
+- required-but-unapproved tools are denied deterministically
+- policy is configurable per profile and per tool
+
+Profile fields:
+
+```toml
+[profiles.default]
+tool_confirmation_mode = "mcp-only" # never | mcp-only | always
+require_confirm_tool = ["release_template"] # optional extra required tools
+approve_tool = ["search_incidents"] # allow specific required tools
+```
+
+CLI overrides:
+
+```bash
+cargo run -- \
+  --tool-confirmation-mode always \
+  --require-confirm-tool release_template \
+  --approve-tool release_template \
+  ask "Create a release checklist"
+```
+
+Inspect active policy with:
+
+```bash
+cargo run -- profiles show
+cargo run -- doctor
+```
 
 ## Retrieval Abstraction
 

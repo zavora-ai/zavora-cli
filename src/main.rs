@@ -1,18 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use adk_rust::ReadonlyContext;
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::{
     Agent, AnthropicClient, AnthropicConfig, Content, DeepSeekClient, DeepSeekConfig, Event,
     ExitLoopTool, FunctionTool, GeminiModel, GroqClient, GroqConfig, InMemoryArtifactService,
     InMemorySessionService, Llm, LlmAgentBuilder, LoopAgent, OllamaConfig, OllamaModel,
-    OpenAIClient, OpenAIConfig, ParallelAgent, Part, Runner, RunnerConfig, SequentialAgent, Tool,
-    Toolset,
+    OpenAIClient, OpenAIConfig, ParallelAgent, Part, RunConfig, Runner, RunnerConfig,
+    SequentialAgent, Tool, Toolset,
 };
+use adk_rust::{ReadonlyContext, ToolConfirmationDecision, ToolConfirmationPolicy};
 use adk_session::{
     CreateRequest, DatabaseSessionService, DeleteRequest, GetRequest, ListRequest, SessionService,
 };
@@ -56,6 +56,14 @@ enum RetrievalBackend {
     Disabled,
     Local,
     Semantic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ToolConfirmationMode {
+    Never,
+    McpOnly,
+    Always,
 }
 
 #[derive(Debug, Subcommand)]
@@ -116,6 +124,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
   zavora-cli mcp list\n\
   zavora-cli mcp discover --server ops-tools\n\
+  zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
@@ -167,6 +176,15 @@ struct Cli {
 
     #[arg(long, env = "ZAVORA_RETRIEVAL_MIN_SCORE")]
     retrieval_min_score: Option<usize>,
+
+    #[arg(long, env = "ZAVORA_TOOL_CONFIRMATION_MODE", value_enum)]
+    tool_confirmation_mode: Option<ToolConfirmationMode>,
+
+    #[arg(long, env = "ZAVORA_REQUIRE_CONFIRM_TOOL")]
+    require_confirm_tool: Vec<String>,
+
+    #[arg(long, env = "ZAVORA_APPROVE_TOOL")]
+    approve_tool: Vec<String>,
 
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
@@ -237,6 +255,9 @@ struct RuntimeConfig {
     retrieval_max_chunks: usize,
     retrieval_max_chars: usize,
     retrieval_min_score: usize,
+    tool_confirmation_mode: ToolConfirmationMode,
+    require_confirm_tool: Vec<String>,
+    approve_tool: Vec<String>,
     mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -262,6 +283,11 @@ struct ProfileConfig {
     retrieval_max_chunks: Option<usize>,
     retrieval_max_chars: Option<usize>,
     retrieval_min_score: Option<usize>,
+    tool_confirmation_mode: Option<ToolConfirmationMode>,
+    #[serde(default)]
+    require_confirm_tool: Vec<String>,
+    #[serde(default)]
+    approve_tool: Vec<String>,
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
 }
@@ -393,9 +419,16 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Ask { prompt } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-            let tools = resolve_runtime_tools(&cfg).await;
-            let agent = build_single_agent_with_tools(model, &tools)?;
-            let runner = build_runner(agent, &cfg).await?;
+            let runtime_tools = resolve_runtime_tools(&cfg).await;
+            let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+            let agent = build_single_agent_with_tools(
+                model,
+                &runtime_tools.tools,
+                tool_confirmation.policy,
+            )?;
+            let runner =
+                build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
+                    .await?;
             let prompt = prompt.join(" ");
             let retrieval = retrieval_service
                 .as_deref()
@@ -404,12 +437,13 @@ async fn run_cli(cli: Cli) -> Result<()> {
             println!("{answer}");
         }
         Commands::Chat => {
-            let tools = resolve_runtime_tools(&cfg).await;
+            let runtime_tools = resolve_runtime_tools(&cfg).await;
+            let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let retrieval = retrieval_service
                 .as_ref()
                 .context("retrieval service should be initialized for chat command")?
                 .clone();
-            run_chat(cfg.clone(), retrieval, tools).await?;
+            run_chat(cfg.clone(), retrieval, runtime_tools, tool_confirmation).await?;
         }
         Commands::Workflow {
             mode,
@@ -418,9 +452,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
         } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, workflow = ?mode, "Using workflow");
-            let tools = resolve_runtime_tools(&cfg).await;
-            let agent = build_workflow_agent(mode, model, max_iterations, &tools)?;
-            let runner = build_runner(agent, &cfg).await?;
+            let runtime_tools = resolve_runtime_tools(&cfg).await;
+            let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+            let agent = build_workflow_agent(
+                mode,
+                model,
+                max_iterations,
+                &runtime_tools.tools,
+                tool_confirmation.policy,
+            )?;
+            let runner =
+                build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
+                    .await?;
             let prompt = prompt.join(" ");
             let retrieval = retrieval_service
                 .as_deref()
@@ -489,6 +532,23 @@ fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
     })
 }
 
+fn merge_unique_names(first: &[String], second: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::<String>::new();
+    let mut merged = Vec::<String>::new();
+
+    for name in first.iter().chain(second.iter()) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            merged.push(trimmed.to_string());
+        }
+    }
+
+    merged
+}
+
 fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeConfig> {
     let selected = cli.profile.trim();
     if selected.is_empty() {
@@ -525,6 +585,11 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
     } else {
         profile.provider.unwrap_or(Provider::Auto)
     };
+
+    let require_confirm_tool =
+        merge_unique_names(&profile.require_confirm_tool, &cli.require_confirm_tool);
+    let approve_tool = merge_unique_names(&profile.approve_tool, &cli.approve_tool);
+    let mcp_servers = profile.mcp_servers.clone();
 
     Ok(RuntimeConfig {
         profile: selected.to_string(),
@@ -577,7 +642,13 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .retrieval_min_score
             .or(profile.retrieval_min_score)
             .unwrap_or(1),
-        mcp_servers: profile.mcp_servers,
+        tool_confirmation_mode: cli
+            .tool_confirmation_mode
+            .or(profile.tool_confirmation_mode)
+            .unwrap_or(ToolConfirmationMode::McpOnly),
+        require_confirm_tool,
+        approve_tool,
+        mcp_servers,
     })
 }
 
@@ -625,6 +696,23 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("Retrieval max chunks: {}", cfg.retrieval_max_chunks);
     println!("Retrieval max chars: {}", cfg.retrieval_max_chars);
     println!("Retrieval min score: {}", cfg.retrieval_min_score);
+    println!("Tool confirmation mode: {:?}", cfg.tool_confirmation_mode);
+    println!(
+        "Tool confirmation required list: {}",
+        if cfg.require_confirm_tool.is_empty() {
+            "<none>".to_string()
+        } else {
+            cfg.require_confirm_tool.join(", ")
+        }
+    );
+    println!(
+        "Tool approval list: {}",
+        if cfg.approve_tool.is_empty() {
+            "<none>".to_string()
+        } else {
+            cfg.approve_tool.join(", ")
+        }
+    );
     println!("MCP servers: {}", cfg.mcp_servers.len());
     Ok(())
 }
@@ -1152,12 +1240,13 @@ fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
 #[cfg(test)]
 fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let tools = build_builtin_tools();
-    build_single_agent_with_tools(model, &tools)
+    build_single_agent_with_tools(model, &tools, ToolConfirmationPolicy::Never)
 }
 
 fn build_single_agent_with_tools(
     model: Arc<dyn Llm>,
     tools: &[Arc<dyn Tool>],
+    tool_confirmation_policy: ToolConfirmationPolicy,
 ) -> Result<Arc<dyn Agent>> {
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -1165,7 +1254,8 @@ fn build_single_agent_with_tools(
             "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
              planning work always prefer release-oriented increments.",
         )
-        .model(model);
+        .model(model)
+        .tool_confirmation_policy(tool_confirmation_policy);
 
     for tool in tools {
         builder = builder.tool(tool.clone());
@@ -1174,11 +1264,118 @@ fn build_single_agent_with_tools(
     Ok(Arc::new(builder.build()?))
 }
 
-async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
+#[derive(Clone)]
+struct ResolvedRuntimeTools {
+    tools: Vec<Arc<dyn Tool>>,
+    mcp_tool_names: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolConfirmationSettings {
+    policy: ToolConfirmationPolicy,
+    run_config: RunConfig,
+}
+
+impl Default for ToolConfirmationSettings {
+    fn default() -> Self {
+        Self {
+            policy: ToolConfirmationPolicy::Never,
+            run_config: RunConfig::default(),
+        }
+    }
+}
+
+fn resolve_tool_confirmation_settings(
+    cfg: &RuntimeConfig,
+    runtime_tools: &ResolvedRuntimeTools,
+) -> ToolConfirmationSettings {
+    let available_tool_names = runtime_tools
+        .tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<BTreeSet<String>>();
+
+    let mut required_tools = BTreeSet::<String>::new();
+    match cfg.tool_confirmation_mode {
+        ToolConfirmationMode::Never => {}
+        ToolConfirmationMode::McpOnly => {
+            required_tools.extend(runtime_tools.mcp_tool_names.iter().cloned());
+        }
+        ToolConfirmationMode::Always => {
+            required_tools.extend(available_tool_names.iter().cloned());
+        }
+    }
+
+    for tool_name in &cfg.require_confirm_tool {
+        let trimmed = tool_name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if available_tool_names.contains(trimmed) {
+            required_tools.insert(trimmed.to_string());
+        } else {
+            tracing::warn!(
+                tool = trimmed,
+                "tool in require_confirm_tool is not present in runtime toolset; ignoring"
+            );
+        }
+    }
+
+    let mut approved_tools = BTreeSet::<String>::new();
+    for tool_name in &cfg.approve_tool {
+        let trimmed = tool_name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if available_tool_names.contains(trimmed) {
+            approved_tools.insert(trimmed.to_string());
+        } else {
+            tracing::warn!(
+                tool = trimmed,
+                "tool in approve_tool is not present in runtime toolset; ignoring"
+            );
+        }
+    }
+
+    let policy = if required_tools.is_empty() {
+        ToolConfirmationPolicy::Never
+    } else {
+        ToolConfirmationPolicy::PerTool(required_tools.clone())
+    };
+
+    let mut run_config = RunConfig::default();
+    for tool_name in &required_tools {
+        let decision = if approved_tools.contains(tool_name) {
+            ToolConfirmationDecision::Approve
+        } else {
+            ToolConfirmationDecision::Deny
+        };
+        run_config
+            .tool_confirmation_decisions
+            .insert(tool_name.clone(), decision);
+    }
+
+    tracing::info!(
+        mode = ?cfg.tool_confirmation_mode,
+        available = available_tool_names.len(),
+        required = required_tools.len(),
+        approved = approved_tools.len(),
+        denied = required_tools.len().saturating_sub(approved_tools.len()),
+        "Resolved tool confirmation settings"
+    );
+
+    ToolConfirmationSettings { policy, run_config }
+}
+
+async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
     let mut tools = build_builtin_tools();
     let built_in_count = tools.len();
     let mut mcp_tools = discover_mcp_tools(cfg).await;
     let mcp_count = mcp_tools.len();
+    let mcp_tool_names = mcp_tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<BTreeSet<String>>();
     tools.append(&mut mcp_tools);
 
     tracing::info!(
@@ -1188,7 +1385,10 @@ async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
         "Resolved runtime toolset"
     );
 
-    tools
+    ResolvedRuntimeTools {
+        tools,
+        mcp_tool_names,
+    }
 }
 
 fn build_workflow_agent(
@@ -1196,9 +1396,12 @@ fn build_workflow_agent(
     model: Arc<dyn Llm>,
     max_iterations: u32,
     tools: &[Arc<dyn Tool>],
+    tool_confirmation_policy: ToolConfirmationPolicy,
 ) -> Result<Arc<dyn Agent>> {
     match mode {
-        WorkflowMode::Single => build_single_agent_with_tools(model, tools),
+        WorkflowMode::Single => {
+            build_single_agent_with_tools(model, tools, tool_confirmation_policy)
+        }
         WorkflowMode::Sequential => build_sequential_agent(model),
         WorkflowMode::Parallel => build_parallel_agent(model),
         WorkflowMode::Loop => build_loop_agent(model, max_iterations),
@@ -1407,14 +1610,23 @@ fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Result<Ar
 }
 
 async fn build_runner(agent: Arc<dyn Agent>, cfg: &RuntimeConfig) -> Result<Runner> {
+    build_runner_with_run_config(agent, cfg, None).await
+}
+
+async fn build_runner_with_run_config(
+    agent: Arc<dyn Agent>,
+    cfg: &RuntimeConfig,
+    run_config: Option<RunConfig>,
+) -> Result<Runner> {
     let session_service = build_session_service(cfg).await?;
-    build_runner_with_session_service(agent, cfg, session_service).await
+    build_runner_with_session_service(agent, cfg, session_service, run_config).await
 }
 
 async fn build_runner_with_session_service(
     agent: Arc<dyn Agent>,
     cfg: &RuntimeConfig,
     session_service: Arc<dyn SessionService>,
+    run_config: Option<RunConfig>,
 ) -> Result<Runner> {
     ensure_session_exists(&session_service, cfg).await?;
     let artifact_service = Arc::new(InMemoryArtifactService::new());
@@ -1426,7 +1638,7 @@ async fn build_runner_with_session_service(
         artifact_service: Some(artifact_service),
         memory_service: None,
         plugin_manager: None,
-        run_config: None,
+        run_config,
         compaction_config: None,
     })
     .context("failed to build ADK runner")
@@ -1435,11 +1647,22 @@ async fn build_runner_with_session_service(
 async fn build_single_runner_for_chat(
     cfg: &RuntimeConfig,
     session_service: Arc<dyn SessionService>,
-    tools: &[Arc<dyn Tool>],
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
 ) -> Result<(Runner, Provider, String)> {
     let (model, resolved_provider, model_name) = resolve_model(cfg)?;
-    let agent = build_single_agent_with_tools(model, tools)?;
-    let runner = build_runner_with_session_service(agent, cfg, session_service).await?;
+    let agent = build_single_agent_with_tools(
+        model,
+        &runtime_tools.tools,
+        tool_confirmation.policy.clone(),
+    )?;
+    let runner = build_runner_with_session_service(
+        agent,
+        cfg,
+        session_service,
+        Some(tool_confirmation.run_config.clone()),
+    )
+    .await?;
     Ok((runner, resolved_provider, model_name))
 }
 
@@ -1740,11 +1963,17 @@ async fn run_prompt_with_retrieval(
 async fn run_chat(
     mut cfg: RuntimeConfig,
     retrieval_service: Arc<dyn RetrievalService>,
-    runtime_tools: Vec<Arc<dyn Tool>>,
+    runtime_tools: ResolvedRuntimeTools,
+    tool_confirmation: ToolConfirmationSettings,
 ) -> Result<()> {
     let session_service = build_session_service(&cfg).await?;
-    let (mut runner, mut resolved_provider, mut model_name) =
-        build_single_runner_for_chat(&cfg, session_service.clone(), &runtime_tools).await?;
+    let (mut runner, mut resolved_provider, mut model_name) = build_single_runner_for_chat(
+        &cfg,
+        session_service.clone(),
+        &runtime_tools,
+        &tool_confirmation,
+    )
+    .await?;
 
     cfg.provider = resolved_provider;
     cfg.model = Some(model_name.clone());
@@ -1795,6 +2024,7 @@ async fn run_chat(
                 &switched_cfg,
                 session_service.clone(),
                 &runtime_tools,
+                &tool_confirmation,
             )
             .await
             {
@@ -1836,6 +2066,7 @@ async fn run_chat(
                 &switched_cfg,
                 session_service.clone(),
                 &runtime_tools,
+                &tool_confirmation,
             )
             .await
             {
@@ -2152,6 +2383,12 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.retrieval_min_score
     );
     println!(
+        "Tool confirmation: mode={:?}, required_tools={}, approved_tools={}",
+        cfg.tool_confirmation_mode,
+        cfg.require_confirm_tool.len(),
+        cfg.approve_tool.len()
+    );
+    println!(
         "MCP servers: configured={}, enabled={}",
         cfg.mcp_servers.len(),
         cfg.mcp_servers
@@ -2433,6 +2670,9 @@ mod tests {
             retrieval_max_chunks: 3,
             retrieval_max_chars: 4000,
             retrieval_min_score: 1,
+            tool_confirmation_mode: ToolConfirmationMode::McpOnly,
+            require_confirm_tool: Vec::new(),
+            approve_tool: Vec::new(),
             mcp_servers: Vec::new(),
         }
     }
@@ -2442,6 +2682,27 @@ mod tests {
             MockLlm::new("mock")
                 .with_response(LlmResponse::new(Content::new("model").with_text(text))),
         )
+    }
+
+    fn noop_tool(name: &str) -> Arc<dyn Tool> {
+        Arc::new(FunctionTool::new(
+            name,
+            "noop tool",
+            |_ctx, _args| async move { Ok(json!({"ok": true})) },
+        ))
+    }
+
+    fn make_runtime_tools(tool_names: &[&str], mcp_tool_names: &[&str]) -> ResolvedRuntimeTools {
+        ResolvedRuntimeTools {
+            tools: tool_names
+                .iter()
+                .map(|name| noop_tool(name))
+                .collect::<Vec<_>>(),
+            mcp_tool_names: mcp_tool_names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<BTreeSet<String>>(),
+        }
     }
 
     fn sqlite_cfg(session_id: &str) -> (tempfile::TempDir, RuntimeConfig) {
@@ -2473,6 +2734,9 @@ mod tests {
             retrieval_max_chunks: None,
             retrieval_max_chars: None,
             retrieval_min_score: None,
+            tool_confirmation_mode: None,
+            require_confirm_tool: Vec::new(),
+            approve_tool: Vec::new(),
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -2545,6 +2809,7 @@ mod tests {
                     mock_model("workflow response"),
                     1,
                     &build_builtin_tools(),
+                    ToolConfirmationPolicy::Never,
                 )
                 .expect("workflow should build"),
                 &cfg,
@@ -2716,6 +2981,9 @@ retrieval_min_score = 2
         assert_eq!(cfg.retrieval_max_chunks, 5);
         assert_eq!(cfg.retrieval_max_chars, 2048);
         assert_eq!(cfg.retrieval_min_score, 2);
+        assert_eq!(cfg.tool_confirmation_mode, ToolConfirmationMode::McpOnly);
+        assert!(cfg.require_confirm_tool.is_empty());
+        assert!(cfg.approve_tool.is_empty());
     }
 
     #[test]
@@ -2728,6 +2996,9 @@ retrieval_min_score = 2
 [profiles.dev]
 provider = "openai"
 model = "gpt-4o-mini"
+tool_confirmation_mode = "always"
+require_confirm_tool = ["release_template"]
+approve_tool = ["release_template"]
 
 [[profiles.dev.mcp_servers]]
 name = "atlas"
@@ -2759,8 +3030,69 @@ enabled = false
             Some("ATLAS_MCP_TOKEN")
         );
         assert_eq!(cfg.mcp_servers[0].tool_allowlist, vec!["search", "lookup"]);
+        assert_eq!(cfg.tool_confirmation_mode, ToolConfirmationMode::Always);
+        assert_eq!(cfg.require_confirm_tool, vec!["release_template"]);
+        assert_eq!(cfg.approve_tool, vec!["release_template"]);
         assert_eq!(cfg.mcp_servers[1].name, "disabled-tooling");
         assert_eq!(cfg.mcp_servers[1].enabled, Some(false));
+    }
+
+    #[test]
+    fn tool_confirmation_defaults_deny_unapproved_mcp_tools() {
+        let cfg = base_cfg();
+        let runtime_tools = make_runtime_tools(
+            &["current_unix_time", "search_incidents"],
+            &["search_incidents"],
+        );
+
+        let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+        assert!(settings.policy.requires_confirmation("search_incidents"));
+        assert!(!settings.policy.requires_confirmation("current_unix_time"));
+        assert_eq!(
+            settings
+                .run_config
+                .tool_confirmation_decisions
+                .get("search_incidents"),
+            Some(&ToolConfirmationDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_approve_list_overrides_default_deny() {
+        let mut cfg = base_cfg();
+        cfg.approve_tool = vec!["search_incidents".to_string()];
+        let runtime_tools = make_runtime_tools(
+            &["current_unix_time", "search_incidents"],
+            &["search_incidents"],
+        );
+
+        let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+        assert_eq!(
+            settings
+                .run_config
+                .tool_confirmation_decisions
+                .get("search_incidents"),
+            Some(&ToolConfirmationDecision::Approve)
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_custom_required_tools_enforced() {
+        let mut cfg = base_cfg();
+        cfg.tool_confirmation_mode = ToolConfirmationMode::Never;
+        cfg.require_confirm_tool = vec!["release_template".to_string()];
+        let runtime_tools = make_runtime_tools(&["release_template", "current_unix_time"], &[]);
+
+        let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+        assert!(settings.policy.requires_confirmation("release_template"));
+        assert!(!settings.policy.requires_confirmation("current_unix_time"));
+        assert_eq!(
+            settings
+                .run_config
+                .tool_confirmation_decisions
+                .get("release_template"),
+            Some(&ToolConfirmationDecision::Deny)
+        );
     }
 
     #[test]
@@ -3146,6 +3478,7 @@ provider = "not-a-provider"
             build_single_agent(mock_model("first answer")).expect("agent should build"),
             &cfg,
             session_service.clone(),
+            None,
         )
         .await
         .expect("runner should build");
@@ -3157,6 +3490,7 @@ provider = "not-a-provider"
             build_single_agent(mock_model("second answer")).expect("agent should build"),
             &cfg,
             session_service.clone(),
+            None,
         )
         .await
         .expect("second runner should build");
@@ -3187,11 +3521,20 @@ provider = "not-a-provider"
         cfg.provider = Provider::Ollama;
         cfg.model = Some("llama3.2".to_string());
         let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runtime_tools = ResolvedRuntimeTools {
+            tools: build_builtin_tools(),
+            mcp_tool_names: BTreeSet::new(),
+        };
+        let tool_confirmation = ToolConfirmationSettings::default();
 
-        let (_runner, provider, model_name) =
-            build_single_runner_for_chat(&cfg, session_service.clone(), &build_builtin_tools())
-                .await
-                .expect("chat runner should build for ollama");
+        let (_runner, provider, model_name) = build_single_runner_for_chat(
+            &cfg,
+            session_service.clone(),
+            &runtime_tools,
+            &tool_confirmation,
+        )
+        .await
+        .expect("chat runner should build for ollama");
 
         assert_eq!(provider, Provider::Ollama);
         assert_eq!(model_name, "llama3.2");

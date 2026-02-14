@@ -27,6 +27,9 @@ Fields:
 - `timeout_secs` (optional, default `15`): connection/discovery timeout.
 - `auth_bearer_env` (optional): environment variable name that stores bearer token.
 - `tool_allowlist` (optional): if set, only listed tool names are exposed.
+- `tool_confirmation_mode` (profile-level, optional): `never`, `mcp-only` (default), or `always`.
+- `require_confirm_tool` (profile-level, optional): extra tool names that require confirmation.
+- `approve_tool` (profile-level, optional): required tools that are auto-approved.
 
 ## Commands
 
@@ -55,11 +58,17 @@ Tool registration for runtime execution:
 2. Discover tools from enabled MCP servers.
 3. Merge both sets into one runtime toolset.
 4. Attach runtime toolset to single-agent execution paths.
+5. Resolve tool confirmation policy and per-tool approve/deny decisions.
 
 Current integration points:
 - `ask`
 - `chat` (including `/provider` and `/model` runner rebuilds)
 - `workflow single`
+
+Tool confirmation behavior:
+- default mode is `mcp-only`, so MCP tools require confirmation.
+- required tools without explicit approval are denied.
+- explicit approvals can be configured in profile (`approve_tool`) or CLI (`--approve-tool`).
 
 If MCP discovery fails during runtime initialization:
 - that server is skipped.
@@ -76,4 +85,3 @@ Failure cases covered:
 Error classification:
 - MCP failures are categorized as `TOOLING` by CLI taxonomy.
 - hints direct operators to check tool config and rerun with `RUST_LOG=info`.
-
