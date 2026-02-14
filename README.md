@@ -133,6 +133,7 @@ Provider/model switching behavior:
 - Today: switch provider/model per invocation with `--provider` and `--model`.
 - Chat supports in-session switching via `/provider <name>`, `/model <id>`, and `/status`.
 - Model/provider compatibility checks are enforced before switching.
+- If a switch fails validation or runner rebuild, the previous provider/model and session remain active.
 
 ## Release Model
 

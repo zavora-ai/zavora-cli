@@ -2145,4 +2145,20 @@ provider = "not-a-provider"
             "expected in-memory session history to persist across runner rebuilds"
         );
     }
+
+    #[tokio::test]
+    async fn chat_switch_path_builds_runner_for_ollama_without_losing_session_service() {
+        let mut cfg = base_cfg();
+        cfg.provider = Provider::Ollama;
+        cfg.model = Some("llama3.2".to_string());
+        let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+
+        let (_runner, provider, model_name) =
+            build_single_runner_for_chat(&cfg, session_service.clone())
+                .await
+                .expect("chat runner should build for ollama");
+
+        assert_eq!(provider, Provider::Ollama);
+        assert_eq!(model_name, "llama3.2");
+    }
 }
