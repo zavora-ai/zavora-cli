@@ -602,6 +602,136 @@ fn sqlite_path_from_url(db_url: &str) -> Option<PathBuf> {
     Some(Path::new(path_without_params).to_path_buf())
 }
 
+const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
+
+#[derive(Default, Debug)]
+struct AuthorTextTracker {
+    latest_final_text: Option<String>,
+    latest_final_author: Option<String>,
+    last_textful_author: Option<String>,
+    by_author: HashMap<String, String>,
+}
+
+impl AuthorTextTracker {
+    fn ingest_parts(&mut self, author: &str, text: &str, partial: bool, is_final: bool) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+
+        self.last_textful_author = Some(author.to_string());
+        let buffer = self.by_author.entry(author.to_string()).or_default();
+        let delta = ingest_author_text(buffer, text, partial, is_final);
+
+        if is_final && !text.trim().is_empty() {
+            self.latest_final_text = Some(text.to_string());
+            self.latest_final_author = Some(author.to_string());
+        }
+
+        delta
+    }
+
+    fn resolve_text(&self) -> Option<String> {
+        if let Some(final_text) = &self.latest_final_text {
+            return Some(final_text.clone());
+        }
+
+        let author = self.last_textful_author.as_ref()?;
+        let text = self.by_author.get(author)?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        Some(trimmed.to_string())
+    }
+}
+
+fn ingest_author_text(buffer: &mut String, text: &str, partial: bool, is_final: bool) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    if partial {
+        buffer.push_str(text);
+        return text.to_string();
+    }
+
+    if buffer.is_empty() {
+        buffer.push_str(text);
+        return text.to_string();
+    }
+
+    if text == buffer.as_str() {
+        return String::new();
+    }
+
+    if text.starts_with(buffer.as_str()) {
+        let delta = text[buffer.len()..].to_string();
+        *buffer = text.to_string();
+        return delta;
+    }
+
+    // Final snapshots are authoritative. Keep them as state but do not re-print
+    // to avoid duplication after partial streaming has already emitted text.
+    if is_final {
+        *buffer = text.to_string();
+        return String::new();
+    }
+
+    let overlap = suffix_prefix_overlap(buffer, text);
+    if overlap >= text.len() {
+        return String::new();
+    }
+
+    let delta = text[overlap..].to_string();
+    buffer.push_str(&delta);
+    delta
+}
+
+fn suffix_prefix_overlap(existing: &str, incoming: &str) -> usize {
+    let max_len = existing.len().min(incoming.len());
+    let mut boundaries = incoming
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .collect::<Vec<usize>>();
+    boundaries.push(incoming.len());
+
+    for boundary in boundaries.into_iter().rev() {
+        if boundary == 0 || boundary > max_len {
+            continue;
+        }
+        if existing.ends_with(&incoming[..boundary]) {
+            return boundary;
+        }
+    }
+
+    0
+}
+
+fn final_stream_suffix(emitted: &str, final_text: &str) -> Option<String> {
+    if final_text.trim().is_empty() {
+        return None;
+    }
+
+    if emitted.is_empty() {
+        return Some(final_text.to_string());
+    }
+
+    if final_text == emitted || final_text.trim() == emitted.trim() {
+        return None;
+    }
+
+    if final_text.starts_with(emitted) {
+        let suffix = &final_text[emitted.len()..];
+        if suffix.is_empty() {
+            return None;
+        }
+        return Some(suffix.to_string());
+    }
+
+    Some(format!("\n{final_text}"))
+}
+
 async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Result<String> {
     let mut stream = runner
         .run(
@@ -612,9 +742,7 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
         .await
         .context("failed to start runner stream")?;
 
-    let mut latest_final_text: Option<String> = None;
-    let mut last_non_user_author: Option<String> = None;
-    let mut streamed_text_by_author: HashMap<String, String> = HashMap::new();
+    let mut tracker = AuthorTextTracker::default();
 
     while let Some(event_result) = stream.next().await {
         let event = event_result.context("runner returned event error")?;
@@ -628,37 +756,21 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
             "received runner event"
         );
 
-        if event.author != "user" {
-            last_non_user_author = Some(event.author.clone());
-
-            if !text.is_empty() {
-                streamed_text_by_author
-                    .entry(event.author.clone())
-                    .or_default()
-                    .push_str(&text);
-            }
-
-            if event.is_final_response() && !text.trim().is_empty() {
-                latest_final_text = Some(text);
-            }
+        if event.author == "user" {
+            continue;
         }
+
+        let _ = tracker.ingest_parts(
+            &event.author,
+            &text,
+            event.llm_response.partial,
+            event.is_final_response(),
+        );
     }
 
-    if let Some(text) = latest_final_text {
-        return Ok(text);
-    }
-
-    if let Some(author) = last_non_user_author {
-        let streamed = streamed_text_by_author
-            .get(&author)
-            .map(|s| s.trim())
-            .unwrap_or_default();
-        if !streamed.is_empty() {
-            return Ok(streamed.to_string());
-        }
-    }
-
-    Ok("No textual response produced by the agent.".to_string())
+    Ok(tracker
+        .resolve_text()
+        .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string()))
 }
 
 async fn run_chat(runner: &Runner, cfg: &RuntimeConfig) -> Result<()> {
@@ -697,9 +809,8 @@ async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str
         .await
         .context("failed to start runner stream")?;
 
-    let mut latest_final_text: Option<String> = None;
-    let mut last_non_user_author: Option<String> = None;
-    let mut streamed_text_by_author: HashMap<String, String> = HashMap::new();
+    let mut tracker = AuthorTextTracker::default();
+    let mut emitted_text_by_author: HashMap<String, String> = HashMap::new();
     let mut printed_any_output = false;
 
     while let Some(event_result) = stream.next().await {
@@ -710,58 +821,46 @@ async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str
             continue;
         }
 
-        last_non_user_author = Some(event.author.clone());
-        let buffer = streamed_text_by_author
-            .entry(event.author.clone())
-            .or_default();
-
-        let mut delta = String::new();
-        if event.llm_response.partial {
-            if !text.is_empty() {
-                buffer.push_str(&text);
-                delta = text.clone();
-            }
-        } else if !text.is_empty() {
-            if buffer.is_empty() {
-                buffer.push_str(&text);
-                delta = text.clone();
-            } else if text == *buffer {
-            } else if text.starts_with(buffer.as_str()) {
-                delta = text[buffer.len()..].to_string();
-                *buffer = text.clone();
-            } else if buffer.ends_with(&text) {
-            } else {
-                *buffer = text.clone();
-            }
-        }
-
+        let delta = tracker.ingest_parts(
+            &event.author,
+            &text,
+            event.llm_response.partial,
+            event.is_final_response(),
+        );
         if !delta.is_empty() {
             print!("{delta}");
             io::stdout().flush().context("failed to flush stdout")?;
+            emitted_text_by_author
+                .entry(event.author.clone())
+                .or_default()
+                .push_str(&delta);
             printed_any_output = true;
-        }
-
-        if event.is_final_response() && !text.trim().is_empty() {
-            latest_final_text = Some(text);
         }
     }
 
     if printed_any_output {
+        if let (Some(final_text), Some(final_author)) = (
+            tracker.latest_final_text.as_deref(),
+            tracker.latest_final_author.as_deref(),
+        ) {
+            let emitted = emitted_text_by_author
+                .get(final_author)
+                .map(String::as_str)
+                .unwrap_or_default();
+
+            if let Some(suffix) = final_stream_suffix(emitted, final_text) {
+                print!("{suffix}");
+                io::stdout().flush().context("failed to flush stdout")?;
+            }
+        }
+
         println!();
         return Ok(());
     }
 
-    let fallback = if let Some(text) = latest_final_text {
-        text
-    } else if let Some(author) = last_non_user_author {
-        streamed_text_by_author
-            .get(&author)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "No textual response produced by the agent.".to_string())
-    } else {
-        "No textual response produced by the agent.".to_string()
-    };
+    let fallback = tracker
+        .resolve_text()
+        .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string());
 
     println!("{fallback}");
     Ok(())
@@ -1167,6 +1266,57 @@ mod tests {
         assert!(
             session.events().len() >= 4,
             "expected persisted event history across runs"
+        );
+    }
+
+    #[test]
+    fn ingest_author_text_handles_partial_then_final_snapshot() {
+        let mut buffer = String::new();
+
+        let d1 = ingest_author_text(&mut buffer, "Hello", true, false);
+        let d2 = ingest_author_text(&mut buffer, " world", true, false);
+        let d3 = ingest_author_text(&mut buffer, "Hello world", false, true);
+
+        assert_eq!(d1, "Hello");
+        assert_eq!(d2, " world");
+        assert!(d3.is_empty(), "final snapshot should not duplicate output");
+        assert_eq!(buffer, "Hello world");
+    }
+
+    #[test]
+    fn ingest_author_text_handles_non_partial_incremental_chunks() {
+        let mut buffer = String::new();
+
+        let d1 = ingest_author_text(&mut buffer, "Hello", false, false);
+        let d2 = ingest_author_text(&mut buffer, " world", false, false);
+        let d3 = ingest_author_text(&mut buffer, "Hello world", false, true);
+
+        assert_eq!(d1, "Hello");
+        assert_eq!(d2, " world");
+        assert!(d3.is_empty(), "final snapshot should be deduplicated");
+        assert_eq!(buffer, "Hello world");
+    }
+
+    #[test]
+    fn tracker_falls_back_to_last_textful_author() {
+        let mut tracker = AuthorTextTracker::default();
+
+        let _ = tracker.ingest_parts("assistant", "hello", false, false);
+        let _ = tracker.ingest_parts("tool", "", false, true);
+
+        assert_eq!(tracker.resolve_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn final_stream_suffix_emits_only_missing_tail() {
+        assert_eq!(
+            final_stream_suffix("Hello", "Hello world").as_deref(),
+            Some(" world")
+        );
+        assert_eq!(final_stream_suffix("Hello world", "Hello world"), None);
+        assert_eq!(
+            final_stream_suffix("", "Hello world").as_deref(),
+            Some("Hello world")
         );
     }
 }
