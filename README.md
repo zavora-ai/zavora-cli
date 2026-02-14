@@ -131,7 +131,8 @@ cargo run -- \
 
 Provider/model switching behavior:
 - Today: switch provider/model per invocation with `--provider` and `--model`.
-- Planned in Sprint 2 (`v0.2.0`): in-session `/provider` and `/model` switching within the active profile.
+- Chat now supports in-session provider switching via `/provider <name>` and `/status`.
+- Planned in Sprint 2 (`v0.2.0`): in-session `/model` switching within the active profile.
 
 ## Release Model
 

@@ -311,11 +311,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             println!("{answer}");
         }
         Commands::Chat => {
-            let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
-            tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-            let agent = build_single_agent(model)?;
-            let runner = build_runner(agent, &cfg).await?;
-            run_chat(&runner, &cfg).await?;
+            run_chat(cfg.clone()).await?;
         }
         Commands::Workflow {
             mode,
@@ -768,8 +764,15 @@ fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Result<Ar
 
 async fn build_runner(agent: Arc<dyn Agent>, cfg: &RuntimeConfig) -> Result<Runner> {
     let session_service = build_session_service(cfg).await?;
-    ensure_session_exists(&session_service, cfg).await?;
+    build_runner_with_session_service(agent, cfg, session_service).await
+}
 
+async fn build_runner_with_session_service(
+    agent: Arc<dyn Agent>,
+    cfg: &RuntimeConfig,
+    session_service: Arc<dyn SessionService>,
+) -> Result<Runner> {
+    ensure_session_exists(&session_service, cfg).await?;
     let artifact_service = Arc::new(InMemoryArtifactService::new());
 
     Runner::new(RunnerConfig {
@@ -783,6 +786,16 @@ async fn build_runner(agent: Arc<dyn Agent>, cfg: &RuntimeConfig) -> Result<Runn
         compaction_config: None,
     })
     .context("failed to build ADK runner")
+}
+
+async fn build_single_runner_for_chat(
+    cfg: &RuntimeConfig,
+    session_service: Arc<dyn SessionService>,
+) -> Result<(Runner, Provider, String)> {
+    let (model, resolved_provider, model_name) = resolve_model(cfg)?;
+    let agent = build_single_agent(model)?;
+    let runner = build_runner_with_session_service(agent, cfg, session_service).await?;
+    Ok((runner, resolved_provider, model_name))
 }
 
 async fn build_session_service(cfg: &RuntimeConfig) -> Result<Arc<dyn SessionService>> {
@@ -1064,8 +1077,18 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
         .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string()))
 }
 
-async fn run_chat(runner: &Runner, cfg: &RuntimeConfig) -> Result<()> {
-    println!("Interactive mode started. Type /exit to quit.");
+async fn run_chat(mut cfg: RuntimeConfig) -> Result<()> {
+    let session_service = build_session_service(&cfg).await?;
+    let (mut runner, mut resolved_provider, mut model_name) =
+        build_single_runner_for_chat(&cfg, session_service.clone()).await?;
+
+    cfg.provider = resolved_provider;
+    cfg.model = Some(model_name.clone());
+
+    tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
+    println!(
+        "Interactive mode started. Type /exit to quit. Use /provider <name> to switch provider."
+    );
     let stdin = io::stdin();
     let mut line = String::new();
 
@@ -1084,10 +1107,65 @@ async fn run_chat(runner: &Runner, cfg: &RuntimeConfig) -> Result<()> {
             continue;
         }
 
-        run_prompt_streaming(runner, cfg, input).await?;
+        if input.eq_ignore_ascii_case("/status") {
+            println!(
+                "profile={} provider={:?} model={} session_id={}",
+                cfg.profile, resolved_provider, model_name, cfg.session_id
+            );
+            continue;
+        }
+
+        if let Some(rest) = input.strip_prefix("/provider") {
+            let provider_name = rest.trim();
+            if provider_name.is_empty() {
+                println!("Usage: /provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>");
+                continue;
+            }
+
+            let new_provider = parse_provider_name(provider_name)?;
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.provider = new_provider;
+            switched_cfg.model = None;
+
+            match build_single_runner_for_chat(&switched_cfg, session_service.clone()).await {
+                Ok((new_runner, new_resolved_provider, new_model_name)) => {
+                    runner = new_runner;
+                    resolved_provider = new_resolved_provider;
+                    model_name = new_model_name;
+                    switched_cfg.provider = new_resolved_provider;
+                    switched_cfg.model = Some(model_name.clone());
+                    cfg = switched_cfg;
+                    tracing::info!(provider = ?resolved_provider, model = %model_name, "Switched model provider");
+                    println!(
+                        "Switched provider to {:?} (model={}). Session continuity preserved.",
+                        resolved_provider, model_name
+                    );
+                }
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err));
+                    println!(
+                        "Provider remains {:?} (model={}).",
+                        resolved_provider, model_name
+                    );
+                }
+            }
+            continue;
+        }
+
+        run_prompt_streaming(&runner, &cfg, input).await?;
     }
 
     Ok(())
+}
+
+fn parse_provider_name(value: &str) -> Result<Provider> {
+    Provider::from_str(value, true)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "invalid provider '{}'. Supported values: auto, gemini, openai, anthropic, deepseek, groq, ollama",
+                value
+            )
+        })
 }
 
 async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Result<()> {
@@ -1867,6 +1945,20 @@ provider = "not-a-provider"
         assert!(msg.contains("invalid profile configuration"));
     }
 
+    #[test]
+    fn provider_name_parser_accepts_known_values_and_rejects_unknown() {
+        assert_eq!(
+            parse_provider_name("openai").expect("openai should parse"),
+            Provider::Openai
+        );
+        let err = parse_provider_name("unknown-provider").expect_err("invalid provider must fail");
+        assert!(
+            err.to_string().contains(
+                "Supported values: auto, gemini, openai, anthropic, deepseek, groq, ollama"
+            )
+        );
+    }
+
     #[tokio::test]
     async fn sessions_show_missing_session_returns_session_category_error() {
         let cfg = base_cfg();
@@ -1932,5 +2024,49 @@ provider = "not-a-provider"
             .expect("forced prune should pass");
         let sessions_after_force = list_session_ids(&cfg).await;
         assert_eq!(sessions_after_force.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_memory_session_service_preserves_history_across_runner_rebuilds() {
+        let cfg = base_cfg();
+        let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+
+        let runner_one = build_runner_with_session_service(
+            build_single_agent(mock_model("first answer")).expect("agent should build"),
+            &cfg,
+            session_service.clone(),
+        )
+        .await
+        .expect("runner should build");
+        run_prompt(&runner_one, &cfg, "first prompt")
+            .await
+            .expect("first prompt should run");
+
+        let runner_two = build_runner_with_session_service(
+            build_single_agent(mock_model("second answer")).expect("agent should build"),
+            &cfg,
+            session_service.clone(),
+        )
+        .await
+        .expect("second runner should build");
+        run_prompt(&runner_two, &cfg, "second prompt")
+            .await
+            .expect("second prompt should run");
+
+        let session = session_service
+            .get(GetRequest {
+                app_name: cfg.app_name.clone(),
+                user_id: cfg.user_id.clone(),
+                session_id: cfg.session_id.clone(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .expect("session should exist");
+
+        assert!(
+            session.events().len() >= 4,
+            "expected in-memory session history to persist across runner rebuilds"
+        );
     }
 }
