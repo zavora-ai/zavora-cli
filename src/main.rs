@@ -145,6 +145,12 @@ struct Cli {
     #[arg(long, env = "ZAVORA_RETRIEVAL_MAX_CHUNKS")]
     retrieval_max_chunks: Option<usize>,
 
+    #[arg(long, env = "ZAVORA_RETRIEVAL_MAX_CHARS")]
+    retrieval_max_chars: Option<usize>,
+
+    #[arg(long, env = "ZAVORA_RETRIEVAL_MIN_SCORE")]
+    retrieval_min_score: Option<usize>,
+
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
 
@@ -207,6 +213,8 @@ struct RuntimeConfig {
     retrieval_backend: RetrievalBackend,
     retrieval_doc_path: Option<String>,
     retrieval_max_chunks: usize,
+    retrieval_max_chars: usize,
+    retrieval_min_score: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -229,6 +237,8 @@ struct ProfileConfig {
     retrieval_backend: Option<RetrievalBackend>,
     retrieval_doc_path: Option<String>,
     retrieval_max_chunks: Option<usize>,
+    retrieval_max_chars: Option<usize>,
+    retrieval_min_score: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +336,8 @@ async fn run_cli(cli: Cli) -> Result<()> {
     tracing::info!(
         backend = retrieval_service.backend_name(),
         max_chunks = cfg.retrieval_max_chunks,
+        max_chars = cfg.retrieval_max_chars,
+        min_score = cfg.retrieval_min_score,
         "Using retrieval backend"
     );
 
@@ -494,6 +506,15 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .or(profile.retrieval_max_chunks)
             .unwrap_or(3)
             .max(1),
+        retrieval_max_chars: cli
+            .retrieval_max_chars
+            .or(profile.retrieval_max_chars)
+            .unwrap_or(4000)
+            .max(256),
+        retrieval_min_score: cli
+            .retrieval_min_score
+            .or(profile.retrieval_min_score)
+            .unwrap_or(1),
     })
 }
 
@@ -539,6 +560,8 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
             .unwrap_or("<not configured>")
     );
     println!("Retrieval max chunks: {}", cfg.retrieval_max_chunks);
+    println!("Retrieval max chars: {}", cfg.retrieval_max_chars);
+    println!("Retrieval min score: {}", cfg.retrieval_min_score);
     Ok(())
 }
 
@@ -727,19 +750,60 @@ fn build_retrieval_service(cfg: &RuntimeConfig) -> Result<Arc<dyn RetrievalServi
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RetrievalPolicy {
+    max_chunks: usize,
+    max_chars: usize,
+    min_score: usize,
+}
+
 fn augment_prompt_with_retrieval(
     retrieval: &dyn RetrievalService,
     prompt: &str,
-    max_chunks: usize,
+    policy: RetrievalPolicy,
 ) -> Result<String> {
-    let chunks = retrieval.retrieve(prompt, max_chunks)?;
-    if chunks.is_empty() {
+    let chunks = retrieval.retrieve(prompt, policy.max_chunks)?;
+    let mut used_chars = 0usize;
+    let mut filtered = Vec::new();
+
+    for chunk in chunks {
+        if chunk.score < policy.min_score {
+            continue;
+        }
+
+        if used_chars >= policy.max_chars {
+            break;
+        }
+
+        let remaining = policy.max_chars - used_chars;
+        if remaining == 0 {
+            break;
+        }
+
+        let mut text = chunk.text;
+        if text.len() > remaining {
+            text.truncate(remaining);
+        }
+
+        if text.trim().is_empty() {
+            continue;
+        }
+
+        used_chars += text.len();
+        filtered.push(RetrievedChunk {
+            source: chunk.source,
+            text,
+            score: chunk.score,
+        });
+    }
+
+    if filtered.is_empty() {
         return Ok(prompt.to_string());
     }
 
     let mut out = String::new();
     out.push_str("Retrieved context (use if relevant):\n");
-    for (index, chunk) in chunks.iter().enumerate() {
+    for (index, chunk) in filtered.iter().enumerate() {
         out.push_str(&format!(
             "[{}] {} (score={})\n{}\n",
             index + 1,
@@ -1350,7 +1414,12 @@ async fn run_prompt_with_retrieval(
     prompt: &str,
     retrieval: &dyn RetrievalService,
 ) -> Result<String> {
-    let enriched = augment_prompt_with_retrieval(retrieval, prompt, cfg.retrieval_max_chunks)?;
+    let policy = RetrievalPolicy {
+        max_chunks: cfg.retrieval_max_chunks,
+        max_chars: cfg.retrieval_max_chars,
+        min_score: cfg.retrieval_min_score,
+    };
+    let enriched = augment_prompt_with_retrieval(retrieval, prompt, policy)?;
     run_prompt(runner, cfg, &enriched).await
 }
 
@@ -1557,7 +1626,12 @@ async fn run_prompt_streaming_with_retrieval(
     prompt: &str,
     retrieval: &dyn RetrievalService,
 ) -> Result<()> {
-    let enriched = augment_prompt_with_retrieval(retrieval, prompt, cfg.retrieval_max_chunks)?;
+    let policy = RetrievalPolicy {
+        max_chunks: cfg.retrieval_max_chunks,
+        max_chars: cfg.retrieval_max_chars,
+        min_score: cfg.retrieval_min_score,
+    };
+    let enriched = augment_prompt_with_retrieval(retrieval, prompt, policy)?;
     run_prompt_streaming(runner, cfg, &enriched).await
 }
 
@@ -1741,12 +1815,14 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.session_backend, cfg.session_id, cfg.app_name, cfg.user_id
     );
     println!(
-        "Retrieval: backend={:?}, doc_path={}, max_chunks={}",
+        "Retrieval: backend={:?}, doc_path={}, max_chunks={}, max_chars={}, min_score={}",
         cfg.retrieval_backend,
         cfg.retrieval_doc_path
             .as_deref()
             .unwrap_or("<not configured>"),
-        cfg.retrieval_max_chunks
+        cfg.retrieval_max_chunks,
+        cfg.retrieval_max_chars,
+        cfg.retrieval_min_score
     );
 
     if matches!(cfg.session_backend, SessionBackend::Sqlite) {
@@ -2020,6 +2096,8 @@ mod tests {
             retrieval_backend: RetrievalBackend::Disabled,
             retrieval_doc_path: None,
             retrieval_max_chunks: 3,
+            retrieval_max_chars: 4000,
+            retrieval_min_score: 1,
         }
     }
 
@@ -2057,6 +2135,8 @@ mod tests {
             retrieval_backend: None,
             retrieval_doc_path: None,
             retrieval_max_chunks: None,
+            retrieval_max_chars: None,
+            retrieval_min_score: None,
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -2273,6 +2353,8 @@ session_id = "dev-session"
 retrieval_backend = "local"
 retrieval_doc_path = "docs/knowledge.md"
 retrieval_max_chunks = 5
+retrieval_max_chars = 2048
+retrieval_min_score = 2
 "#,
         )
         .expect("config should write");
@@ -2291,6 +2373,8 @@ retrieval_max_chunks = 5
         assert_eq!(cfg.retrieval_backend, RetrievalBackend::Local);
         assert_eq!(cfg.retrieval_doc_path.as_deref(), Some("docs/knowledge.md"));
         assert_eq!(cfg.retrieval_max_chunks, 5);
+        assert_eq!(cfg.retrieval_max_chars, 2048);
+        assert_eq!(cfg.retrieval_min_score, 2);
     }
 
     #[test]
@@ -2350,8 +2434,16 @@ provider = "not-a-provider"
     fn augment_prompt_with_retrieval_leaves_prompt_unchanged_when_disabled() {
         let retrieval = DisabledRetrievalService;
         let prompt = "Plan release milestones";
-        let out = augment_prompt_with_retrieval(&retrieval, prompt, 3)
-            .expect("prompt augmentation should pass");
+        let out = augment_prompt_with_retrieval(
+            &retrieval,
+            prompt,
+            RetrievalPolicy {
+                max_chunks: 3,
+                max_chars: 4000,
+                min_score: 1,
+            },
+        )
+        .expect("prompt augmentation should pass");
         assert_eq!(out, prompt);
     }
 
@@ -2386,6 +2478,44 @@ provider = "not-a-provider"
         assert!(
             err.to_string()
                 .contains("retrieval backend 'local' requires")
+        );
+    }
+
+    #[test]
+    fn retrieval_policy_enforces_context_budget_and_score_threshold() {
+        let retrieval = LocalFileRetrievalService {
+            chunks: vec![
+                RetrievedChunk {
+                    source: "test:1".to_string(),
+                    text: "alpha beta gamma delta".to_string(),
+                    score: 10,
+                },
+                RetrievedChunk {
+                    source: "test:2".to_string(),
+                    text: "small".to_string(),
+                    score: 1,
+                },
+            ],
+        };
+
+        let out = augment_prompt_with_retrieval(
+            &retrieval,
+            "alpha",
+            RetrievalPolicy {
+                max_chunks: 3,
+                max_chars: 5,
+                min_score: 2,
+            },
+        )
+        .expect("augmentation should pass");
+
+        assert!(
+            out.contains("alpha"),
+            "expected retained high-score context"
+        );
+        assert!(
+            !out.contains("small"),
+            "expected low-score chunk to be filtered"
         );
     }
 

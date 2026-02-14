@@ -57,11 +57,15 @@ CLI/env:
 - `--retrieval-backend` / `ZAVORA_RETRIEVAL_BACKEND` (`disabled|local|semantic`)
 - `--retrieval-doc-path` / `ZAVORA_RETRIEVAL_DOC_PATH`
 - `--retrieval-max-chunks` / `ZAVORA_RETRIEVAL_MAX_CHUNKS`
+- `--retrieval-max-chars` / `ZAVORA_RETRIEVAL_MAX_CHARS`
+- `--retrieval-min-score` / `ZAVORA_RETRIEVAL_MIN_SCORE`
 
 Profile fields:
 - `retrieval_backend`
 - `retrieval_doc_path`
 - `retrieval_max_chunks`
+- `retrieval_max_chars`
+- `retrieval_min_score`
 
 Feature flag:
 - `semantic-search` enables `semantic` backend support
@@ -72,3 +76,7 @@ Feature flag:
 - If retrieval backend is `local` without a doc path, command fails with actionable diagnostics.
 - If retrieval backend is `semantic` without feature `semantic-search`, command fails with actionable diagnostics.
 - If retrieval returns no matches, prompt is unchanged.
+- Retrieved context is bounded by policy:
+  - top `retrieval_max_chunks`
+  - minimum ranking score `retrieval_min_score`
+  - total injected character budget `retrieval_max_chars`

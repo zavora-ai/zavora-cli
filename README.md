@@ -102,12 +102,21 @@ session_db_url = "sqlite://.zavora/sessions.db"
 app_name = "zavora-cli"
 user_id = "local-user"
 session_id = "default-session"
+retrieval_backend = "disabled"
+retrieval_max_chunks = 3
+retrieval_max_chars = 4000
+retrieval_min_score = 1
 
 [profiles.ops]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/ops-sessions.db"
+retrieval_backend = "local"
+retrieval_doc_path = "docs/ops-knowledge.md"
+retrieval_max_chunks = 4
+retrieval_max_chars = 3000
+retrieval_min_score = 2
 ```
 
 Inspect profile state:
@@ -132,6 +141,8 @@ cargo run -- \
   --retrieval-backend local \
   --retrieval-doc-path ./docs/knowledge.md \
   --retrieval-max-chunks 3 \
+  --retrieval-max-chars 3000 \
+  --retrieval-min-score 1 \
   ask "Create a release plan from our internal standards"
 ```
 
