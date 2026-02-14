@@ -36,6 +36,12 @@ This plan combines the initial release-train roadmap with an end-to-end ADK-Rust
 - Docs and changelog updated
 - Sprint issues closed and milestone reviewed
 
+## Sprint 0 Deliverables
+
+- `/Users/jameskaranja/Developer/projects/zavora-cli/docs/ADK_CAPABILITY_MATRIX.md`
+- `/Users/jameskaranja/Developer/projects/zavora-cli/docs/ADK_TARGET_ARCHITECTURE.md`
+- `/Users/jameskaranja/Developer/projects/zavora-cli/docs/SPRINT_BACKLOG_RISK_REGISTER.md`
+
 ## Risk Controls
 
 - Keep optional heavy features behind flags

@@ -94,3 +94,4 @@ This repo follows a release train model with SemVer tags:
 
 See `docs/AGILE_RELEASE_CYCLE.md` for the full process.
 See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint roadmap and ticket breakdown.
+See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `docs/SPRINT_BACKLOG_RISK_REGISTER.md` for Sprint 0 execution artifacts.
