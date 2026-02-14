@@ -15,10 +15,12 @@ use adk_session::{
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::level_filters::LevelFilter;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Provider {
     Auto,
     Gemini,
@@ -37,10 +39,19 @@ enum WorkflowMode {
     Loop,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum SessionBackend {
     Memory,
     Sqlite,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCommands {
+    #[command(about = "List configured profiles and highlight the active profile")]
+    List,
+    #[command(about = "Show the active profile's resolved runtime settings")]
+    Show,
 }
 
 #[derive(Debug, Subcommand)]
@@ -96,24 +107,26 @@ struct Cli {
     #[arg(long, env = "ZAVORA_MODEL")]
     model: Option<String>,
 
-    #[arg(long, env = "ZAVORA_APP_NAME", default_value = "zavora-cli")]
-    app_name: String,
+    #[arg(long, env = "ZAVORA_PROFILE", default_value = "default")]
+    profile: String,
 
-    #[arg(long, env = "ZAVORA_USER_ID", default_value = "local-user")]
-    user_id: String,
+    #[arg(long, env = "ZAVORA_CONFIG", default_value = ".zavora/config.toml")]
+    config_path: String,
 
-    #[arg(long, env = "ZAVORA_SESSION_ID", default_value = "default-session")]
-    session_id: String,
+    #[arg(long, env = "ZAVORA_APP_NAME")]
+    app_name: Option<String>,
 
-    #[arg(long, env = "ZAVORA_SESSION_BACKEND", value_enum, default_value_t = SessionBackend::Memory)]
-    session_backend: SessionBackend,
+    #[arg(long, env = "ZAVORA_USER_ID")]
+    user_id: Option<String>,
 
-    #[arg(
-        long,
-        env = "ZAVORA_SESSION_DB_URL",
-        default_value = "sqlite://.zavora/sessions.db"
-    )]
-    session_db_url: String,
+    #[arg(long, env = "ZAVORA_SESSION_ID")]
+    session_id: Option<String>,
+
+    #[arg(long, env = "ZAVORA_SESSION_BACKEND", value_enum)]
+    session_backend: Option<SessionBackend>,
+
+    #[arg(long, env = "ZAVORA_SESSION_DB_URL")]
+    session_db_url: Option<String>,
 
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
@@ -151,6 +164,11 @@ enum Commands {
     Doctor,
     #[command(about = "Run session backend migrations (sqlite only)")]
     Migrate,
+    #[command(about = "Inspect profile configuration and active resolved profile state")]
+    Profiles {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
     #[command(about = "Manage session lifecycle (list/show/delete/prune)")]
     Sessions {
         #[command(subcommand)]
@@ -160,6 +178,8 @@ enum Commands {
 
 #[derive(Debug, Clone)]
 struct RuntimeConfig {
+    profile: String,
+    config_path: String,
     provider: Provider,
     model: Option<String>,
     app_name: String,
@@ -167,6 +187,25 @@ struct RuntimeConfig {
     session_id: String,
     session_backend: SessionBackend,
     session_db_url: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfilesFile {
+    #[serde(default)]
+    profiles: HashMap<String, ProfileConfig>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileConfig {
+    provider: Option<Provider>,
+    model: Option<String>,
+    app_name: Option<String>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    session_backend: Option<SessionBackend>,
+    session_db_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +262,7 @@ fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
         || msg.contains("invalid value")
         || msg.contains("unknown argument")
         || msg.contains("failed to read input")
+        || msg.contains("profile")
     {
         return ErrorCategory::Input;
     }
@@ -257,16 +297,8 @@ async fn main() -> Result<()> {
 
 async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
-
-    let cfg = RuntimeConfig {
-        provider: cli.provider,
-        model: cli.model,
-        app_name: cli.app_name,
-        user_id: cli.user_id,
-        session_id: cli.session_id,
-        session_backend: cli.session_backend,
-        session_db_url: cli.session_db_url,
-    };
+    let profiles = load_profiles(&cli.config_path)?;
+    let cfg = resolve_runtime_config(&cli, &profiles)?;
 
     match cli.command {
         Commands::Ask { prompt } => {
@@ -313,6 +345,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Migrate => {
             run_migrate(&cfg).await?;
         }
+        Commands::Profiles { command } => match command {
+            ProfileCommands::List => run_profiles_list(&profiles, &cfg)?,
+            ProfileCommands::Show => run_profiles_show(&cfg)?,
+        },
         Commands::Sessions { command } => match command {
             SessionCommands::List => run_sessions_list(&cfg).await?,
             SessionCommands::Show { session_id, recent } => {
@@ -329,6 +365,128 @@ async fn run_cli(cli: Cli) -> Result<()> {
         },
     }
 
+    Ok(())
+}
+
+fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
+    let path = Path::new(config_path);
+    if !path.exists() {
+        return Ok(ProfilesFile::default());
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read profile config file at '{}'", path.display()))?;
+    toml::from_str::<ProfilesFile>(&content).with_context(|| {
+        format!(
+            "invalid profile configuration in '{}'. Check provider/session values and field names.",
+            path.display()
+        )
+    })
+}
+
+fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeConfig> {
+    let selected = cli.profile.trim();
+    if selected.is_empty() {
+        return Err(anyhow::anyhow!(
+            "profile name cannot be empty. Set --profile <name>."
+        ));
+    }
+
+    let profile = if selected == "default" && !profiles.profiles.contains_key("default") {
+        ProfileConfig::default()
+    } else {
+        profiles.profiles.get(selected).cloned().ok_or_else(|| {
+            let mut names = profiles.profiles.keys().cloned().collect::<Vec<String>>();
+            names.sort();
+            if names.is_empty() {
+                anyhow::anyhow!(
+                    "profile '{}' not found in '{}'. No profiles are defined yet.",
+                    selected,
+                    cli.config_path
+                )
+            } else {
+                anyhow::anyhow!(
+                    "profile '{}' not found in '{}'. Available profiles: {}",
+                    selected,
+                    cli.config_path,
+                    names.join(", ")
+                )
+            }
+        })?
+    };
+
+    let provider = if cli.provider != Provider::Auto {
+        cli.provider
+    } else {
+        profile.provider.unwrap_or(Provider::Auto)
+    };
+
+    Ok(RuntimeConfig {
+        profile: selected.to_string(),
+        config_path: cli.config_path.clone(),
+        provider,
+        model: cli.model.clone().or(profile.model),
+        app_name: cli
+            .app_name
+            .clone()
+            .or(profile.app_name)
+            .unwrap_or_else(|| "zavora-cli".to_string()),
+        user_id: cli
+            .user_id
+            .clone()
+            .or(profile.user_id)
+            .unwrap_or_else(|| "local-user".to_string()),
+        session_id: cli
+            .session_id
+            .clone()
+            .or(profile.session_id)
+            .unwrap_or_else(|| "default-session".to_string()),
+        session_backend: cli
+            .session_backend
+            .or(profile.session_backend)
+            .unwrap_or(SessionBackend::Memory),
+        session_db_url: cli
+            .session_db_url
+            .clone()
+            .or(profile.session_db_url)
+            .unwrap_or_else(|| "sqlite://.zavora/sessions.db".to_string()),
+    })
+}
+
+fn run_profiles_list(profiles: &ProfilesFile, cfg: &RuntimeConfig) -> Result<()> {
+    let mut names = profiles.profiles.keys().cloned().collect::<Vec<String>>();
+    if !names.iter().any(|name| name == "default") {
+        names.push("default".to_string());
+    }
+    names.sort();
+
+    println!("Configured profiles (active='{}'):", cfg.profile);
+    for name in names {
+        let marker = if name == cfg.profile { "*" } else { " " };
+        let source = if profiles.profiles.contains_key(&name) {
+            "configured"
+        } else {
+            "implicit"
+        };
+        println!("{marker} {name} ({source})");
+    }
+
+    Ok(())
+}
+
+fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
+    println!("Active profile: {}", cfg.profile);
+    println!("Config path: {}", cfg.config_path);
+    println!("Provider: {:?}", cfg.provider);
+    println!(
+        "Model: {}",
+        cfg.model.as_deref().unwrap_or("<provider-default>")
+    );
+    println!("App: {}", cfg.app_name);
+    println!("User: {}", cfg.user_id);
+    println!("Session ID: {}", cfg.session_id);
+    println!("Session backend: {:?}", cfg.session_backend);
+    println!("Session DB URL: {}", cfg.session_db_url);
     Ok(())
 }
 
@@ -1114,6 +1272,11 @@ fn env_present(key: &str) -> bool {
 }
 
 async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
+    println!(
+        "Active profile: '{}' (config: {})",
+        cfg.profile, cfg.config_path
+    );
+
     let checks = [
         ("GOOGLE_API_KEY", env_present("GOOGLE_API_KEY")),
         ("OPENAI_API_KEY", env_present("OPENAI_API_KEY")),
@@ -1401,6 +1564,8 @@ mod tests {
 
     fn base_cfg() -> RuntimeConfig {
         RuntimeConfig {
+            profile: "default".to_string(),
+            config_path: ".zavora/config.toml".to_string(),
             provider: Provider::Auto,
             model: None,
             app_name: "test-app".to_string(),
@@ -1429,6 +1594,22 @@ mod tests {
         cfg.session_id = session_id.to_string();
 
         (dir, cfg)
+    }
+
+    fn test_cli(config_path: &str, profile: &str) -> Cli {
+        Cli {
+            provider: Provider::Auto,
+            model: None,
+            profile: profile.to_string(),
+            config_path: config_path.to_string(),
+            app_name: None,
+            user_id: None,
+            session_id: None,
+            session_backend: None,
+            session_db_url: None,
+            log_filter: "warn".to_string(),
+            command: Commands::Doctor,
+        }
     }
 
     async fn create_session(cfg: &RuntimeConfig, session_id: &str) {
@@ -1622,6 +1803,68 @@ mod tests {
         assert_eq!(categorize_error(&provider_err), ErrorCategory::Provider);
         assert_eq!(categorize_error(&session_err), ErrorCategory::Session);
         assert_eq!(categorize_error(&tooling_err), ErrorCategory::Tooling);
+    }
+
+    #[test]
+    fn runtime_config_uses_selected_profile_defaults() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.dev]
+provider = "openai"
+model = "gpt-4o-mini"
+session_backend = "sqlite"
+session_db_url = "sqlite://.zavora/dev.db"
+app_name = "zavora-dev"
+user_id = "dev-user"
+session_id = "dev-session"
+"#,
+        )
+        .expect("config should write");
+
+        let cli = test_cli(path.to_string_lossy().as_ref(), "dev");
+        let profiles = load_profiles(&cli.config_path).expect("profiles should load");
+        let cfg = resolve_runtime_config(&cli, &profiles).expect("runtime config should resolve");
+
+        assert_eq!(cfg.profile, "dev");
+        assert_eq!(cfg.provider, Provider::Openai);
+        assert_eq!(cfg.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(cfg.session_backend, SessionBackend::Sqlite);
+        assert_eq!(cfg.app_name, "zavora-dev");
+        assert_eq!(cfg.user_id, "dev-user");
+        assert_eq!(cfg.session_id, "dev-session");
+    }
+
+    #[test]
+    fn runtime_config_reports_missing_profile() {
+        let cli = test_cli(".zavora/does-not-exist.toml", "ops");
+        let profiles = load_profiles(&cli.config_path).expect("missing config should default");
+        let err = resolve_runtime_config(&cli, &profiles).expect_err("missing profile should fail");
+        assert!(
+            err.to_string().contains("profile 'ops' not found"),
+            "expected actionable missing profile message"
+        );
+    }
+
+    #[test]
+    fn invalid_profile_config_is_actionable() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.default]
+provider = "not-a-provider"
+"#,
+        )
+        .expect("config should write");
+
+        let err = load_profiles(path.to_string_lossy().as_ref())
+            .expect_err("invalid provider should fail parsing");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid profile configuration"));
     }
 
     #[tokio::test]

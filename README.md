@@ -87,6 +87,36 @@ Use `make` targets:
 - `make ci`
 - `make release-check`
 
+## Profiles
+
+`zavora-cli` can resolve runtime defaults from profiles in `.zavora/config.toml` (override path with `--config`).
+
+Example profile config:
+
+```toml
+[profiles.default]
+provider = "openai"
+model = "gpt-4o-mini"
+session_backend = "sqlite"
+session_db_url = "sqlite://.zavora/sessions.db"
+app_name = "zavora-cli"
+user_id = "local-user"
+session_id = "default-session"
+
+[profiles.ops]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+session_backend = "sqlite"
+session_db_url = "sqlite://.zavora/ops-sessions.db"
+```
+
+Inspect profile state:
+
+```bash
+cargo run -- profiles list
+cargo run -- --profile ops profiles show
+```
+
 ## Persistent Sessions
 
 Use SQLite-backed sessions to persist conversation history across CLI restarts:
