@@ -36,6 +36,10 @@ cargo run -- ask "Design a Rust CLI with release-based milestones"
 ```
 
 ```bash
+cargo run -- --provider openai --model gpt-4o-mini chat
+```
+
+```bash
 cargo run -- workflow sequential "Plan an MVP rollout with quality gates"
 ```
 
@@ -58,6 +62,18 @@ cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions
 ```bash
 cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db --session-id team-planning sessions show --recent 30
 ```
+
+```bash
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions delete --session-id team-planning --force
+```
+
+```bash
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run
+```
+
+Session retention behavior:
+- `memory` backend: in-process only; data resets when the CLI process exits.
+- `sqlite` backend: persistent across runs; `sessions delete` and `sessions prune` are destructive and require `--force` (or `--dry-run` for preview).
 
 ## Development Commands
 
@@ -82,6 +98,10 @@ cargo run -- \
   --session-id team-planning \
   chat
 ```
+
+Provider/model switching behavior:
+- Today: switch provider/model per invocation with `--provider` and `--model`.
+- Planned in Sprint 2 (`v0.2.0`): in-session `/provider` and `/model` switching within the active profile.
 
 ## Release Model
 

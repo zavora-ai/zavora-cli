@@ -10,7 +10,9 @@ use adk_rust::prelude::{
     InMemorySessionService, Llm, LlmAgentBuilder, LoopAgent, OllamaConfig, OllamaModel,
     OpenAIClient, OpenAIConfig, ParallelAgent, Part, Runner, RunnerConfig, SequentialAgent, Tool,
 };
-use adk_session::{CreateRequest, DatabaseSessionService, GetRequest, ListRequest, SessionService};
+use adk_session::{
+    CreateRequest, DatabaseSessionService, DeleteRequest, GetRequest, ListRequest, SessionService,
+};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
@@ -43,18 +45,50 @@ enum SessionBackend {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    #[command(about = "List all sessions for the current app/user")]
     List,
+    #[command(about = "Show events for a specific session")]
     Show {
         #[arg(long)]
         session_id: Option<String>,
         #[arg(long, default_value_t = 20)]
         recent: usize,
     },
+    #[command(about = "Delete a session (requires --force)")]
+    Delete {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    #[command(
+        about = "Prune old sessions, keeping N most recent (requires --force unless --dry-run)"
+    )]
+    Prune {
+        #[arg(long, default_value_t = 20)]
+        keep: usize,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
+
+const CLI_EXAMPLES: &str = "Examples:\n\
+  zavora-cli ask \"Design a Rust CLI with release-based milestones\"\n\
+  zavora-cli --provider openai --model gpt-4o-mini chat\n\
+  zavora-cli workflow sequential \"Plan a v0.2.0 rollout\"\n\
+  zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list\n\
+  zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
+\n\
+Switching behavior:\n\
+  - Use --provider/--model to switch runtime model selection per invocation.\n\
+  - In-session provider/model switching is planned in Sprint 2.";
 
 #[derive(Debug, Parser)]
 #[command(name = "zavora-cli")]
 #[command(about = "Rust CLI agent shell built on ADK-Rust")]
+#[command(after_long_help = CLI_EXAMPLES)]
 struct Cli {
     #[arg(long, env = "ZAVORA_PROVIDER", value_enum, default_value_t = Provider::Auto)]
     provider: Provider,
@@ -90,11 +124,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Run a one-shot prompt and print the final response")]
     Ask {
         #[arg(required = true)]
         prompt: Vec<String>,
     },
+    #[command(about = "Run interactive chat mode")]
     Chat,
+    #[command(about = "Run a workflow mode (single, sequential, parallel, loop) for a prompt")]
     Workflow {
         #[arg(value_enum)]
         mode: WorkflowMode,
@@ -103,14 +140,18 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         max_iterations: u32,
     },
+    #[command(about = "Generate a release-oriented plan from a product goal")]
     ReleasePlan {
         #[arg(required = true)]
         goal: Vec<String>,
         #[arg(long, default_value_t = 3)]
         releases: u32,
     },
+    #[command(about = "Validate provider environment and session backend configuration")]
     Doctor,
+    #[command(about = "Run session backend migrations (sqlite only)")]
     Migrate,
+    #[command(about = "Manage session lifecycle (list/show/delete/prune)")]
     Sessions {
         #[command(subcommand)]
         command: SessionCommands,
@@ -128,9 +169,93 @@ struct RuntimeConfig {
     session_db_url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    Provider,
+    Session,
+    Tooling,
+    Input,
+    Internal,
+}
+
+impl ErrorCategory {
+    fn code(self) -> &'static str {
+        match self {
+            ErrorCategory::Provider => "PROVIDER",
+            ErrorCategory::Session => "SESSION",
+            ErrorCategory::Tooling => "TOOLING",
+            ErrorCategory::Input => "INPUT",
+            ErrorCategory::Internal => "INTERNAL",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            ErrorCategory::Provider => {
+                "Set provider credentials (for example OPENAI_API_KEY) or run with --provider ollama."
+            }
+            ErrorCategory::Session => {
+                "Check --session-backend/--session-db-url and run migrate for sqlite sessions."
+            }
+            ErrorCategory::Tooling => {
+                "Review tool configuration and retry with RUST_LOG=info for detailed tool/runtime logs."
+            }
+            ErrorCategory::Input => "Run zavora-cli --help and correct command arguments.",
+            ErrorCategory::Internal => {
+                "Retry with RUST_LOG=debug. If it persists, capture logs and open an issue."
+            }
+        }
+    }
+}
+
+fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
+    let msg = format!("{err:#}").to_ascii_lowercase();
+
+    if msg.contains("api_key")
+        || msg.contains("no provider could be auto-detected")
+        || msg.contains("provider")
+    {
+        return ErrorCategory::Provider;
+    }
+
+    if msg.contains("--force")
+        || msg.contains("destructive")
+        || msg.contains("invalid value")
+        || msg.contains("unknown argument")
+        || msg.contains("failed to read input")
+    {
+        return ErrorCategory::Input;
+    }
+
+    if msg.contains("session") || msg.contains("sqlite") || msg.contains("migrate") {
+        return ErrorCategory::Session;
+    }
+
+    if msg.contains("tool") || msg.contains("mcp") {
+        return ErrorCategory::Tooling;
+    }
+
+    ErrorCategory::Internal
+}
+
+fn format_cli_error(err: &anyhow::Error) -> String {
+    let category = categorize_error(err);
+    format!("[{}] {}\nHint: {}", category.code(), err, category.hint())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Err(err) = run_cli(cli).await {
+        eprintln!("{}", format_cli_error(&err));
+        tracing::error!(category = %categorize_error(&err).code(), error = %err, "command failed");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
 
     let cfg = RuntimeConfig {
@@ -193,6 +318,14 @@ async fn main() -> Result<()> {
             SessionCommands::Show { session_id, recent } => {
                 run_sessions_show(&cfg, session_id, recent).await?
             }
+            SessionCommands::Delete { session_id, force } => {
+                run_sessions_delete(&cfg, session_id, force).await?
+            }
+            SessionCommands::Prune {
+                keep,
+                dry_run,
+                force,
+            } => run_sessions_prune(&cfg, keep, dry_run, force).await?,
         },
     }
 
@@ -1117,6 +1250,120 @@ async fn run_sessions_show(
     Ok(())
 }
 
+async fn run_sessions_delete(
+    cfg: &RuntimeConfig,
+    session_id_override: Option<String>,
+    force: bool,
+) -> Result<()> {
+    let session_id = session_id_override.unwrap_or_else(|| cfg.session_id.clone());
+    if !force {
+        return Err(anyhow::anyhow!(
+            "session delete is destructive. Re-run with --force to delete session '{}'",
+            session_id
+        ));
+    }
+
+    let session_service = build_session_service(cfg).await?;
+    session_service
+        .delete(DeleteRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+            session_id: session_id.clone(),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to delete session '{}' for app '{}' and user '{}'",
+                session_id, cfg.app_name, cfg.user_id
+            )
+        })?;
+
+    println!(
+        "Deleted session '{}' for app '{}' and user '{}'.",
+        session_id, cfg.app_name, cfg.user_id
+    );
+    Ok(())
+}
+
+async fn run_sessions_prune(
+    cfg: &RuntimeConfig,
+    keep: usize,
+    dry_run: bool,
+    force: bool,
+) -> Result<()> {
+    let keep = keep.max(1);
+    let session_service = build_session_service(cfg).await?;
+    let mut sessions = session_service
+        .list(ListRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to list sessions for prune in app '{}' and user '{}'",
+                cfg.app_name, cfg.user_id
+            )
+        })?;
+
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.last_update_time()));
+    let prune_ids = sessions
+        .into_iter()
+        .skip(keep)
+        .map(|session| session.id().to_string())
+        .collect::<Vec<String>>();
+
+    if prune_ids.is_empty() {
+        println!(
+            "Nothing to prune. Keep={} and current session count is within limit.",
+            keep
+        );
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "Dry-run: {} session(s) would be deleted (keeping {} most recent):",
+            prune_ids.len(),
+            keep
+        );
+        for id in prune_ids {
+            println!("- {id}");
+        }
+        return Ok(());
+    }
+
+    if !force {
+        return Err(anyhow::anyhow!(
+            "session prune is destructive and would delete {} session(s). Re-run with --force or preview with --dry-run",
+            prune_ids.len()
+        ));
+    }
+
+    for session_id in &prune_ids {
+        session_service
+            .delete(DeleteRequest {
+                app_name: cfg.app_name.clone(),
+                user_id: cfg.user_id.clone(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete pruned session '{}' for app '{}' and user '{}'",
+                    session_id, cfg.app_name, cfg.user_id
+                )
+            })?;
+    }
+
+    println!(
+        "Pruned {} session(s). Kept {} most recent session(s).",
+        prune_ids.len(),
+        keep
+    );
+    Ok(())
+}
+
 fn print_session_event(event: &Event) {
     let mut header = format!("[{}] {}", event.timestamp.to_rfc3339(), event.author);
     if event.is_final_response() {
@@ -1169,6 +1416,52 @@ mod tests {
             MockLlm::new("mock")
                 .with_response(LlmResponse::new(Content::new("model").with_text(text))),
         )
+    }
+
+    fn sqlite_cfg(session_id: &str) -> (tempfile::TempDir, RuntimeConfig) {
+        let dir = tempdir().expect("temp directory should create");
+        let db_path = dir.path().join("sessions.db");
+        let db_url = format!("sqlite://{}", db_path.to_string_lossy());
+
+        let mut cfg = base_cfg();
+        cfg.session_backend = SessionBackend::Sqlite;
+        cfg.session_db_url = db_url;
+        cfg.session_id = session_id.to_string();
+
+        (dir, cfg)
+    }
+
+    async fn create_session(cfg: &RuntimeConfig, session_id: &str) {
+        let service = build_session_service(cfg)
+            .await
+            .expect("service should build");
+        service
+            .create(CreateRequest {
+                app_name: cfg.app_name.clone(),
+                user_id: cfg.user_id.clone(),
+                session_id: Some(session_id.to_string()),
+                state: HashMap::new(),
+            })
+            .await
+            .expect("session should create");
+    }
+
+    async fn list_session_ids(cfg: &RuntimeConfig) -> Vec<String> {
+        let service = build_session_service(cfg)
+            .await
+            .expect("service should build");
+        let mut sessions = service
+            .list(ListRequest {
+                app_name: cfg.app_name.clone(),
+                user_id: cfg.user_id.clone(),
+            })
+            .await
+            .expect("sessions should list")
+            .into_iter()
+            .map(|s| s.id().to_string())
+            .collect::<Vec<String>>();
+        sessions.sort();
+        sessions
     }
 
     #[tokio::test]
@@ -1318,5 +1611,83 @@ mod tests {
             final_stream_suffix("", "Hello world").as_deref(),
             Some("Hello world")
         );
+    }
+
+    #[test]
+    fn error_taxonomy_distinguishes_provider_session_and_tooling() {
+        let provider_err = anyhow::anyhow!("OPENAI_API_KEY is required for OpenAI provider");
+        let session_err = anyhow::anyhow!("failed to load session 'abc'");
+        let tooling_err = anyhow::anyhow!("tool invocation failed: timeout");
+
+        assert_eq!(categorize_error(&provider_err), ErrorCategory::Provider);
+        assert_eq!(categorize_error(&session_err), ErrorCategory::Session);
+        assert_eq!(categorize_error(&tooling_err), ErrorCategory::Tooling);
+    }
+
+    #[tokio::test]
+    async fn sessions_show_missing_session_returns_session_category_error() {
+        let cfg = base_cfg();
+        let err = run_sessions_show(&cfg, Some("missing-session".to_string()), 10)
+            .await
+            .expect_err("missing session should error");
+
+        assert_eq!(categorize_error(&err), ErrorCategory::Session);
+        let rendered = format_cli_error(&err);
+        assert!(
+            rendered.contains("[SESSION]"),
+            "expected session category marker in error output"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_requires_force_flag() {
+        let (_dir, cfg) = sqlite_cfg("default-session");
+        create_session(&cfg, "delete-me").await;
+
+        let err = run_sessions_delete(&cfg, Some("delete-me".to_string()), false)
+            .await
+            .expect_err("delete without --force should fail");
+        assert_eq!(categorize_error(&err), ErrorCategory::Input);
+
+        let sessions = list_session_ids(&cfg).await;
+        assert!(sessions.contains(&"delete-me".to_string()));
+    }
+
+    #[tokio::test]
+    async fn sessions_delete_force_removes_target_session() {
+        let (_dir, cfg) = sqlite_cfg("default-session");
+        create_session(&cfg, "delete-me").await;
+
+        run_sessions_delete(&cfg, Some("delete-me".to_string()), true)
+            .await
+            .expect("forced delete should pass");
+
+        let sessions = list_session_ids(&cfg).await;
+        assert!(!sessions.contains(&"delete-me".to_string()));
+    }
+
+    #[tokio::test]
+    async fn sessions_prune_enforces_safety_and_deletes_when_forced() {
+        let (_dir, cfg) = sqlite_cfg("default-session");
+        create_session(&cfg, "s1").await;
+        create_session(&cfg, "s2").await;
+        create_session(&cfg, "s3").await;
+
+        let err = run_sessions_prune(&cfg, 1, false, false)
+            .await
+            .expect_err("prune without --force should fail");
+        assert_eq!(categorize_error(&err), ErrorCategory::Input);
+
+        run_sessions_prune(&cfg, 1, true, false)
+            .await
+            .expect("dry run should pass");
+        let sessions_after_dry_run = list_session_ids(&cfg).await;
+        assert_eq!(sessions_after_dry_run.len(), 3);
+
+        run_sessions_prune(&cfg, 1, false, true)
+            .await
+            .expect("forced prune should pass");
+        let sessions_after_force = list_session_ids(&cfg).await;
+        assert_eq!(sessions_after_force.len(), 1);
     }
 }

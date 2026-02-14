@@ -16,6 +16,12 @@ Run this checklist before creating a `vX.Y.Z` tag.
 - [ ] Known risks and mitigations documented
 - [ ] Rollback plan documented
 
+## Documentation
+
+- [ ] `README.md` quickstart and command examples reflect current CLI behavior
+- [ ] Sprint/release docs reviewed: `docs/PROJECT_PLAN.md`, `docs/GITHUB_MILESTONE_ISSUES.md`
+- [ ] Session retention and lifecycle command docs updated when relevant (`sessions list/show/delete/prune`)
+
 ## Tag And Publish
 
 - [ ] Tag created: `vX.Y.Z`
