@@ -114,6 +114,9 @@ retrieval_min_score = 1
 tool_confirmation_mode = "mcp-only"
 require_confirm_tool = []
 approve_tool = []
+tool_timeout_secs = 45
+tool_retry_attempts = 2
+tool_retry_delay_ms = 500
 
 [profiles.ops]
 provider = "anthropic"
@@ -190,6 +193,32 @@ Inspect active policy with:
 cargo run -- profiles show
 cargo run -- doctor
 ```
+
+## Tool Reliability Controls
+
+Tool execution reliability is configurable at profile/CLI level:
+
+```toml
+[profiles.default]
+tool_timeout_secs = 45
+tool_retry_attempts = 2
+tool_retry_delay_ms = 500
+```
+
+CLI override example:
+
+```bash
+cargo run -- \
+  --tool-timeout-secs 60 \
+  --tool-retry-attempts 3 \
+  --tool-retry-delay-ms 800 \
+  mcp discover
+```
+
+Runtime behavior:
+- single-agent tool timeout is enforced via ADK `tool_timeout`
+- MCP discovery/invocation retries follow configured retry attempts/delay
+- tool lifecycle telemetry emits structured events for `requested`, `succeeded`, and `failed`
 
 ## Retrieval Abstraction
 

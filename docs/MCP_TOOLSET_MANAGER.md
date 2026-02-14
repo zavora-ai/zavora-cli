@@ -30,6 +30,9 @@ Fields:
 - `tool_confirmation_mode` (profile-level, optional): `never`, `mcp-only` (default), or `always`.
 - `require_confirm_tool` (profile-level, optional): extra tool names that require confirmation.
 - `approve_tool` (profile-level, optional): required tools that are auto-approved.
+- `tool_timeout_secs` (profile-level, optional): timeout used for single-agent tool execution.
+- `tool_retry_attempts` (profile-level, optional): retry attempts for MCP reconnect/retry behavior.
+- `tool_retry_delay_ms` (profile-level, optional): delay between MCP retries.
 
 ## Commands
 
@@ -81,7 +84,9 @@ Failure cases covered:
 - missing/disabled server selection
 - missing bearer token environment variable
 - endpoint connection failures/timeouts
+- reconnect/retry exhaustion failures
 
 Error classification:
 - MCP failures are categorized as `TOOLING` by CLI taxonomy.
 - hints direct operators to check tool config and rerun with `RUST_LOG=info`.
+- tool lifecycle emits structured telemetry logs (`requested`, `succeeded`, `failed`).

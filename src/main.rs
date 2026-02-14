@@ -6,16 +6,17 @@ use std::time::Duration;
 
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::{
-    Agent, AnthropicClient, AnthropicConfig, Content, DeepSeekClient, DeepSeekConfig, Event,
+    Agent, AnthropicClient, AnthropicConfig, Content, DeepSeekClient, DeepSeekConfig, END, Event,
     ExitLoopTool, FunctionTool, GeminiModel, GraphAgent, GroqClient, GroqConfig,
     InMemoryArtifactService, InMemorySessionService, Llm, LlmAgentBuilder, LlmRequest, LoopAgent,
-    NodeOutput, OllamaConfig, OllamaModel, OpenAIClient, OpenAIConfig, ParallelAgent, Part,
-    Router, RunConfig, Runner, RunnerConfig, SequentialAgent, Tool, Toolset, END, START,
+    NodeOutput, OllamaConfig, OllamaModel, OpenAIClient, OpenAIConfig, ParallelAgent, Part, Router,
+    RunConfig, Runner, RunnerConfig, START, SequentialAgent, Tool, Toolset,
 };
 use adk_rust::{ReadonlyContext, ToolConfirmationDecision, ToolConfirmationPolicy};
 use adk_session::{
     CreateRequest, DatabaseSessionService, DeleteRequest, GetRequest, ListRequest, SessionService,
 };
+use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -187,6 +188,15 @@ struct Cli {
     #[arg(long, env = "ZAVORA_APPROVE_TOOL")]
     approve_tool: Vec<String>,
 
+    #[arg(long, env = "ZAVORA_TOOL_TIMEOUT_SECS")]
+    tool_timeout_secs: Option<u64>,
+
+    #[arg(long, env = "ZAVORA_TOOL_RETRY_ATTEMPTS")]
+    tool_retry_attempts: Option<u32>,
+
+    #[arg(long, env = "ZAVORA_TOOL_RETRY_DELAY_MS")]
+    tool_retry_delay_ms: Option<u64>,
+
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
 
@@ -259,6 +269,9 @@ struct RuntimeConfig {
     tool_confirmation_mode: ToolConfirmationMode,
     require_confirm_tool: Vec<String>,
     approve_tool: Vec<String>,
+    tool_timeout_secs: u64,
+    tool_retry_attempts: u32,
+    tool_retry_delay_ms: u64,
     mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -289,6 +302,9 @@ struct ProfileConfig {
     require_confirm_tool: Vec<String>,
     #[serde(default)]
     approve_tool: Vec<String>,
+    tool_timeout_secs: Option<u64>,
+    tool_retry_attempts: Option<u32>,
+    tool_retry_delay_ms: Option<u64>,
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
 }
@@ -426,6 +442,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 model,
                 &runtime_tools.tools,
                 tool_confirmation.policy,
+                Duration::from_secs(cfg.tool_timeout_secs),
             )?;
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
@@ -461,6 +478,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 max_iterations,
                 &runtime_tools.tools,
                 tool_confirmation.policy,
+                Duration::from_secs(cfg.tool_timeout_secs),
             )?;
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
@@ -649,6 +667,20 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .unwrap_or(ToolConfirmationMode::McpOnly),
         require_confirm_tool,
         approve_tool,
+        tool_timeout_secs: cli
+            .tool_timeout_secs
+            .or(profile.tool_timeout_secs)
+            .unwrap_or(45)
+            .max(1),
+        tool_retry_attempts: cli
+            .tool_retry_attempts
+            .or(profile.tool_retry_attempts)
+            .unwrap_or(2)
+            .max(1),
+        tool_retry_delay_ms: cli
+            .tool_retry_delay_ms
+            .or(profile.tool_retry_delay_ms)
+            .unwrap_or(500),
         mcp_servers,
     })
 }
@@ -714,6 +746,9 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
             cfg.approve_tool.join(", ")
         }
     );
+    println!("Tool timeout (secs): {}", cfg.tool_timeout_secs);
+    println!("Tool retry attempts: {}", cfg.tool_retry_attempts);
+    println!("Tool retry delay (ms): {}", cfg.tool_retry_delay_ms);
     println!("MCP servers: {}", cfg.mcp_servers.len());
     Ok(())
 }
@@ -800,7 +835,11 @@ fn resolve_mcp_auth(server: &McpServerConfig) -> Result<Option<McpAuth>> {
     Ok(Some(McpAuth::bearer(token)))
 }
 
-async fn discover_mcp_tools_for_server(server: &McpServerConfig) -> Result<Vec<Arc<dyn Tool>>> {
+async fn discover_mcp_tools_for_server(
+    server: &McpServerConfig,
+    retry_attempts: u32,
+    retry_delay_ms: u64,
+) -> Result<Vec<Arc<dyn Tool>>> {
     let mut builder = McpHttpClientBuilder::new(server.endpoint.clone())
         .timeout(Duration::from_secs(server.timeout_secs.unwrap_or(15)));
     if let Some(auth) = resolve_mcp_auth(server)? {
@@ -817,6 +856,12 @@ async fn discover_mcp_tools_for_server(server: &McpServerConfig) -> Result<Vec<A
             )
         })?
         .with_name(format!("mcp:{}", server.name));
+
+    toolset = toolset.with_refresh_config(
+        RefreshConfig::default()
+            .with_max_attempts(retry_attempts.max(1))
+            .with_retry_delay_ms(retry_delay_ms),
+    );
 
     if !server.tool_allowlist.is_empty() {
         let allowed = server.tool_allowlist.clone();
@@ -845,7 +890,13 @@ async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
     };
 
     for server in servers {
-        match discover_mcp_tools_for_server(&server).await {
+        match discover_mcp_tools_for_server(
+            &server,
+            cfg.tool_retry_attempts,
+            cfg.tool_retry_delay_ms,
+        )
+        .await
+        {
             Ok(mut tools) => {
                 tracing::info!(
                     server = %server.name,
@@ -880,6 +931,10 @@ async fn run_mcp_list(cfg: &RuntimeConfig) -> Result<()> {
     }
 
     println!("Enabled MCP servers for profile '{}':", cfg.profile);
+    println!(
+        "Runtime MCP reliability policy: retry_attempts={} retry_delay_ms={}",
+        cfg.tool_retry_attempts, cfg.tool_retry_delay_ms
+    );
     for server in servers {
         let auth = server.auth_bearer_env.as_deref().unwrap_or("<none>");
         let allowlist = if server.tool_allowlist.is_empty() {
@@ -909,7 +964,13 @@ async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) -> R
 
     let mut failures = 0usize;
     for server in servers {
-        match discover_mcp_tools_for_server(&server).await {
+        match discover_mcp_tools_for_server(
+            &server,
+            cfg.tool_retry_attempts,
+            cfg.tool_retry_delay_ms,
+        )
+        .await
+        {
             Ok(tools) => {
                 println!(
                     "MCP server '{}' reachable. Discovered {} tool(s):",
@@ -1241,13 +1302,19 @@ fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
 #[cfg(test)]
 fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let tools = build_builtin_tools();
-    build_single_agent_with_tools(model, &tools, ToolConfirmationPolicy::Never)
+    build_single_agent_with_tools(
+        model,
+        &tools,
+        ToolConfirmationPolicy::Never,
+        Duration::from_secs(45),
+    )
 }
 
 fn build_single_agent_with_tools(
     model: Arc<dyn Llm>,
     tools: &[Arc<dyn Tool>],
     tool_confirmation_policy: ToolConfirmationPolicy,
+    tool_timeout: Duration,
 ) -> Result<Arc<dyn Agent>> {
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -1256,7 +1323,8 @@ fn build_single_agent_with_tools(
              planning work always prefer release-oriented increments.",
         )
         .model(model)
-        .tool_confirmation_policy(tool_confirmation_policy);
+        .tool_confirmation_policy(tool_confirmation_policy)
+        .tool_timeout(tool_timeout);
 
     for tool in tools {
         builder = builder.tool(tool.clone());
@@ -1398,10 +1466,11 @@ fn build_workflow_agent(
     max_iterations: u32,
     tools: &[Arc<dyn Tool>],
     tool_confirmation_policy: ToolConfirmationPolicy,
+    tool_timeout: Duration,
 ) -> Result<Arc<dyn Agent>> {
     match mode {
         WorkflowMode::Single => {
-            build_single_agent_with_tools(model, tools, tool_confirmation_policy)
+            build_single_agent_with_tools(model, tools, tool_confirmation_policy, tool_timeout)
         }
         WorkflowMode::Sequential => build_sequential_agent(model),
         WorkflowMode::Parallel => build_parallel_agent(model),
@@ -1509,7 +1578,11 @@ fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("release"), input);
+        let prompt = format!(
+            "{}\n\nUser request:\n{}",
+            workflow_template("release"),
+            input
+        );
         Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
     };
 
@@ -1543,7 +1616,11 @@ fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("delivery"), input);
+        let prompt = format!(
+            "{}\n\nUser request:\n{}",
+            workflow_template("delivery"),
+            input
+        );
         Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
     };
 
@@ -1577,7 +1654,13 @@ fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
 
     let agent = GraphAgent::builder("graph_delivery")
         .description("Graph-routed orchestration workflow")
-        .channels(&["input", "route", "branch_prompt", "output", "route_selected"])
+        .channels(&[
+            "input",
+            "route",
+            "branch_prompt",
+            "output",
+            "route_selected",
+        ])
         .node_fn("classify", route_classifier)
         .node_fn("prepare_release", release_prep)
         .node_fn("prepare_architecture", architecture_prep)
@@ -1852,6 +1935,7 @@ async fn build_single_runner_for_chat(
         model,
         &runtime_tools.tools,
         tool_confirmation.policy.clone(),
+        Duration::from_secs(cfg.tool_timeout_secs),
     )?;
     let runner = build_runner_with_session_service(
         agent,
@@ -2129,6 +2213,8 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
             continue;
         }
 
+        emit_tool_lifecycle_events(&event);
+
         let _ = tracker.ingest_parts(
             &event.author,
             &text,
@@ -2330,6 +2416,8 @@ async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str
             continue;
         }
 
+        emit_tool_lifecycle_events(&event);
+
         let delta = tracker.ingest_parts(
             &event.author,
             &text,
@@ -2402,6 +2490,64 @@ fn event_text(event: &Event) -> String {
             .collect::<Vec<_>>()
             .join(""),
         None => String::new(),
+    }
+}
+
+fn extract_tool_failure_message(response: &Value) -> Option<String> {
+    if let Some(message) = response.get("error").and_then(Value::as_str) {
+        return Some(message.to_string());
+    }
+    if let Some(message) = response.get("message").and_then(Value::as_str) {
+        let status = response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if status.eq_ignore_ascii_case("error") || status.eq_ignore_ascii_case("failed") {
+            return Some(message.to_string());
+        }
+    }
+    None
+}
+
+fn emit_tool_lifecycle_events(event: &Event) {
+    let Some(content) = event.content() else {
+        return;
+    };
+
+    for part in &content.parts {
+        match part {
+            Part::FunctionCall { name, .. } => {
+                tracing::info!(
+                    tool = %name,
+                    author = %event.author,
+                    lifecycle = "requested",
+                    "Tool call requested"
+                );
+            }
+            Part::FunctionResponse {
+                function_response, ..
+            } => {
+                if let Some(error_message) =
+                    extract_tool_failure_message(&function_response.response)
+                {
+                    tracing::warn!(
+                        tool = %function_response.name,
+                        author = %event.author,
+                        lifecycle = "failed",
+                        error = %error_message,
+                        "Tool execution failed"
+                    );
+                } else {
+                    tracing::info!(
+                        tool = %function_response.name,
+                        author = %event.author,
+                        lifecycle = "succeeded",
+                        "Tool execution completed"
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2580,10 +2726,13 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.retrieval_min_score
     );
     println!(
-        "Tool confirmation: mode={:?}, required_tools={}, approved_tools={}",
+        "Tool confirmation: mode={:?}, required_tools={}, approved_tools={}, timeout_secs={}, retry_attempts={}, retry_delay_ms={}",
         cfg.tool_confirmation_mode,
         cfg.require_confirm_tool.len(),
-        cfg.approve_tool.len()
+        cfg.approve_tool.len(),
+        cfg.tool_timeout_secs,
+        cfg.tool_retry_attempts,
+        cfg.tool_retry_delay_ms
     );
     println!(
         "MCP servers: configured={}, enabled={}",
@@ -2870,6 +3019,9 @@ mod tests {
             tool_confirmation_mode: ToolConfirmationMode::McpOnly,
             require_confirm_tool: Vec::new(),
             approve_tool: Vec::new(),
+            tool_timeout_secs: 45,
+            tool_retry_attempts: 2,
+            tool_retry_delay_ms: 500,
             mcp_servers: Vec::new(),
         }
     }
@@ -2934,6 +3086,9 @@ mod tests {
             tool_confirmation_mode: None,
             require_confirm_tool: Vec::new(),
             approve_tool: Vec::new(),
+            tool_timeout_secs: None,
+            tool_retry_attempts: None,
+            tool_retry_delay_ms: None,
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -3008,6 +3163,7 @@ mod tests {
                     1,
                     &build_builtin_tools(),
                     ToolConfirmationPolicy::Never,
+                    Duration::from_secs(45),
                 )
                 .expect("workflow should build"),
                 &cfg,
@@ -3130,7 +3286,10 @@ mod tests {
 
     #[test]
     fn workflow_route_classifier_is_deterministic_for_key_intents() {
-        assert_eq!(classify_workflow_route("Plan release milestones"), "release");
+        assert_eq!(
+            classify_workflow_route("Plan release milestones"),
+            "release"
+        );
         assert_eq!(
             classify_workflow_route("Evaluate architecture tradeoffs"),
             "architecture"
@@ -3139,7 +3298,10 @@ mod tests {
             classify_workflow_route("List risk mitigations and rollback"),
             "risk"
         );
-        assert_eq!(classify_workflow_route("Implement feature work"), "delivery");
+        assert_eq!(
+            classify_workflow_route("Implement feature work"),
+            "delivery"
+        );
     }
 
     #[test]
@@ -3151,6 +3313,20 @@ mod tests {
                 "template should be non-empty for route {route}"
             );
         }
+    }
+
+    #[test]
+    fn tool_failure_extractor_handles_common_error_shapes() {
+        assert_eq!(
+            extract_tool_failure_message(&json!({"error": "denied by policy"})).as_deref(),
+            Some("denied by policy")
+        );
+        assert_eq!(
+            extract_tool_failure_message(&json!({"status": "error", "message": "timeout"}))
+                .as_deref(),
+            Some("timeout")
+        );
+        assert_eq!(extract_tool_failure_message(&json!({"ok": true})), None);
     }
 
     #[test]
@@ -3207,6 +3383,9 @@ retrieval_min_score = 2
         assert_eq!(cfg.tool_confirmation_mode, ToolConfirmationMode::McpOnly);
         assert!(cfg.require_confirm_tool.is_empty());
         assert!(cfg.approve_tool.is_empty());
+        assert_eq!(cfg.tool_timeout_secs, 45);
+        assert_eq!(cfg.tool_retry_attempts, 2);
+        assert_eq!(cfg.tool_retry_delay_ms, 500);
     }
 
     #[test]
@@ -3222,6 +3401,9 @@ model = "gpt-4o-mini"
 tool_confirmation_mode = "always"
 require_confirm_tool = ["release_template"]
 approve_tool = ["release_template"]
+tool_timeout_secs = 90
+tool_retry_attempts = 4
+tool_retry_delay_ms = 750
 
 [[profiles.dev.mcp_servers]]
 name = "atlas"
@@ -3256,6 +3438,9 @@ enabled = false
         assert_eq!(cfg.tool_confirmation_mode, ToolConfirmationMode::Always);
         assert_eq!(cfg.require_confirm_tool, vec!["release_template"]);
         assert_eq!(cfg.approve_tool, vec!["release_template"]);
+        assert_eq!(cfg.tool_timeout_secs, 90);
+        assert_eq!(cfg.tool_retry_attempts, 4);
+        assert_eq!(cfg.tool_retry_delay_ms, 750);
         assert_eq!(cfg.mcp_servers[1].name, "disabled-tooling");
         assert_eq!(cfg.mcp_servers[1].enabled, Some(false));
     }
