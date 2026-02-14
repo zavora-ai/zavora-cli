@@ -89,7 +89,7 @@ Use `make` targets:
 
 ## Profiles
 
-`zavora-cli` can resolve runtime defaults from profiles in `.zavora/config.toml` (override path with `--config`).
+`zavora-cli` can resolve runtime defaults from profiles in `.zavora/config.toml` (override path with `--config-path`).
 
 Example profile config:
 
@@ -117,6 +117,14 @@ retrieval_doc_path = "docs/ops-knowledge.md"
 retrieval_max_chunks = 4
 retrieval_max_chars = 3000
 retrieval_min_score = 2
+
+[[profiles.ops.mcp_servers]]
+name = "ops-tools"
+endpoint = "https://mcp.example.com/ops"
+enabled = true
+timeout_secs = 15
+auth_bearer_env = "OPS_MCP_TOKEN"
+tool_allowlist = ["search_incidents", "get_runbook"]
 ```
 
 Inspect profile state:
@@ -125,6 +133,22 @@ Inspect profile state:
 cargo run -- profiles list
 cargo run -- --profile ops profiles show
 ```
+
+## MCP Toolset Manager
+
+Configure MCP servers per profile and use CLI discovery commands:
+
+```bash
+cargo run -- --profile ops mcp list
+cargo run -- --profile ops mcp discover
+cargo run -- --profile ops mcp discover --server ops-tools
+```
+
+Behavior:
+- Enabled MCP servers are discovered with per-server timeout/auth settings.
+- Unreachable servers fail with categorized tooling errors in `mcp discover`.
+- Runtime command execution (`ask`, `chat`, `workflow single`) loads built-in tools plus discovered MCP tools.
+- If an MCP server is unavailable during runtime tool discovery, it is skipped with a warning and execution continues.
 
 ## Retrieval Abstraction
 
@@ -190,3 +214,4 @@ See `docs/AGILE_RELEASE_CYCLE.md` for the full process.
 See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint roadmap and ticket breakdown.
 See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `docs/SPRINT_BACKLOG_RISK_REGISTER.md` for Sprint 0 execution artifacts.
 See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration details.
+See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime registration flow.

@@ -2,17 +2,21 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use adk_rust::ReadonlyContext;
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::{
     Agent, AnthropicClient, AnthropicConfig, Content, DeepSeekClient, DeepSeekConfig, Event,
     ExitLoopTool, FunctionTool, GeminiModel, GroqClient, GroqConfig, InMemoryArtifactService,
     InMemorySessionService, Llm, LlmAgentBuilder, LoopAgent, OllamaConfig, OllamaModel,
     OpenAIClient, OpenAIConfig, ParallelAgent, Part, Runner, RunnerConfig, SequentialAgent, Tool,
+    Toolset,
 };
 use adk_session::{
     CreateRequest, DatabaseSessionService, DeleteRequest, GetRequest, ListRequest, SessionService,
 };
+use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
@@ -63,6 +67,17 @@ enum ProfileCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum McpCommands {
+    #[command(about = "List MCP servers configured for the active profile")]
+    List,
+    #[command(about = "Discover MCP tools from configured servers (or a specific server)")]
+    Discover {
+        #[arg(long)]
+        server: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SessionCommands {
     #[command(about = "List all sessions for the current app/user")]
     List,
@@ -99,6 +114,8 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli workflow sequential \"Plan a v0.2.0 rollout\"\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
+  zavora-cli mcp list\n\
+  zavora-cli mcp discover --server ops-tools\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
@@ -192,6 +209,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
+    #[command(about = "Manage MCP toolset registration and discovery")]
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
     #[command(about = "Manage session lifecycle (list/show/delete/prune)")]
     Sessions {
         #[command(subcommand)]
@@ -215,6 +237,7 @@ struct RuntimeConfig {
     retrieval_max_chunks: usize,
     retrieval_max_chars: usize,
     retrieval_min_score: usize,
+    mcp_servers: Vec<McpServerConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -239,6 +262,20 @@ struct ProfileConfig {
     retrieval_max_chunks: Option<usize>,
     retrieval_max_chars: Option<usize>,
     retrieval_min_score: Option<usize>,
+    #[serde(default)]
+    mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpServerConfig {
+    name: String,
+    endpoint: String,
+    enabled: Option<bool>,
+    timeout_secs: Option<u64>,
+    auth_bearer_env: Option<String>,
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,29 +369,47 @@ async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
     let profiles = load_profiles(&cli.config_path)?;
     let cfg = resolve_runtime_config(&cli, &profiles)?;
-    let retrieval_service = build_retrieval_service(&cfg)?;
-    tracing::info!(
-        backend = retrieval_service.backend_name(),
-        max_chunks = cfg.retrieval_max_chunks,
-        max_chars = cfg.retrieval_max_chars,
-        min_score = cfg.retrieval_min_score,
-        "Using retrieval backend"
-    );
+    let retrieval_service = if matches!(
+        cli.command,
+        Commands::Ask { .. }
+            | Commands::Chat
+            | Commands::Workflow { .. }
+            | Commands::ReleasePlan { .. }
+    ) {
+        let service = build_retrieval_service(&cfg)?;
+        tracing::info!(
+            backend = service.backend_name(),
+            max_chunks = cfg.retrieval_max_chunks,
+            max_chars = cfg.retrieval_max_chars,
+            min_score = cfg.retrieval_min_score,
+            "Using retrieval backend"
+        );
+        Some(service)
+    } else {
+        None
+    };
 
     match cli.command {
         Commands::Ask { prompt } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-            let agent = build_single_agent(model)?;
+            let tools = resolve_runtime_tools(&cfg).await;
+            let agent = build_single_agent_with_tools(model, &tools)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = prompt.join(" ");
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
-                    .await?;
+            let retrieval = retrieval_service
+                .as_deref()
+                .context("retrieval service should be initialized for ask command")?;
+            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
             println!("{answer}");
         }
         Commands::Chat => {
-            run_chat(cfg.clone(), retrieval_service.clone()).await?;
+            let tools = resolve_runtime_tools(&cfg).await;
+            let retrieval = retrieval_service
+                .as_ref()
+                .context("retrieval service should be initialized for chat command")?
+                .clone();
+            run_chat(cfg.clone(), retrieval, tools).await?;
         }
         Commands::Workflow {
             mode,
@@ -363,12 +418,14 @@ async fn run_cli(cli: Cli) -> Result<()> {
         } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, workflow = ?mode, "Using workflow");
-            let agent = build_workflow_agent(mode, model, max_iterations)?;
+            let tools = resolve_runtime_tools(&cfg).await;
+            let agent = build_workflow_agent(mode, model, max_iterations, &tools)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = prompt.join(" ");
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
-                    .await?;
+            let retrieval = retrieval_service
+                .as_deref()
+                .context("retrieval service should be initialized for workflow command")?;
+            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
             println!("{answer}");
         }
         Commands::ReleasePlan { goal, releases } => {
@@ -377,9 +434,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let agent = build_release_planning_agent(model, releases)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = goal.join(" ");
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
-                    .await?;
+            let retrieval = retrieval_service
+                .as_deref()
+                .context("retrieval service should be initialized for release-plan command")?;
+            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
             println!("{answer}");
         }
         Commands::Doctor => {
@@ -391,6 +449,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Profiles { command } => match command {
             ProfileCommands::List => run_profiles_list(&profiles, &cfg)?,
             ProfileCommands::Show => run_profiles_show(&cfg)?,
+        },
+        Commands::Mcp { command } => match command {
+            McpCommands::List => run_mcp_list(&cfg).await?,
+            McpCommands::Discover { server } => run_mcp_discover(&cfg, server).await?,
         },
         Commands::Sessions { command } => match command {
             SessionCommands::List => run_sessions_list(&cfg).await?,
@@ -515,6 +577,7 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .retrieval_min_score
             .or(profile.retrieval_min_score)
             .unwrap_or(1),
+        mcp_servers: profile.mcp_servers,
     })
 }
 
@@ -562,6 +625,229 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("Retrieval max chunks: {}", cfg.retrieval_max_chunks);
     println!("Retrieval max chars: {}", cfg.retrieval_max_chars);
     println!("Retrieval min score: {}", cfg.retrieval_min_score);
+    println!("MCP servers: {}", cfg.mcp_servers.len());
+    Ok(())
+}
+
+#[derive(Debug)]
+struct McpDiscoveryContext {
+    user_content: Content,
+}
+
+impl Default for McpDiscoveryContext {
+    fn default() -> Self {
+        Self {
+            user_content: Content::new("user").with_text("discover mcp tools"),
+        }
+    }
+}
+
+impl ReadonlyContext for McpDiscoveryContext {
+    fn invocation_id(&self) -> &str {
+        "mcp-discovery"
+    }
+    fn agent_name(&self) -> &str {
+        "mcp-manager"
+    }
+    fn user_id(&self) -> &str {
+        "local-user"
+    }
+    fn app_name(&self) -> &str {
+        "zavora-cli"
+    }
+    fn session_id(&self) -> &str {
+        "mcp-discovery"
+    }
+    fn branch(&self) -> &str {
+        "main"
+    }
+    fn user_content(&self) -> &Content {
+        &self.user_content
+    }
+}
+
+fn select_mcp_servers(
+    cfg: &RuntimeConfig,
+    server_name: Option<&str>,
+) -> Result<Vec<McpServerConfig>> {
+    let active = cfg
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled.unwrap_or(true))
+        .cloned()
+        .collect::<Vec<McpServerConfig>>();
+
+    if let Some(name) = server_name {
+        let server = active
+            .into_iter()
+            .find(|server| server.name == name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found or not enabled", name))?;
+        return Ok(vec![server]);
+    }
+
+    Ok(active)
+}
+
+fn resolve_mcp_auth(server: &McpServerConfig) -> Result<Option<McpAuth>> {
+    let Some(env_key) = server.auth_bearer_env.as_deref() else {
+        return Ok(None);
+    };
+
+    let token = std::env::var(env_key).with_context(|| {
+        format!(
+            "MCP server '{}' requires bearer token env '{}' but it is missing",
+            server.name, env_key
+        )
+    })?;
+
+    if token.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "MCP server '{}' has empty bearer token from env '{}'",
+            server.name,
+            env_key
+        ));
+    }
+
+    Ok(Some(McpAuth::bearer(token)))
+}
+
+async fn discover_mcp_tools_for_server(server: &McpServerConfig) -> Result<Vec<Arc<dyn Tool>>> {
+    let mut builder = McpHttpClientBuilder::new(server.endpoint.clone())
+        .timeout(Duration::from_secs(server.timeout_secs.unwrap_or(15)));
+    if let Some(auth) = resolve_mcp_auth(server)? {
+        builder = builder.with_auth(auth);
+    }
+
+    let mut toolset = builder
+        .connect()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to MCP server '{}' at {}",
+                server.name, server.endpoint
+            )
+        })?
+        .with_name(format!("mcp:{}", server.name));
+
+    if !server.tool_allowlist.is_empty() {
+        let allowed = server.tool_allowlist.clone();
+        toolset = toolset.with_filter(move |tool_name| {
+            allowed.iter().any(|allowed_name| allowed_name == tool_name)
+        });
+    }
+
+    let ctx: Arc<dyn ReadonlyContext> = Arc::new(McpDiscoveryContext::default());
+    toolset.tools(ctx).await.with_context(|| {
+        format!(
+            "failed to discover MCP tools from '{}' ({})",
+            server.name, server.endpoint
+        )
+    })
+}
+
+async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
+    let mut all_tools = Vec::<Arc<dyn Tool>>::new();
+    let servers = match select_mcp_servers(cfg, None) {
+        Ok(servers) => servers,
+        Err(err) => {
+            tracing::warn!(error = %err, "MCP server selection failed");
+            return all_tools;
+        }
+    };
+
+    for server in servers {
+        match discover_mcp_tools_for_server(&server).await {
+            Ok(mut tools) => {
+                tracing::info!(
+                    server = %server.name,
+                    endpoint = %server.endpoint,
+                    tools = tools.len(),
+                    "MCP tools discovered"
+                );
+                all_tools.append(&mut tools);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    server = %server.name,
+                    endpoint = %server.endpoint,
+                    error = %err,
+                    "MCP server unavailable; continuing without its tools"
+                );
+            }
+        }
+    }
+
+    all_tools
+}
+
+async fn run_mcp_list(cfg: &RuntimeConfig) -> Result<()> {
+    let servers = select_mcp_servers(cfg, None)?;
+    if servers.is_empty() {
+        println!(
+            "No enabled MCP servers configured for profile '{}'.",
+            cfg.profile
+        );
+        return Ok(());
+    }
+
+    println!("Enabled MCP servers for profile '{}':", cfg.profile);
+    for server in servers {
+        let auth = server.auth_bearer_env.as_deref().unwrap_or("<none>");
+        let allowlist = if server.tool_allowlist.is_empty() {
+            "<all>".to_string()
+        } else {
+            server.tool_allowlist.join(",")
+        };
+        println!(
+            "- {} endpoint={} timeout={}s auth_env={} allowlist={}",
+            server.name,
+            server.endpoint,
+            server.timeout_secs.unwrap_or(15),
+            auth,
+            allowlist
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) -> Result<()> {
+    let servers = select_mcp_servers(cfg, server_name.as_deref())?;
+    if servers.is_empty() {
+        println!("No enabled MCP servers configured for discovery.");
+        return Ok(());
+    }
+
+    let mut failures = 0usize;
+    for server in servers {
+        match discover_mcp_tools_for_server(&server).await {
+            Ok(tools) => {
+                println!(
+                    "MCP server '{}' reachable. Discovered {} tool(s):",
+                    server.name,
+                    tools.len()
+                );
+                for tool in tools {
+                    println!("- {}", tool.name());
+                }
+            }
+            Err(err) => {
+                failures += 1;
+                eprintln!(
+                    "[TOOLING] MCP discovery failed for '{}' ({}): {}",
+                    server.name, server.endpoint, err
+                );
+            }
+        }
+    }
+
+    if failures > 0 {
+        return Err(anyhow::anyhow!(
+            "MCP discovery completed with {} failure(s). Check endpoint/auth and retry.",
+            failures
+        ));
+    }
+
     Ok(())
 }
 
@@ -829,7 +1115,7 @@ fn init_tracing(log_filter: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
 }
 
-fn build_tools() -> Vec<Arc<dyn Tool>> {
+fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
     let current_time = FunctionTool::new(
         "current_unix_time",
         "Returns the current UTC timestamp in unix seconds.",
@@ -863,7 +1149,16 @@ fn build_tools() -> Vec<Arc<dyn Tool>> {
     vec![Arc::new(current_time), Arc::new(release_template)]
 }
 
+#[cfg(test)]
 fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
+    let tools = build_builtin_tools();
+    build_single_agent_with_tools(model, &tools)
+}
+
+fn build_single_agent_with_tools(
+    model: Arc<dyn Llm>,
+    tools: &[Arc<dyn Tool>],
+) -> Result<Arc<dyn Agent>> {
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
         .instruction(
@@ -872,20 +1167,38 @@ fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
         )
         .model(model);
 
-    for tool in build_tools() {
-        builder = builder.tool(tool);
+    for tool in tools {
+        builder = builder.tool(tool.clone());
     }
 
     Ok(Arc::new(builder.build()?))
+}
+
+async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
+    let mut tools = build_builtin_tools();
+    let built_in_count = tools.len();
+    let mut mcp_tools = discover_mcp_tools(cfg).await;
+    let mcp_count = mcp_tools.len();
+    tools.append(&mut mcp_tools);
+
+    tracing::info!(
+        built_in_tools = built_in_count,
+        mcp_tools = mcp_count,
+        total_tools = tools.len(),
+        "Resolved runtime toolset"
+    );
+
+    tools
 }
 
 fn build_workflow_agent(
     mode: WorkflowMode,
     model: Arc<dyn Llm>,
     max_iterations: u32,
+    tools: &[Arc<dyn Tool>],
 ) -> Result<Arc<dyn Agent>> {
     match mode {
-        WorkflowMode::Single => build_single_agent(model),
+        WorkflowMode::Single => build_single_agent_with_tools(model, tools),
         WorkflowMode::Sequential => build_sequential_agent(model),
         WorkflowMode::Parallel => build_parallel_agent(model),
         WorkflowMode::Loop => build_loop_agent(model, max_iterations),
@@ -1122,9 +1435,10 @@ async fn build_runner_with_session_service(
 async fn build_single_runner_for_chat(
     cfg: &RuntimeConfig,
     session_service: Arc<dyn SessionService>,
+    tools: &[Arc<dyn Tool>],
 ) -> Result<(Runner, Provider, String)> {
     let (model, resolved_provider, model_name) = resolve_model(cfg)?;
-    let agent = build_single_agent(model)?;
+    let agent = build_single_agent_with_tools(model, tools)?;
     let runner = build_runner_with_session_service(agent, cfg, session_service).await?;
     Ok((runner, resolved_provider, model_name))
 }
@@ -1426,10 +1740,11 @@ async fn run_prompt_with_retrieval(
 async fn run_chat(
     mut cfg: RuntimeConfig,
     retrieval_service: Arc<dyn RetrievalService>,
+    runtime_tools: Vec<Arc<dyn Tool>>,
 ) -> Result<()> {
     let session_service = build_session_service(&cfg).await?;
     let (mut runner, mut resolved_provider, mut model_name) =
-        build_single_runner_for_chat(&cfg, session_service.clone()).await?;
+        build_single_runner_for_chat(&cfg, session_service.clone(), &runtime_tools).await?;
 
     cfg.provider = resolved_provider;
     cfg.model = Some(model_name.clone());
@@ -1476,7 +1791,13 @@ async fn run_chat(
             switched_cfg.provider = new_provider;
             switched_cfg.model = None;
 
-            match build_single_runner_for_chat(&switched_cfg, session_service.clone()).await {
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                &runtime_tools,
+            )
+            .await
+            {
                 Ok((new_runner, new_resolved_provider, new_model_name)) => {
                     runner = new_runner;
                     resolved_provider = new_resolved_provider;
@@ -1511,7 +1832,13 @@ async fn run_chat(
             let mut switched_cfg = cfg.clone();
             switched_cfg.model = Some(next_model.to_string());
 
-            match build_single_runner_for_chat(&switched_cfg, session_service.clone()).await {
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                &runtime_tools,
+            )
+            .await
+            {
                 Ok((new_runner, new_resolved_provider, new_model_name)) => {
                     runner = new_runner;
                     resolved_provider = new_resolved_provider;
@@ -1824,6 +2151,14 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.retrieval_max_chars,
         cfg.retrieval_min_score
     );
+    println!(
+        "MCP servers: configured={}, enabled={}",
+        cfg.mcp_servers.len(),
+        cfg.mcp_servers
+            .iter()
+            .filter(|server| server.enabled.unwrap_or(true))
+            .count()
+    );
 
     if matches!(cfg.session_backend, SessionBackend::Sqlite) {
         let _service = open_sqlite_session_service(&cfg.session_db_url).await?;
@@ -2098,6 +2433,7 @@ mod tests {
             retrieval_max_chunks: 3,
             retrieval_max_chars: 4000,
             retrieval_min_score: 1,
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -2204,8 +2540,13 @@ mod tests {
             let mut cfg = base_cfg();
             cfg.session_id = format!("session-{mode:?}");
             let runner = build_runner(
-                build_workflow_agent(mode, mock_model("workflow response"), 1)
-                    .expect("workflow should build"),
+                build_workflow_agent(
+                    mode,
+                    mock_model("workflow response"),
+                    1,
+                    &build_builtin_tools(),
+                )
+                .expect("workflow should build"),
                 &cfg,
             )
             .await
@@ -2375,6 +2716,113 @@ retrieval_min_score = 2
         assert_eq!(cfg.retrieval_max_chunks, 5);
         assert_eq!(cfg.retrieval_max_chars, 2048);
         assert_eq!(cfg.retrieval_min_score, 2);
+    }
+
+    #[test]
+    fn runtime_config_parses_profile_mcp_servers() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.dev]
+provider = "openai"
+model = "gpt-4o-mini"
+
+[[profiles.dev.mcp_servers]]
+name = "atlas"
+endpoint = "https://atlas.example.com/mcp"
+enabled = true
+timeout_secs = 20
+auth_bearer_env = "ATLAS_MCP_TOKEN"
+tool_allowlist = ["search", "lookup"]
+
+[[profiles.dev.mcp_servers]]
+name = "disabled-tooling"
+endpoint = "https://disabled.example.com/mcp"
+enabled = false
+"#,
+        )
+        .expect("config should write");
+
+        let cli = test_cli(path.to_string_lossy().as_ref(), "dev");
+        let profiles = load_profiles(&cli.config_path).expect("profiles should load");
+        let cfg = resolve_runtime_config(&cli, &profiles).expect("runtime config should resolve");
+
+        assert_eq!(cfg.mcp_servers.len(), 2);
+        assert_eq!(cfg.mcp_servers[0].name, "atlas");
+        assert_eq!(cfg.mcp_servers[0].endpoint, "https://atlas.example.com/mcp");
+        assert_eq!(cfg.mcp_servers[0].enabled, Some(true));
+        assert_eq!(cfg.mcp_servers[0].timeout_secs, Some(20));
+        assert_eq!(
+            cfg.mcp_servers[0].auth_bearer_env.as_deref(),
+            Some("ATLAS_MCP_TOKEN")
+        );
+        assert_eq!(cfg.mcp_servers[0].tool_allowlist, vec!["search", "lookup"]);
+        assert_eq!(cfg.mcp_servers[1].name, "disabled-tooling");
+        assert_eq!(cfg.mcp_servers[1].enabled, Some(false));
+    }
+
+    #[test]
+    fn select_mcp_servers_filters_enabled_and_selects_by_name() {
+        let mut cfg = base_cfg();
+        cfg.mcp_servers = vec![
+            McpServerConfig {
+                name: "atlas".to_string(),
+                endpoint: "https://atlas.example.com/mcp".to_string(),
+                enabled: Some(true),
+                timeout_secs: Some(10),
+                auth_bearer_env: None,
+                tool_allowlist: Vec::new(),
+            },
+            McpServerConfig {
+                name: "ops".to_string(),
+                endpoint: "https://ops.example.com/mcp".to_string(),
+                enabled: Some(false),
+                timeout_secs: Some(10),
+                auth_bearer_env: None,
+                tool_allowlist: Vec::new(),
+            },
+            McpServerConfig {
+                name: "analytics".to_string(),
+                endpoint: "https://analytics.example.com/mcp".to_string(),
+                enabled: None,
+                timeout_secs: None,
+                auth_bearer_env: None,
+                tool_allowlist: Vec::new(),
+            },
+        ];
+
+        let active = select_mcp_servers(&cfg, None).expect("active servers should resolve");
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].name, "atlas");
+        assert_eq!(active[1].name, "analytics");
+
+        let single = select_mcp_servers(&cfg, Some("analytics"))
+            .expect("named enabled server should resolve");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].name, "analytics");
+
+        let err = select_mcp_servers(&cfg, Some("ops"))
+            .expect_err("disabled server should not be selectable");
+        assert!(err.to_string().contains("not found or not enabled"));
+    }
+
+    #[test]
+    fn resolve_mcp_auth_reports_missing_bearer_token_env() {
+        let server = McpServerConfig {
+            name: "secure".to_string(),
+            endpoint: "https://secure.example.com/mcp".to_string(),
+            enabled: Some(true),
+            timeout_secs: Some(15),
+            auth_bearer_env: Some("__ZAVORA_TEST_MCP_TOKEN_MISSING__".to_string()),
+            tool_allowlist: Vec::new(),
+        };
+
+        let err = resolve_mcp_auth(&server).expect_err("missing env should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("requires bearer token env"));
+        assert!(msg.contains("__ZAVORA_TEST_MCP_TOKEN_MISSING__"));
     }
 
     #[test]
@@ -2741,7 +3189,7 @@ provider = "not-a-provider"
         let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
 
         let (_runner, provider, model_name) =
-            build_single_runner_for_chat(&cfg, session_service.clone())
+            build_single_runner_for_chat(&cfg, session_service.clone(), &build_builtin_tools())
                 .await
                 .expect("chat runner should build for ollama");
 

@@ -10,6 +10,7 @@ semantic-search = ["dep:strsim"]
 [dependencies]
 adk-rust = { version = "0.3.0", features = ["openai", "anthropic", "deepseek", "groq", "ollama"] }
 adk-session = { version = "0.3.0", features = ["database"] }
+adk-tool = { version = "0.3.0", features = ["http-transport"] }
 anyhow = "1.0.101"
 clap = { version = "4.5.58", features = ["derive", "env"] }
 serde = { version = "1.0.228", features = ["derive"] }
