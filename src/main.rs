@@ -646,8 +646,8 @@ impl RetrievalService for LocalFileRetrievalService {
                 let body = chunk.text.to_ascii_lowercase();
                 let score = terms
                     .iter()
-                    .filter(|term| body.contains(term.as_str()))
-                    .count();
+                    .map(|term| body.matches(term.as_str()).count())
+                    .sum::<usize>();
                 (score > 0).then_some(RetrievedChunk {
                     source: chunk.source.clone(),
                     text: chunk.text.clone(),
@@ -697,8 +697,8 @@ impl RetrievalService for SemanticLocalRetrievalService {
                 let similarity = strsim::jaro_winkler(&query_lower, &body);
                 let lexical_hits = terms
                     .iter()
-                    .filter(|term| body.contains(term.as_str()))
-                    .count();
+                    .map(|term| body.matches(term.as_str()).count())
+                    .sum::<usize>();
                 let score = ((similarity * 1000.0) as usize) + (lexical_hits * 25);
                 (score > 0).then_some(RetrievedChunk {
                     source: chunk.source.clone(),
@@ -2466,6 +2466,31 @@ provider = "not-a-provider"
     }
 
     #[test]
+    fn local_file_retrieval_ranks_chunks_deterministically_by_term_hits() {
+        let retrieval = LocalFileRetrievalService {
+            chunks: vec![
+                RetrievedChunk {
+                    source: "rank:1".to_string(),
+                    text: "release quality gates".to_string(),
+                    score: 0,
+                },
+                RetrievedChunk {
+                    source: "rank:2".to_string(),
+                    text: "release quality gates release quality".to_string(),
+                    score: 0,
+                },
+            ],
+        };
+
+        let chunks = retrieval
+            .retrieve("release quality", 2)
+            .expect("retrieval should run");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].source, "rank:2");
+        assert_eq!(chunks[1].source, "rank:1");
+    }
+
+    #[test]
     fn local_retrieval_backend_requires_doc_path() {
         let mut cfg = base_cfg();
         cfg.retrieval_backend = RetrievalBackend::Local;
@@ -2478,6 +2503,22 @@ provider = "not-a-provider"
         assert!(
             err.to_string()
                 .contains("retrieval backend 'local' requires")
+        );
+    }
+
+    #[test]
+    fn local_retrieval_backend_missing_file_is_reported() {
+        let mut cfg = base_cfg();
+        cfg.retrieval_backend = RetrievalBackend::Local;
+        cfg.retrieval_doc_path = Some("does-not-exist.md".to_string());
+
+        let err = match build_retrieval_service(&cfg) {
+            Ok(_) => panic!("missing retrieval file should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("failed to read retrieval doc"),
+            "expected backend unavailability error path"
         );
     }
 
@@ -2516,6 +2557,33 @@ provider = "not-a-provider"
         assert!(
             !out.contains("small"),
             "expected low-score chunk to be filtered"
+        );
+    }
+
+    #[test]
+    fn retrieval_augmentation_falls_back_when_no_matches() {
+        let retrieval = LocalFileRetrievalService {
+            chunks: vec![RetrievedChunk {
+                source: "fallback:1".to_string(),
+                text: "unrelated content".to_string(),
+                score: 0,
+            }],
+        };
+
+        let prompt = "release rollout";
+        let out = augment_prompt_with_retrieval(
+            &retrieval,
+            prompt,
+            RetrievalPolicy {
+                max_chunks: 3,
+                max_chars: 4000,
+                min_score: 1,
+            },
+        )
+        .expect("augmentation should pass");
+        assert_eq!(
+            out, prompt,
+            "no-result path should preserve original prompt"
         );
     }
 
