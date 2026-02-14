@@ -31,6 +31,12 @@ Core types implemented in `/Users/jameskaranja/Developer/projects/zavora-cli/src
   - Scores chunks by term overlap against the query
   - Returns top `N` chunks
 
+- `semantic` (feature-gated):
+  - Enabled with Cargo feature `semantic-search`
+  - Loads a local text file
+  - Uses semantic similarity ranking (Jaro-Winkler + lexical boost)
+  - Returns top `N` chunks
+
 ## Integration Points
 
 - Non-interactive commands:
@@ -48,7 +54,7 @@ Core types implemented in `/Users/jameskaranja/Developer/projects/zavora-cli/src
 ## Configuration
 
 CLI/env:
-- `--retrieval-backend` / `ZAVORA_RETRIEVAL_BACKEND` (`disabled|local`)
+- `--retrieval-backend` / `ZAVORA_RETRIEVAL_BACKEND` (`disabled|local|semantic`)
 - `--retrieval-doc-path` / `ZAVORA_RETRIEVAL_DOC_PATH`
 - `--retrieval-max-chunks` / `ZAVORA_RETRIEVAL_MAX_CHUNKS`
 
@@ -57,8 +63,12 @@ Profile fields:
 - `retrieval_doc_path`
 - `retrieval_max_chunks`
 
+Feature flag:
+- `semantic-search` enables `semantic` backend support
+
 ## Safety and Fallback
 
 - Retrieval is disabled by default.
 - If retrieval backend is `local` without a doc path, command fails with actionable diagnostics.
+- If retrieval backend is `semantic` without feature `semantic-search`, command fails with actionable diagnostics.
 - If retrieval returns no matches, prompt is unchanged.

@@ -51,6 +51,7 @@ enum SessionBackend {
 enum RetrievalBackend {
     Disabled,
     Local,
+    Semantic,
 }
 
 #[derive(Debug, Subcommand)]
@@ -569,23 +570,37 @@ struct LocalFileRetrievalService {
     chunks: Vec<RetrievedChunk>,
 }
 
+fn load_retrieval_chunks(path: &str, source_prefix: &str) -> Result<Vec<RetrievedChunk>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read retrieval doc at '{}'", path))?;
+    let chunks = content
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+        .enumerate()
+        .map(|(index, text)| RetrievedChunk {
+            source: format!("{source_prefix}:{path}#{}", index + 1),
+            text: text.to_string(),
+            score: 0,
+        })
+        .collect::<Vec<RetrievedChunk>>();
+    Ok(chunks)
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() > 2)
+        .collect::<Vec<String>>()
+}
+
 impl LocalFileRetrievalService {
     fn load(path: &str) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read retrieval doc at '{}'", path))?;
-        let chunks = content
-            .split("\n\n")
-            .map(str::trim)
-            .filter(|chunk| !chunk.is_empty())
-            .enumerate()
-            .map(|(index, text)| RetrievedChunk {
-                source: format!("local:{}#{}", path, index + 1),
-                text: text.to_string(),
-                score: 0,
-            })
-            .collect::<Vec<RetrievedChunk>>();
-
-        Ok(Self { chunks })
+        Ok(Self {
+            chunks: load_retrieval_chunks(path, "local")?,
+        })
     }
 }
 
@@ -595,12 +610,7 @@ impl RetrievalService for LocalFileRetrievalService {
     }
 
     fn retrieve(&self, query: &str, max_chunks: usize) -> Result<Vec<RetrievedChunk>> {
-        let terms = query
-            .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
-            .map(str::to_ascii_lowercase)
-            .filter(|token| token.len() > 2)
-            .collect::<Vec<String>>();
+        let terms = query_terms(query);
 
         if terms.is_empty() {
             return Ok(Vec::new());
@@ -629,6 +639,58 @@ impl RetrievalService for LocalFileRetrievalService {
     }
 }
 
+#[cfg(feature = "semantic-search")]
+struct SemanticLocalRetrievalService {
+    chunks: Vec<RetrievedChunk>,
+}
+
+#[cfg(feature = "semantic-search")]
+impl SemanticLocalRetrievalService {
+    fn load(path: &str) -> Result<Self> {
+        Ok(Self {
+            chunks: load_retrieval_chunks(path, "semantic")?,
+        })
+    }
+}
+
+#[cfg(feature = "semantic-search")]
+impl RetrievalService for SemanticLocalRetrievalService {
+    fn backend_name(&self) -> &'static str {
+        "semantic"
+    }
+
+    fn retrieve(&self, query: &str, max_chunks: usize) -> Result<Vec<RetrievedChunk>> {
+        let query_lower = query.to_ascii_lowercase();
+        let terms = query_terms(query);
+        if query_lower.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored = self
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let body = chunk.text.to_ascii_lowercase();
+                let similarity = strsim::jaro_winkler(&query_lower, &body);
+                let lexical_hits = terms
+                    .iter()
+                    .filter(|term| body.contains(term.as_str()))
+                    .count();
+                let score = ((similarity * 1000.0) as usize) + (lexical_hits * 25);
+                (score > 0).then_some(RetrievedChunk {
+                    source: chunk.source.clone(),
+                    text: chunk.text.clone(),
+                    score,
+                })
+            })
+            .collect::<Vec<RetrievedChunk>>();
+
+        scored.sort_by_key(|chunk| std::cmp::Reverse(chunk.score));
+        scored.truncate(max_chunks.max(1));
+        Ok(scored)
+    }
+}
+
 fn build_retrieval_service(cfg: &RuntimeConfig) -> Result<Arc<dyn RetrievalService>> {
     match cfg.retrieval_backend {
         RetrievalBackend::Disabled => Ok(Arc::new(DisabledRetrievalService)),
@@ -640,6 +702,27 @@ fn build_retrieval_service(cfg: &RuntimeConfig) -> Result<Arc<dyn RetrievalServi
             })?;
             let service = LocalFileRetrievalService::load(path)?;
             Ok(Arc::new(service))
+        }
+        RetrievalBackend::Semantic => {
+            let path = cfg.retrieval_doc_path.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "retrieval backend 'semantic' requires --retrieval-doc-path or profile.retrieval_doc_path"
+                )
+            })?;
+
+            #[cfg(feature = "semantic-search")]
+            {
+                let service = SemanticLocalRetrievalService::load(path)?;
+                return Ok(Arc::new(service));
+            }
+
+            #[cfg(not(feature = "semantic-search"))]
+            {
+                let _ = path;
+                Err(anyhow::anyhow!(
+                    "retrieval backend 'semantic' requires feature 'semantic-search'. Rebuild with: cargo run --features semantic-search -- ..."
+                ))
+            }
         }
     }
 }
@@ -2304,6 +2387,41 @@ provider = "not-a-provider"
             err.to_string()
                 .contains("retrieval backend 'local' requires")
         );
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    #[test]
+    fn semantic_retrieval_backend_requires_feature_flag() {
+        let mut cfg = base_cfg();
+        cfg.retrieval_backend = RetrievalBackend::Semantic;
+        cfg.retrieval_doc_path = Some("README.md".to_string());
+        let err = match build_retrieval_service(&cfg) {
+            Ok(_) => panic!("semantic retrieval should require feature flag"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("requires feature 'semantic-search'")
+        );
+    }
+
+    #[cfg(feature = "semantic-search")]
+    #[test]
+    fn semantic_retrieval_backend_returns_ranked_chunks() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("knowledge.txt");
+        std::fs::write(
+            &path,
+            "Agile release planning and rollout gates\n\nSemantic retrieval context ranking",
+        )
+        .expect("doc file should write");
+
+        let retrieval = SemanticLocalRetrievalService::load(path.to_string_lossy().as_ref())
+            .expect("semantic retrieval should load");
+        let chunks = retrieval
+            .retrieve("rollout gates", 2)
+            .expect("semantic retrieval should run");
+        assert!(!chunks.is_empty(), "expected semantic retrieval matches");
     }
 
     #[tokio::test]

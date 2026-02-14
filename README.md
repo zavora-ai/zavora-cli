@@ -123,6 +123,7 @@ Retrieval is pluggable and disabled by default.
 
 - `disabled`: no context injection (default)
 - `local`: load chunks from a local text/markdown document and inject top matches into prompts
+- `semantic`: feature-gated semantic ranking backend (`--features semantic-search`)
 
 Example:
 
@@ -132,6 +133,15 @@ cargo run -- \
   --retrieval-doc-path ./docs/knowledge.md \
   --retrieval-max-chunks 3 \
   ask "Create a release plan from our internal standards"
+```
+
+Feature-gated semantic backend:
+
+```bash
+cargo run --features semantic-search -- \
+  --retrieval-backend semantic \
+  --retrieval-doc-path ./docs/knowledge.md \
+  ask "What are our rollout guardrails?"
 ```
 
 Retrieval integration points:

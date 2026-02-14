@@ -5962,6 +5962,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "strsim",
  "tempfile",
  "tokio",
  "toml",
