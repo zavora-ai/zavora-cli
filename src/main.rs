@@ -46,6 +46,13 @@ enum SessionBackend {
     Sqlite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RetrievalBackend {
+    Disabled,
+    Local,
+}
+
 #[derive(Debug, Subcommand)]
 enum ProfileCommands {
     #[command(about = "List configured profiles and highlight the active profile")]
@@ -94,7 +101,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
-  - In-session provider/model switching is planned in Sprint 2.";
+  - In chat, use /provider <name>, /model <id>, and /status for in-session switching.";
 
 #[derive(Debug, Parser)]
 #[command(name = "zavora-cli")]
@@ -127,6 +134,15 @@ struct Cli {
 
     #[arg(long, env = "ZAVORA_SESSION_DB_URL")]
     session_db_url: Option<String>,
+
+    #[arg(long, env = "ZAVORA_RETRIEVAL_BACKEND", value_enum)]
+    retrieval_backend: Option<RetrievalBackend>,
+
+    #[arg(long, env = "ZAVORA_RETRIEVAL_DOC_PATH")]
+    retrieval_doc_path: Option<String>,
+
+    #[arg(long, env = "ZAVORA_RETRIEVAL_MAX_CHUNKS")]
+    retrieval_max_chunks: Option<usize>,
 
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
@@ -187,6 +203,9 @@ struct RuntimeConfig {
     session_id: String,
     session_backend: SessionBackend,
     session_db_url: String,
+    retrieval_backend: RetrievalBackend,
+    retrieval_doc_path: Option<String>,
+    retrieval_max_chunks: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -206,6 +225,9 @@ struct ProfileConfig {
     session_id: Option<String>,
     session_backend: Option<SessionBackend>,
     session_db_url: Option<String>,
+    retrieval_backend: Option<RetrievalBackend>,
+    retrieval_doc_path: Option<String>,
+    retrieval_max_chunks: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,7 +293,7 @@ fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
         return ErrorCategory::Session;
     }
 
-    if msg.contains("tool") || msg.contains("mcp") {
+    if msg.contains("tool") || msg.contains("mcp") || msg.contains("retrieval") {
         return ErrorCategory::Tooling;
     }
 
@@ -299,6 +321,12 @@ async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
     let profiles = load_profiles(&cli.config_path)?;
     let cfg = resolve_runtime_config(&cli, &profiles)?;
+    let retrieval_service = build_retrieval_service(&cfg)?;
+    tracing::info!(
+        backend = retrieval_service.backend_name(),
+        max_chunks = cfg.retrieval_max_chunks,
+        "Using retrieval backend"
+    );
 
     match cli.command {
         Commands::Ask { prompt } => {
@@ -307,11 +335,13 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let agent = build_single_agent(model)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = prompt.join(" ");
-            let answer = run_prompt(&runner, &cfg, &prompt).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
+                    .await?;
             println!("{answer}");
         }
         Commands::Chat => {
-            run_chat(cfg.clone()).await?;
+            run_chat(cfg.clone(), retrieval_service.clone()).await?;
         }
         Commands::Workflow {
             mode,
@@ -323,7 +353,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let agent = build_workflow_agent(mode, model, max_iterations)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = prompt.join(" ");
-            let answer = run_prompt(&runner, &cfg, &prompt).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
+                    .await?;
             println!("{answer}");
         }
         Commands::ReleasePlan { goal, releases } => {
@@ -332,7 +364,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let agent = build_release_planning_agent(model, releases)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = goal.join(" ");
-            let answer = run_prompt(&runner, &cfg, &prompt).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval_service.as_ref())
+                    .await?;
             println!("{answer}");
         }
         Commands::Doctor => {
@@ -446,6 +480,19 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .clone()
             .or(profile.session_db_url)
             .unwrap_or_else(|| "sqlite://.zavora/sessions.db".to_string()),
+        retrieval_backend: cli
+            .retrieval_backend
+            .or(profile.retrieval_backend)
+            .unwrap_or(RetrievalBackend::Disabled),
+        retrieval_doc_path: cli
+            .retrieval_doc_path
+            .clone()
+            .or(profile.retrieval_doc_path),
+        retrieval_max_chunks: cli
+            .retrieval_max_chunks
+            .or(profile.retrieval_max_chunks)
+            .unwrap_or(3)
+            .max(1),
     })
 }
 
@@ -483,7 +530,144 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("Session ID: {}", cfg.session_id);
     println!("Session backend: {:?}", cfg.session_backend);
     println!("Session DB URL: {}", cfg.session_db_url);
+    println!("Retrieval backend: {:?}", cfg.retrieval_backend);
+    println!(
+        "Retrieval doc path: {}",
+        cfg.retrieval_doc_path
+            .as_deref()
+            .unwrap_or("<not configured>")
+    );
+    println!("Retrieval max chunks: {}", cfg.retrieval_max_chunks);
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RetrievedChunk {
+    source: String,
+    text: String,
+    score: usize,
+}
+
+trait RetrievalService: Send + Sync {
+    fn backend_name(&self) -> &'static str;
+    fn retrieve(&self, query: &str, max_chunks: usize) -> Result<Vec<RetrievedChunk>>;
+}
+
+struct DisabledRetrievalService;
+
+impl RetrievalService for DisabledRetrievalService {
+    fn backend_name(&self) -> &'static str {
+        "disabled"
+    }
+
+    fn retrieve(&self, _query: &str, _max_chunks: usize) -> Result<Vec<RetrievedChunk>> {
+        Ok(Vec::new())
+    }
+}
+
+struct LocalFileRetrievalService {
+    chunks: Vec<RetrievedChunk>,
+}
+
+impl LocalFileRetrievalService {
+    fn load(path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read retrieval doc at '{}'", path))?;
+        let chunks = content
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|chunk| !chunk.is_empty())
+            .enumerate()
+            .map(|(index, text)| RetrievedChunk {
+                source: format!("local:{}#{}", path, index + 1),
+                text: text.to_string(),
+                score: 0,
+            })
+            .collect::<Vec<RetrievedChunk>>();
+
+        Ok(Self { chunks })
+    }
+}
+
+impl RetrievalService for LocalFileRetrievalService {
+    fn backend_name(&self) -> &'static str {
+        "local"
+    }
+
+    fn retrieve(&self, query: &str, max_chunks: usize) -> Result<Vec<RetrievedChunk>> {
+        let terms = query
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+            .map(str::to_ascii_lowercase)
+            .filter(|token| token.len() > 2)
+            .collect::<Vec<String>>();
+
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored = self
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let body = chunk.text.to_ascii_lowercase();
+                let score = terms
+                    .iter()
+                    .filter(|term| body.contains(term.as_str()))
+                    .count();
+                (score > 0).then_some(RetrievedChunk {
+                    source: chunk.source.clone(),
+                    text: chunk.text.clone(),
+                    score,
+                })
+            })
+            .collect::<Vec<RetrievedChunk>>();
+
+        scored.sort_by_key(|chunk| std::cmp::Reverse(chunk.score));
+        scored.truncate(max_chunks.max(1));
+        Ok(scored)
+    }
+}
+
+fn build_retrieval_service(cfg: &RuntimeConfig) -> Result<Arc<dyn RetrievalService>> {
+    match cfg.retrieval_backend {
+        RetrievalBackend::Disabled => Ok(Arc::new(DisabledRetrievalService)),
+        RetrievalBackend::Local => {
+            let path = cfg.retrieval_doc_path.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "retrieval backend 'local' requires --retrieval-doc-path or profile.retrieval_doc_path"
+                )
+            })?;
+            let service = LocalFileRetrievalService::load(path)?;
+            Ok(Arc::new(service))
+        }
+    }
+}
+
+fn augment_prompt_with_retrieval(
+    retrieval: &dyn RetrievalService,
+    prompt: &str,
+    max_chunks: usize,
+) -> Result<String> {
+    let chunks = retrieval.retrieve(prompt, max_chunks)?;
+    if chunks.is_empty() {
+        return Ok(prompt.to_string());
+    }
+
+    let mut out = String::new();
+    out.push_str("Retrieved context (use if relevant):\n");
+    for (index, chunk) in chunks.iter().enumerate() {
+        out.push_str(&format!(
+            "[{}] {} (score={})\n{}\n",
+            index + 1,
+            chunk.source,
+            chunk.score,
+            chunk.text
+        ));
+    }
+    out.push_str("\nUser request:\n");
+    out.push_str(prompt);
+    Ok(out)
 }
 
 fn init_tracing(log_filter: &str) -> Result<()> {
@@ -1077,7 +1261,20 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
         .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string()))
 }
 
-async fn run_chat(mut cfg: RuntimeConfig) -> Result<()> {
+async fn run_prompt_with_retrieval(
+    runner: &Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    retrieval: &dyn RetrievalService,
+) -> Result<String> {
+    let enriched = augment_prompt_with_retrieval(retrieval, prompt, cfg.retrieval_max_chunks)?;
+    run_prompt(runner, cfg, &enriched).await
+}
+
+async fn run_chat(
+    mut cfg: RuntimeConfig,
+    retrieval_service: Arc<dyn RetrievalService>,
+) -> Result<()> {
     let session_service = build_session_service(&cfg).await?;
     let (mut runner, mut resolved_provider, mut model_name) =
         build_single_runner_for_chat(&cfg, session_service.clone()).await?;
@@ -1187,7 +1384,8 @@ async fn run_chat(mut cfg: RuntimeConfig) -> Result<()> {
             continue;
         }
 
-        run_prompt_streaming(&runner, &cfg, input).await?;
+        run_prompt_streaming_with_retrieval(&runner, &cfg, input, retrieval_service.as_ref())
+            .await?;
     }
 
     Ok(())
@@ -1268,6 +1466,16 @@ async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str
 
     println!("{fallback}");
     Ok(())
+}
+
+async fn run_prompt_streaming_with_retrieval(
+    runner: &Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    retrieval: &dyn RetrievalService,
+) -> Result<()> {
+    let enriched = augment_prompt_with_retrieval(retrieval, prompt, cfg.retrieval_max_chunks)?;
+    run_prompt_streaming(runner, cfg, &enriched).await
 }
 
 fn event_text(event: &Event) -> String {
@@ -1448,6 +1656,14 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
     println!(
         "Session backend: {:?} (session_id: {}, app: {}, user: {})",
         cfg.session_backend, cfg.session_id, cfg.app_name, cfg.user_id
+    );
+    println!(
+        "Retrieval: backend={:?}, doc_path={}, max_chunks={}",
+        cfg.retrieval_backend,
+        cfg.retrieval_doc_path
+            .as_deref()
+            .unwrap_or("<not configured>"),
+        cfg.retrieval_max_chunks
     );
 
     if matches!(cfg.session_backend, SessionBackend::Sqlite) {
@@ -1718,6 +1934,9 @@ mod tests {
             session_id: "test-session".to_string(),
             session_backend: SessionBackend::Memory,
             session_db_url: "sqlite://.zavora/test.db".to_string(),
+            retrieval_backend: RetrievalBackend::Disabled,
+            retrieval_doc_path: None,
+            retrieval_max_chunks: 3,
         }
     }
 
@@ -1752,6 +1971,9 @@ mod tests {
             session_id: None,
             session_backend: None,
             session_db_url: None,
+            retrieval_backend: None,
+            retrieval_doc_path: None,
+            retrieval_max_chunks: None,
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -1965,6 +2187,9 @@ session_db_url = "sqlite://.zavora/dev.db"
 app_name = "zavora-dev"
 user_id = "dev-user"
 session_id = "dev-session"
+retrieval_backend = "local"
+retrieval_doc_path = "docs/knowledge.md"
+retrieval_max_chunks = 5
 "#,
         )
         .expect("config should write");
@@ -1980,6 +2205,9 @@ session_id = "dev-session"
         assert_eq!(cfg.app_name, "zavora-dev");
         assert_eq!(cfg.user_id, "dev-user");
         assert_eq!(cfg.session_id, "dev-session");
+        assert_eq!(cfg.retrieval_backend, RetrievalBackend::Local);
+        assert_eq!(cfg.retrieval_doc_path.as_deref(), Some("docs/knowledge.md"));
+        assert_eq!(cfg.retrieval_max_chunks, 5);
     }
 
     #[test]
@@ -2033,6 +2261,49 @@ provider = "not-a-provider"
             validate_model_for_provider(Provider::Anthropic, "claude-sonnet-4-20250514").is_ok()
         );
         assert!(validate_model_for_provider(Provider::Openai, "claude-sonnet-4-20250514").is_err());
+    }
+
+    #[test]
+    fn augment_prompt_with_retrieval_leaves_prompt_unchanged_when_disabled() {
+        let retrieval = DisabledRetrievalService;
+        let prompt = "Plan release milestones";
+        let out = augment_prompt_with_retrieval(&retrieval, prompt, 3)
+            .expect("prompt augmentation should pass");
+        assert_eq!(out, prompt);
+    }
+
+    #[test]
+    fn local_file_retrieval_returns_relevant_chunks() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("knowledge.txt");
+        std::fs::write(
+            &path,
+            "Rust CLI release planning\n\nADK retrieval abstraction and context injection",
+        )
+        .expect("doc file should write");
+
+        let retrieval = LocalFileRetrievalService::load(path.to_string_lossy().as_ref())
+            .expect("local retrieval should load");
+        let chunks = retrieval
+            .retrieve("retrieval abstraction", 3)
+            .expect("retrieval should run");
+        assert!(!chunks.is_empty(), "expected at least one relevant chunk");
+    }
+
+    #[test]
+    fn local_retrieval_backend_requires_doc_path() {
+        let mut cfg = base_cfg();
+        cfg.retrieval_backend = RetrievalBackend::Local;
+        cfg.retrieval_doc_path = None;
+
+        let err = match build_retrieval_service(&cfg) {
+            Ok(_) => panic!("missing doc path should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("retrieval backend 'local' requires")
+        );
     }
 
     #[tokio::test]

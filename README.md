@@ -117,6 +117,27 @@ cargo run -- profiles list
 cargo run -- --profile ops profiles show
 ```
 
+## Retrieval Abstraction
+
+Retrieval is pluggable and disabled by default.
+
+- `disabled`: no context injection (default)
+- `local`: load chunks from a local text/markdown document and inject top matches into prompts
+
+Example:
+
+```bash
+cargo run -- \
+  --retrieval-backend local \
+  --retrieval-doc-path ./docs/knowledge.md \
+  --retrieval-max-chunks 3 \
+  ask "Create a release plan from our internal standards"
+```
+
+Retrieval integration points:
+- `ask`, `workflow`, `release-plan`: prompt is enriched before runner execution
+- `chat`: each user turn is enriched before streaming execution
+
 ## Persistent Sessions
 
 Use SQLite-backed sessions to persist conversation history across CLI restarts:
@@ -147,3 +168,4 @@ This repo follows a release train model with SemVer tags:
 See `docs/AGILE_RELEASE_CYCLE.md` for the full process.
 See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint roadmap and ticket breakdown.
 See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `docs/SPRINT_BACKLOG_RISK_REGISTER.md` for Sprint 0 execution artifacts.
+See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration details.
