@@ -93,3 +93,4 @@ This repo follows a release train model with SemVer tags:
 - Publish release notes from `CHANGELOG.md`
 
 See `docs/AGILE_RELEASE_CYCLE.md` for the full process.
+See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint roadmap and ticket breakdown.
