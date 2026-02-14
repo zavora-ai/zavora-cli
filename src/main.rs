@@ -1087,7 +1087,7 @@ async fn run_chat(mut cfg: RuntimeConfig) -> Result<()> {
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
     println!(
-        "Interactive mode started. Type /exit to quit. Use /provider <name> to switch provider."
+        "Interactive mode started. Type /exit to quit. Use /provider <name> or /model <id> to switch runtime."
     );
     let stdin = io::stdin();
     let mut line = String::new();
@@ -1146,6 +1146,41 @@ async fn run_chat(mut cfg: RuntimeConfig) -> Result<()> {
                     println!(
                         "Provider remains {:?} (model={}).",
                         resolved_provider, model_name
+                    );
+                }
+            }
+            continue;
+        }
+
+        if let Some(rest) = input.strip_prefix("/model") {
+            let next_model = rest.trim();
+            if next_model.is_empty() {
+                println!("Usage: /model <model-id>");
+                continue;
+            }
+
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.model = Some(next_model.to_string());
+
+            match build_single_runner_for_chat(&switched_cfg, session_service.clone()).await {
+                Ok((new_runner, new_resolved_provider, new_model_name)) => {
+                    runner = new_runner;
+                    resolved_provider = new_resolved_provider;
+                    model_name = new_model_name;
+                    switched_cfg.provider = new_resolved_provider;
+                    switched_cfg.model = Some(model_name.clone());
+                    cfg = switched_cfg;
+                    tracing::info!(provider = ?resolved_provider, model = %model_name, "Switched model");
+                    println!(
+                        "Switched model to '{}' on provider {:?}. Session continuity preserved.",
+                        model_name, resolved_provider
+                    );
+                }
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err));
+                    println!(
+                        "Model remains '{}' on provider {:?}.",
+                        model_name, resolved_provider
                     );
                 }
             }
@@ -1250,6 +1285,32 @@ fn event_text(event: &Event) -> String {
     }
 }
 
+fn validate_model_for_provider(provider: Provider, model_name: &str) -> Result<()> {
+    let is_valid = match provider {
+        Provider::Gemini => model_name.starts_with("gemini"),
+        Provider::Openai => {
+            model_name.starts_with("gpt-")
+                || model_name.starts_with("o1")
+                || model_name.starts_with("o3")
+        }
+        Provider::Anthropic => model_name.starts_with("claude"),
+        Provider::Deepseek => model_name.starts_with("deepseek"),
+        Provider::Groq => !model_name.trim().is_empty(),
+        Provider::Ollama => !model_name.trim().is_empty(),
+        Provider::Auto => true,
+    };
+
+    if is_valid {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "model '{}' is not compatible with provider '{:?}'",
+        model_name,
+        provider
+    ))
+}
+
 fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)> {
     let provider = match cfg.provider {
         Provider::Auto => detect_provider().context(
@@ -1267,6 +1328,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
                 .model
                 .clone()
                 .unwrap_or_else(|| "gemini-2.5-flash".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = GeminiModel::new(api_key, model_name.clone())?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1277,6 +1339,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
                 .model
                 .clone()
                 .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = OpenAIClient::new(OpenAIConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1287,6 +1350,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
                 .model
                 .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = AnthropicClient::new(AnthropicConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1297,6 +1361,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
                 .model
                 .clone()
                 .unwrap_or_else(|| "deepseek-chat".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = DeepSeekClient::new(DeepSeekConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1307,6 +1372,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
                 .model
                 .clone()
                 .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = GroqClient::new(GroqConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1314,6 +1380,7 @@ fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)
             let host = std::env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
             let model_name = cfg.model.clone().unwrap_or_else(|| "llama3.2".to_string());
+            validate_model_for_provider(provider, &model_name)?;
             let model = OllamaModel::new(OllamaConfig::with_host(host, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
         }
@@ -1957,6 +2024,15 @@ provider = "not-a-provider"
                 "Supported values: auto, gemini, openai, anthropic, deepseek, groq, ollama"
             )
         );
+    }
+
+    #[test]
+    fn model_compatibility_validation_rejects_cross_provider_model_ids() {
+        assert!(validate_model_for_provider(Provider::Openai, "gpt-4o-mini").is_ok());
+        assert!(
+            validate_model_for_provider(Provider::Anthropic, "claude-sonnet-4-20250514").is_ok()
+        );
+        assert!(validate_model_for_provider(Provider::Openai, "claude-sonnet-4-20250514").is_err());
     }
 
     #[tokio::test]
