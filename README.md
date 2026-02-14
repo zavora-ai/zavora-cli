@@ -12,6 +12,7 @@ It is structured for fast iteration and release-based delivery with CI/release a
   - `sequential` (`SequentialAgent`)
   - `parallel` (`ParallelAgent` + synthesis stage)
   - `loop` (`LoopAgent` + `ExitLoopTool`)
+  - `graph` (`GraphAgent` with conditional routing and reusable templates)
 - Session-backed execution with `Runner`
 - Built-in release planning command for agile slices
 
@@ -41,6 +42,10 @@ cargo run -- --provider openai --model gpt-4o-mini chat
 
 ```bash
 cargo run -- workflow sequential "Plan an MVP rollout with quality gates"
+```
+
+```bash
+cargo run -- workflow graph "Draft a release rollout plan with risks"
 ```
 
 ```bash
@@ -251,3 +256,4 @@ See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint 
 See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `docs/SPRINT_BACKLOG_RISK_REGISTER.md` for Sprint 0 execution artifacts.
 See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration details.
 See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime registration flow.
+See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.

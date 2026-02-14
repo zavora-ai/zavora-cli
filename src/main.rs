@@ -7,10 +7,10 @@ use std::time::Duration;
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::{
     Agent, AnthropicClient, AnthropicConfig, Content, DeepSeekClient, DeepSeekConfig, Event,
-    ExitLoopTool, FunctionTool, GeminiModel, GroqClient, GroqConfig, InMemoryArtifactService,
-    InMemorySessionService, Llm, LlmAgentBuilder, LoopAgent, OllamaConfig, OllamaModel,
-    OpenAIClient, OpenAIConfig, ParallelAgent, Part, RunConfig, Runner, RunnerConfig,
-    SequentialAgent, Tool, Toolset,
+    ExitLoopTool, FunctionTool, GeminiModel, GraphAgent, GroqClient, GroqConfig,
+    InMemoryArtifactService, InMemorySessionService, Llm, LlmAgentBuilder, LlmRequest, LoopAgent,
+    NodeOutput, OllamaConfig, OllamaModel, OpenAIClient, OpenAIConfig, ParallelAgent, Part,
+    Router, RunConfig, Runner, RunnerConfig, SequentialAgent, Tool, Toolset, END, START,
 };
 use adk_rust::{ReadonlyContext, ToolConfirmationDecision, ToolConfirmationPolicy};
 use adk_session::{
@@ -41,6 +41,7 @@ enum WorkflowMode {
     Sequential,
     Parallel,
     Loop,
+    Graph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
@@ -1405,7 +1406,203 @@ fn build_workflow_agent(
         WorkflowMode::Sequential => build_sequential_agent(model),
         WorkflowMode::Parallel => build_parallel_agent(model),
         WorkflowMode::Loop => build_loop_agent(model, max_iterations),
+        WorkflowMode::Graph => build_graph_workflow_agent(model),
     }
+}
+
+fn classify_workflow_route(input: &str) -> &'static str {
+    let lower = input.to_ascii_lowercase();
+    if lower.contains("risk")
+        || lower.contains("rollback")
+        || lower.contains("mitigation")
+        || lower.contains("incident")
+    {
+        return "risk";
+    }
+    if lower.contains("architecture")
+        || lower.contains("design")
+        || lower.contains("system")
+        || lower.contains("scal")
+    {
+        return "architecture";
+    }
+    if lower.contains("release")
+        || lower.contains("sprint")
+        || lower.contains("milestone")
+        || lower.contains("roadmap")
+    {
+        return "release";
+    }
+    "delivery"
+}
+
+fn workflow_template(route: &str) -> &'static str {
+    match route {
+        "release" => {
+            "Template: Release Planning\n\
+             Return concise markdown with sections: Objectives, Release Slices, Acceptance \
+             Criteria, Rollout Steps."
+        }
+        "architecture" => {
+            "Template: Architecture Design\n\
+             Return concise markdown with sections: Constraints, Proposed Components, \
+             Data/Control Flow, Risks."
+        }
+        "risk" => {
+            "Template: Risk and Reliability\n\
+             Return concise markdown with sections: Top Risks, Impact, Mitigation, \
+             Detection, Fallback."
+        }
+        _ => {
+            "Template: Execution Delivery\n\
+             Return concise markdown with sections: Scope, Implementation Steps, \
+             Validation, Next Actions."
+        }
+    }
+}
+
+async fn generate_model_text(model: Arc<dyn Llm>, prompt: &str) -> Result<String> {
+    let req = LlmRequest::new(
+        model.name().to_string(),
+        vec![Content::new("user").with_text(prompt)],
+    );
+    let mut stream = model
+        .generate_content(req, false)
+        .await
+        .context("failed to invoke model inside graph workflow")?;
+
+    let mut out = String::new();
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("graph workflow model stream error")?;
+        if let Some(content) = chunk.content {
+            for part in content.parts {
+                if let Part::Text { text } = part {
+                    out.push_str(&text);
+                }
+            }
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!(
+            "graph workflow did not produce textual model output"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
+    let route_classifier = |ctx: adk_rust::graph::NodeContext| async move {
+        let input = ctx
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let route = classify_workflow_route(&input);
+        Ok(NodeOutput::new().with_update("route", json!(route)))
+    };
+
+    let release_prep = |ctx: adk_rust::graph::NodeContext| async move {
+        let input = ctx
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("release"), input);
+        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    };
+
+    let architecture_prep = |ctx: adk_rust::graph::NodeContext| async move {
+        let input = ctx
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let prompt = format!(
+            "{}\n\nUser request:\n{}",
+            workflow_template("architecture"),
+            input
+        );
+        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    };
+
+    let risk_prep = |ctx: adk_rust::graph::NodeContext| async move {
+        let input = ctx
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("risk"), input);
+        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    };
+
+    let delivery_prep = |ctx: adk_rust::graph::NodeContext| async move {
+        let input = ctx
+            .get("input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("delivery"), input);
+        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    };
+
+    let model_for_draft = model.clone();
+    let draft = move |ctx: adk_rust::graph::NodeContext| {
+        let model_for_draft = model_for_draft.clone();
+        async move {
+            let prompt = ctx
+                .get("branch_prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let route_selected = ctx
+                .get("route")
+                .and_then(Value::as_str)
+                .unwrap_or("delivery")
+                .to_string();
+
+            let output = generate_model_text(model_for_draft, &prompt)
+                .await
+                .map_err(|err| adk_rust::graph::GraphError::NodeExecutionFailed {
+                    node: "draft_response".to_string(),
+                    message: err.to_string(),
+                })?;
+
+            Ok(NodeOutput::new()
+                .with_update("output", json!(output))
+                .with_update("route_selected", json!(route_selected)))
+        }
+    };
+
+    let agent = GraphAgent::builder("graph_delivery")
+        .description("Graph-routed orchestration workflow")
+        .channels(&["input", "route", "branch_prompt", "output", "route_selected"])
+        .node_fn("classify", route_classifier)
+        .node_fn("prepare_release", release_prep)
+        .node_fn("prepare_architecture", architecture_prep)
+        .node_fn("prepare_risk", risk_prep)
+        .node_fn("prepare_delivery", delivery_prep)
+        .node_fn("draft_response", draft)
+        .edge(START, "classify")
+        .conditional_edge(
+            "classify",
+            Router::by_field("route"),
+            [
+                ("release", "prepare_release"),
+                ("architecture", "prepare_architecture"),
+                ("risk", "prepare_risk"),
+                ("delivery", "prepare_delivery"),
+            ],
+        )
+        .edge("prepare_release", "draft_response")
+        .edge("prepare_architecture", "draft_response")
+        .edge("prepare_risk", "draft_response")
+        .edge("prepare_delivery", "draft_response")
+        .edge("draft_response", END)
+        .build()?;
+
+    Ok(Arc::new(agent))
 }
 
 fn build_sequential_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
@@ -2798,6 +2995,7 @@ mod tests {
             WorkflowMode::Sequential,
             WorkflowMode::Parallel,
             WorkflowMode::Loop,
+            WorkflowMode::Graph,
         ];
 
         for mode in modes {
@@ -2928,6 +3126,31 @@ mod tests {
             final_stream_suffix("", "Hello world").as_deref(),
             Some("Hello world")
         );
+    }
+
+    #[test]
+    fn workflow_route_classifier_is_deterministic_for_key_intents() {
+        assert_eq!(classify_workflow_route("Plan release milestones"), "release");
+        assert_eq!(
+            classify_workflow_route("Evaluate architecture tradeoffs"),
+            "architecture"
+        );
+        assert_eq!(
+            classify_workflow_route("List risk mitigations and rollback"),
+            "risk"
+        );
+        assert_eq!(classify_workflow_route("Implement feature work"), "delivery");
+    }
+
+    #[test]
+    fn workflow_templates_exist_for_all_graph_routes() {
+        for route in ["release", "architecture", "risk", "delivery"] {
+            let template = workflow_template(route);
+            assert!(
+                !template.trim().is_empty(),
+                "template should be non-empty for route {route}"
+            );
+        }
     }
 
     #[test]
