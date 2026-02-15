@@ -20,6 +20,7 @@ Run this checklist before creating a `vX.Y.Z` tag.
 ## Release Notes
 
 - [ ] `CHANGELOG.md` updated
+- [ ] `docs/GA_SIGNOFF.md` updated and signed for target release
 - [ ] Known risks and mitigations documented
 - [ ] Rollback plan documented
 
