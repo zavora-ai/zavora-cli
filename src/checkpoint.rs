@@ -213,3 +213,191 @@ pub fn format_checkpoint_list(store: &CheckpointStore) -> String {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// Shadow-git checkpoint manager (feature: checkpoints)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "checkpoints")]
+pub mod shadow {
+    use anyhow::{Context as _, Result, bail};
+    use serde::{Deserialize, Serialize};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    /// File change statistics between two checkpoints.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct FileStats {
+        pub added: usize,
+        pub modified: usize,
+        pub deleted: usize,
+    }
+
+    /// A single shadow-git checkpoint.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ShadowCheckpoint {
+        pub tag: String,
+        pub description: String,
+        pub timestamp: String,
+    }
+
+    /// Manages a shadow bare git repo for tracking workspace file changes.
+    #[derive(Debug)]
+    pub struct ShadowCheckpointManager {
+        shadow_path: PathBuf,
+        work_tree: PathBuf,
+        next_tag: usize,
+        pub checkpoints: Vec<ShadowCheckpoint>,
+    }
+
+    impl ShadowCheckpointManager {
+        /// Initialize a new shadow checkpoint manager. Creates the bare repo if needed.
+        pub fn init(workspace: &Path) -> Result<Self> {
+            if !is_git_installed() {
+                bail!("git is required for checkpoints but not installed");
+            }
+
+            let shadow_path = workspace.join(".zavora").join("shadow-repo");
+            std::fs::create_dir_all(&shadow_path)
+                .context("failed to create shadow repo directory")?;
+
+            // Init bare repo if not already initialized.
+            if !shadow_path.join("HEAD").exists() {
+                run_git(&shadow_path, None, &["init", "--bare", &shadow_path.to_string_lossy()])?;
+                run_git(&shadow_path, None, &["config", "user.name", "zavora"])?;
+                run_git(&shadow_path, None, &["config", "user.email", "zavora@local"])?;
+                run_git(&shadow_path, None, &["config", "core.preloadindex", "true"])?;
+
+                // Initial commit.
+                stage_commit_tag(&shadow_path, workspace, "Initial state", "0")?;
+            }
+
+            Ok(Self {
+                shadow_path,
+                work_tree: workspace.to_path_buf(),
+                next_tag: 1,
+                checkpoints: vec![ShadowCheckpoint {
+                    tag: "0".into(),
+                    description: "Initial state".into(),
+                    timestamp: chrono_now(),
+                }],
+            })
+        }
+
+        /// Create a checkpoint of the current workspace state.
+        pub fn create(&mut self, description: &str) -> Result<&ShadowCheckpoint> {
+            let tag = self.next_tag.to_string();
+            self.next_tag += 1;
+
+            stage_commit_tag(&self.shadow_path, &self.work_tree, description, &tag)?;
+
+            self.checkpoints.push(ShadowCheckpoint {
+                tag: tag.clone(),
+                description: description.to_string(),
+                timestamp: chrono_now(),
+            });
+            Ok(self.checkpoints.last().unwrap())
+        }
+
+        /// Restore workspace files to a checkpoint.
+        pub fn restore(&self, tag: &str) -> Result<()> {
+            if !self.checkpoints.iter().any(|c| c.tag == tag) {
+                bail!("checkpoint '{tag}' not found");
+            }
+            let out = run_git(&self.shadow_path, Some(&self.work_tree), &[
+                "checkout", tag, "--", ".",
+            ])?;
+            if !out.status.success() {
+                bail!("restore failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(())
+        }
+
+        /// Show file change summary between two checkpoints.
+        pub fn diff(&self, from: &str, to: &str) -> Result<String> {
+            let out = run_git(&self.shadow_path, None, &["diff", "--stat", from, to])?;
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        }
+
+        /// Compute file stats between two checkpoints.
+        pub fn file_stats(&self, from: &str, to: &str) -> Result<FileStats> {
+            let out = run_git(&self.shadow_path, None, &["diff", "--name-status", from, to])?;
+            let mut stats = FileStats::default();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                match line.chars().next() {
+                    Some('A') => stats.added += 1,
+                    Some('M') => stats.modified += 1,
+                    Some('D') => stats.deleted += 1,
+                    Some('R' | 'C') => stats.modified += 1,
+                    _ => {}
+                }
+            }
+            Ok(stats)
+        }
+
+        /// List all checkpoints.
+        pub fn list(&self) -> &[ShadowCheckpoint] {
+            &self.checkpoints
+        }
+
+        /// Format checkpoint list for display.
+        pub fn format_list(&self) -> String {
+            if self.checkpoints.is_empty() {
+                return "No checkpoints.".into();
+            }
+            let mut out = String::from("Checkpoints:\n");
+            for cp in &self.checkpoints {
+                out.push_str(&format!("  [{}] {} ({})\n", cp.tag, cp.description, cp.timestamp));
+            }
+            out
+        }
+    }
+
+    impl Drop for ShadowCheckpointManager {
+        fn drop(&mut self) {
+            // Clean up shadow repo on exit.
+            let _ = std::fs::remove_dir_all(&self.shadow_path);
+        }
+    }
+
+    // -- helpers --
+
+    fn is_git_installed() -> bool {
+        Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    fn run_git(dir: &Path, work_tree: Option<&Path>, args: &[&str]) -> Result<Output> {
+        let mut cmd = Command::new("git");
+        cmd.arg(format!("--git-dir={}", dir.display()));
+        if let Some(wt) = work_tree {
+            cmd.arg(format!("--work-tree={}", wt.display()));
+        }
+        cmd.args(args);
+        cmd.output().context("failed to run git command")
+    }
+
+    fn stage_commit_tag(shadow: &Path, work_tree: &Path, message: &str, tag: &str) -> Result<()> {
+        run_git(shadow, Some(work_tree), &["add", "-A"])?;
+        let out = run_git(shadow, Some(work_tree), &[
+            "commit", "--allow-empty", "--no-verify", "-m", message,
+        ])?;
+        if !out.status.success() {
+            bail!("commit failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let out = run_git(shadow, None, &["tag", tag, "-f"])?;
+        if !out.status.success() {
+            bail!("tag failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(())
+    }
+
+    fn chrono_now() -> String {
+        // Use the same format as Event timestamps without adding chrono dependency.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let secs = now % 86400;
+        format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
