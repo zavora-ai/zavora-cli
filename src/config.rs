@@ -160,7 +160,6 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub tool_allowlist: Vec<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub tool_aliases: HashMap<String, String>,
 }
 

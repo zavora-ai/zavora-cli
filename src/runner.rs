@@ -15,6 +15,7 @@ use crate::mcp::discover_mcp_tools;
 use crate::provider::resolve_model;
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
+use crate::tool_policy::filter_tools_by_policy;
 use crate::tools::{build_builtin_tools, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME};
 
 #[cfg(test)]
@@ -205,24 +206,7 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
         .collect::<BTreeSet<String>>();
     tools.append(&mut mcp_tools);
 
-    if !cfg.agent_allow_tools.is_empty() {
-        let allow = cfg
-            .agent_allow_tools
-            .iter()
-            .map(|name| name.trim())
-            .filter(|name| !name.is_empty())
-            .collect::<BTreeSet<&str>>();
-        tools.retain(|tool| allow.contains(tool.name()));
-    }
-    if !cfg.agent_deny_tools.is_empty() {
-        let deny = cfg
-            .agent_deny_tools
-            .iter()
-            .map(|name| name.trim())
-            .filter(|name| !name.is_empty())
-            .collect::<BTreeSet<&str>>();
-        tools.retain(|tool| !deny.contains(tool.name()));
-    }
+    tools = filter_tools_by_policy(tools, &cfg.agent_allow_tools, &cfg.agent_deny_tools);
 
     let mcp_tool_names = tools
         .iter()

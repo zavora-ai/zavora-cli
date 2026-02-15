@@ -5996,6 +5996,7 @@ dependencies = [
  "adk-session",
  "adk-tool",
  "anyhow",
+ "async-trait",
  "axum 0.8.8",
  "clap",
  "serde",

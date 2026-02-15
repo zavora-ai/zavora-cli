@@ -8,6 +8,7 @@ use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
 
 use crate::config::{McpServerConfig, RuntimeConfig};
+use crate::tool_policy::apply_tool_aliases;
 
 #[derive(Debug)]
 struct McpDiscoveryContext {
@@ -154,10 +155,12 @@ pub async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
         .await
         {
             Ok(mut tools) => {
+                tools = apply_tool_aliases(tools, &server.tool_aliases);
                 tracing::info!(
                     server = %server.name,
                     endpoint = %server.endpoint,
                     tools = tools.len(),
+                    aliases = server.tool_aliases.len(),
                     "MCP tools discovered"
                 );
                 all_tools.append(&mut tools);
