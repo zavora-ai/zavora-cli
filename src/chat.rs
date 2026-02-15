@@ -378,41 +378,40 @@ pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools)
         .iter()
         .filter(|server| server.enabled.unwrap_or(true))
         .count();
-    let mut server_names = cfg
-        .mcp_servers
-        .iter()
-        .filter(|server| server.enabled.unwrap_or(true))
-        .map(|server| server.name.clone())
-        .collect::<Vec<String>>();
-    server_names.sort();
 
     println!(
-        "MCP: configured_servers={} enabled_servers={} discovered_tools={}",
+        "MCP: configured_servers={} enabled={} discovered_tools={}",
         cfg.mcp_servers.len(),
         enabled_servers,
         runtime_tools.mcp_tool_names.len()
     );
-    println!(
-        "Enabled MCP servers: {}",
-        if server_names.is_empty() {
-            "<none>".to_string()
-        } else {
-            server_names.join(", ")
+
+    for server in cfg.mcp_servers.iter().filter(|s| s.enabled.unwrap_or(true)) {
+        let auth_hint = crate::mcp::check_auth_hint(server);
+        let auth_status = match &auth_hint {
+            Some(hint) => format!("⚠ {}", hint),
+            None if server.auth_bearer_env.is_some() => "✓ configured".to_string(),
+            None => "none".to_string(),
+        };
+        let server_tools: Vec<&String> = runtime_tools
+            .mcp_tool_names
+            .iter()
+            .collect();
+        let tool_count = server_tools.len();
+        println!(
+            "  {} endpoint={} auth={} tools={}",
+            server.name, server.endpoint, auth_status, tool_count
+        );
+    }
+
+    if runtime_tools.mcp_tool_names.is_empty() {
+        println!("Discovered MCP tools: <none>");
+    } else {
+        println!("Discovered MCP tools:");
+        for name in &runtime_tools.mcp_tool_names {
+            println!("  - {name}");
         }
-    );
-    println!(
-        "Discovered MCP tools: {}",
-        if runtime_tools.mcp_tool_names.is_empty() {
-            "<none>".to_string()
-        } else {
-            runtime_tools
-                .mcp_tool_names
-                .iter()
-                .cloned()
-                .collect::<Vec<String>>()
-                .join(", ")
-        }
-    );
+    }
 }
 
 pub enum ChatCommandAction {
