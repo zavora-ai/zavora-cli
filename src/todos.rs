@@ -106,8 +106,8 @@ pub fn save_todo(workspace: &Path, todo: &TodoList) -> Result<()> {
 /// Load a todo list from disk by ID.
 pub fn load_todo(workspace: &Path, id: &str) -> Result<TodoList> {
     let path = todos_dir(workspace).join(format!("{id}.json"));
-    let json = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read todo '{id}'"))?;
+    let json =
+        std::fs::read_to_string(&path).with_context(|| format!("failed to read todo '{id}'"))?;
     serde_json::from_str(&json).with_context(|| format!("failed to parse todo '{id}'"))
 }
 
@@ -170,7 +170,7 @@ pub fn format_todos_summary(workspace: &Path) -> Result<String> {
             ));
         }
     }
-    out.push_str(&format!("\nUse /todos view <id> | delete <id> | clear-finished"));
+    out.push_str("\nUse /todos view <id> | delete <id> | clear-finished");
     Ok(out)
 }
 
@@ -215,10 +215,13 @@ pub async fn run_delegate(
     tool_confirmation: &ToolConfirmationSettings,
     telemetry: &TelemetrySink,
 ) -> DelegateResult {
-    let delegate_session_id = format!("delegate-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis());
+    let delegate_session_id = format!(
+        "delegate-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
 
     // Build an isolated config with a separate session
     let mut delegate_cfg = cfg.clone();
@@ -233,22 +236,20 @@ pub async fn run_delegate(
     )
     .await
     {
-        Ok((runner, _, _)) => {
-            match run_prompt(&runner, &delegate_cfg, task, telemetry).await {
-                Ok(output) => DelegateResult {
-                    task: task.to_string(),
-                    session_id: delegate_session_id,
-                    output,
-                    success: true,
-                },
-                Err(e) => DelegateResult {
-                    task: task.to_string(),
-                    session_id: delegate_session_id,
-                    output: format!("Error: {e}"),
-                    success: false,
-                },
-            }
-        }
+        Ok((runner, _, _)) => match run_prompt(&runner, &delegate_cfg, task, telemetry).await {
+            Ok(output) => DelegateResult {
+                task: task.to_string(),
+                session_id: delegate_session_id,
+                output,
+                success: true,
+            },
+            Err(e) => DelegateResult {
+                task: task.to_string(),
+                session_id: delegate_session_id,
+                output: format!("Error: {e}"),
+                success: false,
+            },
+        },
         Err(e) => DelegateResult {
             task: task.to_string(),
             session_id: delegate_session_id,

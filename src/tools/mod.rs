@@ -1,8 +1,8 @@
+pub mod confirming;
+pub mod execute_bash;
 pub mod fs_read;
 pub mod fs_write;
-pub mod execute_bash;
 pub mod github_ops;
-pub mod confirming;
 
 use std::sync::Arc;
 
@@ -104,7 +104,10 @@ fn todo_tool_response(args: &Value) -> Value {
     match action {
         "create" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or("untitled");
-            let description = args.get("description").and_then(Value::as_str).unwrap_or("");
+            let description = args
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let tasks: Vec<String> = args
                 .get("tasks")
                 .and_then(Value::as_array)
@@ -152,12 +155,10 @@ fn todo_tool_response(args: &Value) -> Value {
                 Err(e) => json!({"error": e.to_string()}),
             }
         }
-        "list" => {
-            match todos::list_todo_ids(&workspace) {
-                Ok(ids) => json!({"todo_lists": ids}),
-                Err(e) => json!({"error": e.to_string()}),
-            }
-        }
+        "list" => match todos::list_todo_ids(&workspace) {
+            Ok(ids) => json!({"todo_lists": ids}),
+            Err(e) => json!({"error": e.to_string()}),
+        },
         "delete" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or("");
             match todos::delete_todo(&workspace, id) {
@@ -165,6 +166,8 @@ fn todo_tool_response(args: &Value) -> Value {
                 Err(e) => json!({"error": e.to_string()}),
             }
         }
-        _ => json!({"error": format!("unknown action '{action}'. Use create|complete|view|list|delete")}),
+        _ => {
+            json!({"error": format!("unknown action '{action}'. Use create|complete|view|list|delete")})
+        }
     }
 }

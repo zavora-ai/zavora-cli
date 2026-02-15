@@ -52,11 +52,15 @@ fn display_result(tool_name: &str, result: &Value) {
             let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if !stdout.is_empty() {
                 eprint!("{stdout}");
-                if !stdout.ends_with('\n') { eprintln!(); }
+                if !stdout.ends_with('\n') {
+                    eprintln!();
+                }
             }
             if !stderr.is_empty() {
                 eprint!("{RED}{stderr}{RESET}");
-                if !stderr.ends_with('\n') { eprintln!(); }
+                if !stderr.ends_with('\n') {
+                    eprintln!();
+                }
             }
             if status == "error" {
                 if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
@@ -102,16 +106,26 @@ pub struct ConfirmingTool {
 
 impl ConfirmingTool {
     pub fn wrap(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
-        Arc::new(Self { inner: tool, display_only: false })
+        Arc::new(Self {
+            inner: tool,
+            display_only: false,
+        })
     }
 
     /// Wrap a tool in display-only mode: shows what it's doing but auto-approves.
     pub fn wrap_display_only(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
-        Arc::new(Self { inner: tool, display_only: true })
+        Arc::new(Self {
+            inner: tool,
+            display_only: true,
+        })
     }
 
     /// Execute inner tool and display the result.
-    async fn execute_and_display(&self, ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
+    async fn execute_and_display(
+        &self,
+        ctx: Arc<dyn ToolContext>,
+        args: Value,
+    ) -> adk_rust::Result<Value> {
         let result = self.inner.execute(ctx, args).await?;
         display_result(self.inner.name(), &result);
         Ok(result)
@@ -121,7 +135,10 @@ impl ConfirmingTool {
 /// Format a file diff for the confirmation dialog with syntax highlighting.
 fn format_fs_write_diff(args: &Value) -> String {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("create");
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("create");
 
     let mut out = format!("{BOLD}{CYAN}{path}{RESET}\n");
     let mut hl = make_highlighter(path);
@@ -141,7 +158,9 @@ fn format_fs_write_diff(args: &Value) -> String {
             out.push_str(&format!("{DIM}  ... existing content ...{RESET}\n"));
             for line in content.lines() {
                 let hl_line = highlight_line(line, &mut hl);
-                out.push_str(&format!("{BG_GUTTER_INSERT} + {RESET}{BG_INSERT} {hl_line}{RESET}{CLEAR_LINE}\n"));
+                out.push_str(&format!(
+                    "{BG_GUTTER_INSERT} + {RESET}{BG_INSERT} {hl_line}{RESET}{CLEAR_LINE}\n"
+                ));
             }
         }
         "patch" => {
@@ -255,7 +274,11 @@ impl Tool for ConfirmingTool {
             };
             format!("{DIM}📖 {RESET}{BOLD}{CYAN}{path}{RESET}{range}\n")
         } else {
-            format!("{BOLD}{CYAN}{}{RESET} {}\n", self.inner.name(), format_tool_args(&args))
+            format!(
+                "{BOLD}{CYAN}{}{RESET} {}\n",
+                self.inner.name(),
+                format_tool_args(&args)
+            )
         };
 
         eprint!("{display}");
@@ -302,7 +325,10 @@ impl Tool for ConfirmingTool {
 
         match input.as_str() {
             "t" | "trust" => {
-                TRUSTED_TOOLS.lock().unwrap().insert(self.inner.name().to_string());
+                TRUSTED_TOOLS
+                    .lock()
+                    .unwrap()
+                    .insert(self.inner.name().to_string());
                 let mut approved_args = args;
                 if let Some(obj) = approved_args.as_object_mut() {
                     obj.insert("approved".to_string(), Value::Bool(true));

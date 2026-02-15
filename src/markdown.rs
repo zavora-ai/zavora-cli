@@ -6,8 +6,8 @@
 /// Returns `Incomplete` when more data is needed.
 use std::io::Write;
 
-use crossterm::style::{self, Attribute, Stylize};
 use crossterm::Command;
+use crossterm::style::{self, Attribute, Stylize};
 use winnow::Partial;
 use winnow::ascii::{self, digit1, space0, space1, till_line_ending};
 use winnow::combinator::{alt, preceded, terminated};
@@ -59,6 +59,12 @@ pub struct ParseState {
     pub set_newline: bool,
     pub column: usize,
     pub terminal_width: Option<usize>,
+}
+
+impl Default for ParseState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ParseState {
@@ -206,7 +212,10 @@ fn horizontal_rule<'a, 'b>(
         )
             .parse_next(i)?;
         state.set_newline = true;
-        q(&mut o, style::Print(format!("{}\n", "━".repeat(40).dark_grey())))
+        q(
+            &mut o,
+            style::Print(format!("{}\n", "━".repeat(40).dark_grey())),
+        )
     }
 }
 
@@ -356,7 +365,11 @@ fn codeblock_fallback<'a, 'b>(
 // ---------------------------------------------------------------------------
 
 /// Track column position and emit a newline if we'd overflow the terminal width.
-fn advance(mut o: impl Write, state: &mut ParseState, width: usize) -> Result<(), ErrMode<MdError>> {
+fn advance(
+    mut o: impl Write,
+    state: &mut ParseState,
+    width: usize,
+) -> Result<(), ErrMode<MdError>> {
     if let Some(tw) = state.terminal_width {
         if state.column > 0 && state.column + width > tw {
             state.column = width;

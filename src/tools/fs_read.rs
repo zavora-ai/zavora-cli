@@ -357,4 +357,3 @@ pub fn fs_read_tool_response(args: &Value) -> Value {
     };
     fs_read_tool_response_with_root(args, &workspace_root)
 }
-

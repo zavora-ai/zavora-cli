@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use adk_rust::prelude::*;
 use adk_rust::futures::StreamExt;
+use adk_rust::prelude::*;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::config::RuntimeConfig;
+use crate::markdown::{ParseState, parse_markdown};
 use crate::retrieval::{RetrievalPolicy, RetrievalService, augment_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
 use crate::theme::Spinner;
-use crate::markdown::{ParseState, parse_markdown};
 
 pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
 
@@ -23,7 +23,13 @@ pub struct AuthorTextTracker {
 }
 
 impl AuthorTextTracker {
-    pub fn ingest_parts(&mut self, author: &str, text: &str, partial: bool, is_final: bool) -> String {
+    pub fn ingest_parts(
+        &mut self,
+        author: &str,
+        text: &str,
+        partial: bool,
+        is_final: bool,
+    ) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -56,7 +62,12 @@ impl AuthorTextTracker {
     }
 }
 
-pub fn ingest_author_text(buffer: &mut String, text: &str, partial: bool, is_final: bool) -> String {
+pub fn ingest_author_text(
+    buffer: &mut String,
+    text: &str,
+    partial: bool,
+    is_final: bool,
+) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -353,10 +364,14 @@ pub async fn run_prompt_streaming(
 
         // Show agent transfers and tool calls
         if event.author != "user" && event.author != current_author && !current_author.is_empty() {
-            if let Some(s) = spinner.take() { s.stop(); }
+            if let Some(s) = spinner.take() {
+                s.stop();
+            }
             eprintln!(
                 "{}  → {}{}",
-                crate::theme::DIM, event.author, crate::theme::RESET
+                crate::theme::DIM,
+                event.author,
+                crate::theme::RESET
             );
             spinner = Some(Spinner::start("Working..."));
         }
@@ -368,11 +383,10 @@ pub async fn run_prompt_streaming(
             for part in &content.parts {
                 if let Part::FunctionCall { name, .. } = part {
                     if name != "transfer_to_agent" {
-                        if let Some(s) = spinner.take() { s.stop(); }
-                        eprintln!(
-                            "{}  ⚡ {}{}",
-                            crate::theme::DIM, name, crate::theme::RESET
-                        );
+                        if let Some(s) = spinner.take() {
+                            s.stop();
+                        }
+                        eprintln!("{}  ⚡ {}{}", crate::theme::DIM, name, crate::theme::RESET);
                         spinner = Some(Spinner::start("Running..."));
                     }
                 }

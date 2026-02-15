@@ -1,11 +1,7 @@
-/// Token counting and context usage tracking.
-///
-/// Uses a char/4 heuristic (same approach as Q CLI) — no external tokenizer
-/// dependency. Rounded to nearest 10 to avoid false precision.
-
-// ---------------------------------------------------------------------------
-// Token counting
-// ---------------------------------------------------------------------------
+//! Token counting and context usage tracking.
+//!
+//! Uses a char/4 heuristic (same approach as Q CLI) — no external tokenizer
+//! dependency. Rounded to nearest 10 to avoid false precision.
 
 /// Chars-per-token ratio used for estimation.
 pub const TOKEN_CHAR_RATIO: usize = 4;
@@ -134,8 +130,8 @@ impl ContextUsage {
         let remaining = window.saturating_sub(total_tokens);
 
         let pct_color = match self.budget_level() {
-            BudgetLevel::Normal => "\x1b[32m",   // green
-            BudgetLevel::Warning => "\x1b[1;33m", // bold yellow
+            BudgetLevel::Normal => "\x1b[32m",     // green
+            BudgetLevel::Warning => "\x1b[1;33m",  // bold yellow
             BudgetLevel::Critical => "\x1b[1;31m", // bold red
         };
         let d = "\x1b[2m"; // dim
@@ -149,27 +145,51 @@ impl ContextUsage {
         };
 
         let mut out = String::new();
-        out.push_str(&format!("\n  {b}Context{r}  {pct_color}{total_tokens}/{window} tokens ({pct_display}%){r}\n\n"));
-        out.push_str(&format!("  {d}User:{r}      {:>6} tokens\n", estimate_tokens(self.user_chars)));
-        out.push_str(&format!("  {d}Assistant:{r}  {:>6} tokens\n", estimate_tokens(self.assistant_chars)));
-        out.push_str(&format!("  {d}Tools:{r}     {:>6} tokens\n", estimate_tokens(self.tool_chars)));
-        out.push_str(&format!("  {d}System:{r}    {:>6} tokens\n", estimate_tokens(self.system_chars)));
-        out.push_str(&format!("  {d}Overhead:{r}  {:>6} tokens {d}(system prompt + tool decls){r}\n", PROMPT_OVERHEAD_TOKENS));
+        out.push_str(&format!(
+            "\n  {b}Context{r}  {pct_color}{total_tokens}/{window} tokens ({pct_display}%){r}\n\n"
+        ));
+        out.push_str(&format!(
+            "  {d}User:{r}      {:>6} tokens\n",
+            estimate_tokens(self.user_chars)
+        ));
+        out.push_str(&format!(
+            "  {d}Assistant:{r}  {:>6} tokens\n",
+            estimate_tokens(self.assistant_chars)
+        ));
+        out.push_str(&format!(
+            "  {d}Tools:{r}     {:>6} tokens\n",
+            estimate_tokens(self.tool_chars)
+        ));
+        out.push_str(&format!(
+            "  {d}System:{r}    {:>6} tokens\n",
+            estimate_tokens(self.system_chars)
+        ));
+        out.push_str(&format!(
+            "  {d}Overhead:{r}  {:>6} tokens {d}(system prompt + tool decls){r}\n",
+            PROMPT_OVERHEAD_TOKENS
+        ));
         out.push_str(&format!("  {d}Remaining:{r} {:>6} tokens\n", remaining));
 
         out.push_str(&format!("\n  {d}Events:{r}    {:>6}\n", self.event_count));
         out.push_str(&format!("  {d}Chars:{r}     {:>6}\n", self.total_chars()));
         if self.api_total_tokens > 0 {
-            out.push_str(&format!("  {d}API tokens:{r}{:>6} {d}(from provider){r}\n", self.api_total_tokens));
+            out.push_str(&format!(
+                "  {d}API tokens:{r}{:>6} {d}(from provider){r}\n",
+                self.api_total_tokens
+            ));
         }
 
         match self.budget_level() {
             BudgetLevel::Normal => {}
             BudgetLevel::Warning => {
-                out.push_str(&format!("\n  {pct_color}⚠ Above 80% — consider /compact to free space.{r}\n"));
+                out.push_str(&format!(
+                    "\n  {pct_color}⚠ Above 80% — consider /compact to free space.{r}\n"
+                ));
             }
             BudgetLevel::Critical => {
-                out.push_str(&format!("\n  {pct_color}🔴 Nearly full — use /compact now.{r}\n"));
+                out.push_str(&format!(
+                    "\n  {pct_color}🔴 Nearly full — use /compact now.{r}\n"
+                ));
             }
         }
         out.push('\n');
@@ -207,8 +227,11 @@ pub fn compute_context_usage(events: &[Event], provider: &str, model: &str) -> C
                     adk_rust::Part::FunctionCall { name, args, .. } => {
                         fn_chars += name.len() + args.to_string().len();
                     }
-                    adk_rust::Part::FunctionResponse { function_response, .. } => {
-                        fn_chars += function_response.name.len() + function_response.response.to_string().len();
+                    adk_rust::Part::FunctionResponse {
+                        function_response, ..
+                    } => {
+                        fn_chars += function_response.name.len()
+                            + function_response.response.to_string().len();
                     }
                     _ => {}
                 }

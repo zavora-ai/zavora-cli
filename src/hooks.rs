@@ -53,8 +53,12 @@ pub struct HookConfig {
     pub matcher: Option<String>,
 }
 
-fn default_timeout_ms() -> u64 { DEFAULT_TIMEOUT_MS }
-fn default_max_output() -> usize { DEFAULT_MAX_OUTPUT }
+fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+fn default_max_output() -> usize {
+    DEFAULT_MAX_OUTPUT
+}
 
 // ---------------------------------------------------------------------------
 // Hook execution result

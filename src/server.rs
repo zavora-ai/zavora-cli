@@ -19,8 +19,8 @@ use crate::guardrail::{apply_guardrail, enforce_prompt_limit};
 use crate::provider::resolve_model;
 use crate::retrieval::{RetrievalService, build_retrieval_service};
 use crate::runner::{
-    build_runner_with_session_service,
-    build_single_agent_with_tools, resolve_runtime_tools, resolve_tool_confirmation_settings,
+    build_runner_with_session_service, build_single_agent_with_tools, resolve_runtime_tools,
+    resolve_tool_confirmation_settings,
 };
 use crate::session::build_session_service;
 use crate::streaming::run_prompt_with_retrieval;
@@ -131,7 +131,10 @@ pub async fn get_or_build_server_runner(
     Ok((runner, "miss"))
 }
 
-pub fn check_server_auth(state: &ServerState, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+pub fn check_server_auth(
+    state: &ServerState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), ApiError> {
     let Some(expected_token) = state.auth_token.as_deref() else {
         return Ok(()); // no token configured, auth disabled
     };
@@ -141,7 +144,10 @@ pub fn check_server_auth(state: &ServerState, headers: &axum::http::HeaderMap) -
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
 
-    let provided_token = header_value.strip_prefix("Bearer ").unwrap_or_default().trim();
+    let provided_token = header_value
+        .strip_prefix("Bearer ")
+        .unwrap_or_default()
+        .trim();
 
     if provided_token.is_empty() || provided_token != expected_token {
         return Err(api_error(
@@ -153,7 +159,9 @@ pub fn check_server_auth(state: &ServerState, headers: &axum::http::HeaderMap) -
     Ok(())
 }
 
-pub async fn handle_server_health(State(state): State<Arc<ServerState>>) -> Json<ServerHealthResponse> {
+pub async fn handle_server_health(
+    State(state): State<Arc<ServerState>>,
+) -> Json<ServerHealthResponse> {
     Json(ServerHealthResponse {
         status: "ok",
         app_name: state.cfg.app_name.clone(),
@@ -166,9 +174,7 @@ pub async fn handle_server_ask(
     headers: axum::http::HeaderMap,
     Json(request): Json<ServerAskRequest>,
 ) -> ApiResult<ServerAskResponse> {
-    if let Err(err) = check_server_auth(&state, &headers) {
-        return Err(err);
-    }
+    check_server_auth(&state, &headers)?;
     let started_at = Instant::now();
     let mut cfg = state.cfg.clone();
     if let Some(session_id) = request.session_id {
@@ -276,9 +282,7 @@ pub async fn handle_a2a_ping(
     headers: axum::http::HeaderMap,
     Json(request): Json<A2aPingRequest>,
 ) -> ApiResult<A2aPingResponse> {
-    if let Err(err) = check_server_auth(&state, &headers) {
-        return Err(err);
-    }
+    check_server_auth(&state, &headers)?;
     state.telemetry.emit(
         "a2a.ping.received",
         json!({
@@ -450,4 +454,3 @@ pub fn run_a2a_smoke(telemetry: &TelemetrySink) -> Result<()> {
     println!("A2A smoke passed: basic request/ack contract is valid.");
     Ok(())
 }
-

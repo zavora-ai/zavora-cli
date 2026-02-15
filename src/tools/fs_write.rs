@@ -3,10 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::fs_read::{
-    fs_read_workspace_root, fs_read_display_path, enforce_workspace_path_policy,
-
-};
+use super::fs_read::{enforce_workspace_path_policy, fs_read_display_path, fs_read_workspace_root};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsWriteMode {
     Create,
@@ -407,4 +404,3 @@ pub fn fs_write_tool_response(args: &Value) -> Value {
     };
     fs_write_tool_response_with_root(args, &workspace_root)
 }
-

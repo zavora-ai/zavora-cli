@@ -20,24 +20,94 @@ pub const DANGEROUS_PATTERNS: &[&str] = &[
 
 /// Commands that are always safe to auto-approve (no side effects).
 pub const READONLY_COMMANDS: &[&str] = &[
-    "ls", "cat", "echo", "pwd", "which", "head", "tail", "find", "grep", "rg",
-    "dir", "type", "wc", "stat", "file", "diff", "sort", "uniq", "tr", "cut",
-    "awk", "less", "more", "env", "printenv", "uname", "whoami", "id",
-    "date", "cal", "df", "du", "free", "uptime", "hostname", "arch",
-    "realpath", "dirname", "basename", "readlink", "sha256sum", "md5sum",
-    "xxd", "hexdump", "strings", "nm", "ldd", "otool", "jq", "yq",
+    "ls",
+    "cat",
+    "echo",
+    "pwd",
+    "which",
+    "head",
+    "tail",
+    "find",
+    "grep",
+    "rg",
+    "dir",
+    "type",
+    "wc",
+    "stat",
+    "file",
+    "diff",
+    "sort",
+    "uniq",
+    "tr",
+    "cut",
+    "awk",
+    "less",
+    "more",
+    "env",
+    "printenv",
+    "uname",
+    "whoami",
+    "id",
+    "date",
+    "cal",
+    "df",
+    "du",
+    "free",
+    "uptime",
+    "hostname",
+    "arch",
+    "realpath",
+    "dirname",
+    "basename",
+    "readlink",
+    "sha256sum",
+    "md5sum",
+    "xxd",
+    "hexdump",
+    "strings",
+    "nm",
+    "ldd",
+    "otool",
+    "jq",
+    "yq",
 ];
 
 /// Git subcommands that are read-only (no repo mutation).
 pub const READONLY_GIT_SUBCOMMANDS: &[&str] = &[
-    "status", "diff", "log", "show", "blame", "shortlog", "describe",
-    "branch", "tag", "remote", "rev-parse", "rev-list", "name-rev",
-    "for-each-ref", "symbolic-ref",
-    "ls-files", "ls-tree", "ls-remote", "cat-file", "diff-tree",
-    "diff-files", "diff-index",
-    "config", "stash", "reflog", "whatchanged", "cherry",
-    "merge-base", "grep", "count-objects", "fsck", "verify-pack",
-    "help", "version",
+    "status",
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "shortlog",
+    "describe",
+    "branch",
+    "tag",
+    "remote",
+    "rev-parse",
+    "rev-list",
+    "name-rev",
+    "for-each-ref",
+    "symbolic-ref",
+    "ls-files",
+    "ls-tree",
+    "ls-remote",
+    "cat-file",
+    "diff-tree",
+    "diff-files",
+    "diff-index",
+    "config",
+    "stash",
+    "reflog",
+    "whatchanged",
+    "cherry",
+    "merge-base",
+    "grep",
+    "count-objects",
+    "fsck",
+    "verify-pack",
+    "help",
+    "version",
 ];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteBashRequest {
@@ -70,7 +140,11 @@ pub struct ExecuteBashPolicyDecision {
     pub read_only_auto_allow: bool,
 }
 
-pub fn execute_bash_error_payload(command: &str, err: ExecuteBashToolError, attempts: u32) -> Value {
+pub fn execute_bash_error_payload(
+    command: &str,
+    err: ExecuteBashToolError,
+    attempts: u32,
+) -> Value {
     json!({
         "status": "error",
         "kind": "execute_bash",
@@ -106,7 +180,9 @@ pub fn parse_execute_bash_u64_arg(
     Ok(parsed)
 }
 
-pub fn parse_execute_bash_request(args: &Value) -> Result<ExecuteBashRequest, ExecuteBashToolError> {
+pub fn parse_execute_bash_request(
+    args: &Value,
+) -> Result<ExecuteBashRequest, ExecuteBashToolError> {
     let command = args
         .get("command")
         .and_then(Value::as_str)
@@ -176,7 +252,10 @@ pub fn is_read_only_command(command: &str) -> bool {
     };
 
     // Reject any token containing dangerous patterns.
-    if args.iter().any(|a| DANGEROUS_PATTERNS.iter().any(|p| a.contains(p))) {
+    if args
+        .iter()
+        .any(|a| DANGEROUS_PATTERNS.iter().any(|p| a.contains(p)))
+    {
         return false;
     }
 
@@ -185,7 +264,9 @@ pub fn is_read_only_command(command: &str) -> bool {
     let mut commands: Vec<Vec<&str>> = Vec::new();
     for arg in &args {
         if arg == "|" {
-            if !current.is_empty() { commands.push(current); }
+            if !current.is_empty() {
+                commands.push(current);
+            }
             current = Vec::new();
         } else if arg.contains('|') {
             // Pipe embedded in token without spacing — unsafe.
@@ -194,16 +275,25 @@ pub fn is_read_only_command(command: &str) -> bool {
             current.push(arg);
         }
     }
-    if !current.is_empty() { commands.push(current); }
+    if !current.is_empty() {
+        commands.push(current);
+    }
 
     for cmd_args in &commands {
-        let Some(cmd) = cmd_args.first() else { return false; };
+        let Some(cmd) = cmd_args.first() else {
+            return false;
+        };
 
         // `find` with mutation flags is unsafe.
-        if *cmd == "find" && cmd_args.iter().any(|a| {
-            a.contains("-exec") || a.contains("-delete") || a.contains("-ok")
-                || a.contains("-fprint") || a.contains("-fls")
-        }) {
+        if *cmd == "find"
+            && cmd_args.iter().any(|a| {
+                a.contains("-exec")
+                    || a.contains("-delete")
+                    || a.contains("-ok")
+                    || a.contains("-fprint")
+                    || a.contains("-fls")
+            })
+        {
             return false;
         }
 
@@ -226,10 +316,15 @@ pub fn is_read_only_command(command: &str) -> bool {
                     }
                 }
                 // git config: only without --set/--unset/--add/--remove.
-                if *sub == "config" && cmd_args.iter().any(|a| {
-                    a.starts_with("--set") || a.starts_with("--unset") || a.starts_with("--add")
-                        || a.starts_with("--remove") || a.starts_with("--replace")
-                }) {
+                if *sub == "config"
+                    && cmd_args.iter().any(|a| {
+                        a.starts_with("--set")
+                            || a.starts_with("--unset")
+                            || a.starts_with("--add")
+                            || a.starts_with("--remove")
+                            || a.starts_with("--replace")
+                    })
+                {
                     return false;
                 }
                 continue;
@@ -420,4 +515,3 @@ pub async fn execute_bash_tool_response(args: &Value) -> Value {
         attempts,
     )
 }
-

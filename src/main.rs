@@ -5,24 +5,24 @@ use clap::Parser;
 use serde_json::json;
 use tracing::level_filters::LevelFilter;
 
+use zavora_cli::agents::*;
+use zavora_cli::chat::*;
 use zavora_cli::cli::*;
 use zavora_cli::config::*;
-use zavora_cli::error::*;
-use zavora_cli::guardrail::*;
-use zavora_cli::telemetry::*;
-use zavora_cli::eval::*;
-use zavora_cli::retrieval::*;
-use zavora_cli::provider::*;
-use zavora_cli::runner::*;
-use zavora_cli::workflow::*;
-use zavora_cli::streaming::*;
-use zavora_cli::server::*;
-use zavora_cli::chat::*;
-use zavora_cli::session::*;
-use zavora_cli::mcp::*;
 use zavora_cli::doctor::*;
+use zavora_cli::error::*;
+use zavora_cli::eval::*;
+use zavora_cli::guardrail::*;
+use zavora_cli::mcp::*;
 use zavora_cli::profiles::*;
-use zavora_cli::agents::*;
+use zavora_cli::provider::*;
+use zavora_cli::retrieval::*;
+use zavora_cli::runner::*;
+use zavora_cli::server::*;
+use zavora_cli::session::*;
+use zavora_cli::streaming::*;
+use zavora_cli::telemetry::*;
+use zavora_cli::workflow::*;
 
 fn init_tracing(log_filter: &str) -> Result<()> {
     let level = log_filter
@@ -65,7 +65,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         &resolved_agents,
         selected_agent_name.as_deref(),
     )?;
-    let command = command_label(&cli.command.as_ref().unwrap_or(&Commands::Chat));
+    let command = command_label(cli.command.as_ref().unwrap_or(&Commands::Chat));
     let telemetry = TelemetrySink::new(&cfg, command.clone());
     let started_at = Instant::now();
     telemetry.emit(

@@ -3,7 +3,10 @@
 /// Provides both manual (`/compact`) and automatic compaction. Manual compaction
 /// replaces the session with a text summary. Automatic compaction uses ADK's
 /// `EventsCompactionConfig` to periodically summarize older events.
-use adk_rust::{BaseEventsSummarizer, Content, Event, EventActions, EventCompaction, EventsCompactionConfig, Part};
+use adk_rust::{
+    BaseEventsSummarizer, Content, Event, EventActions, EventCompaction, EventsCompactionConfig,
+    Part,
+};
 use adk_session::SessionService;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -222,10 +225,7 @@ impl BaseEventsSummarizer for TextSummarizer {
 }
 
 /// Build an `EventsCompactionConfig` for the runner when auto-compaction is enabled.
-pub fn build_compaction_config(
-    interval: u32,
-    overlap: u32,
-) -> EventsCompactionConfig {
+pub fn build_compaction_config(interval: u32, overlap: u32) -> EventsCompactionConfig {
     EventsCompactionConfig {
         compaction_interval: interval,
         overlap_size: overlap,

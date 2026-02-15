@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::config::{display_session_db_url, ProfilesFile, RuntimeConfig};
+use crate::config::{ProfilesFile, RuntimeConfig, display_session_db_url};
 
 pub fn run_profiles_list(profiles: &ProfilesFile, cfg: &RuntimeConfig) -> Result<()> {
     let mut names = profiles.profiles.keys().cloned().collect::<Vec<String>>();

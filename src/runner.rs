@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adk_rust::prelude::InMemoryArtifactService;
 use adk_rust::prelude::*;
 use adk_rust::{ToolConfirmationDecision, ToolConfirmationPolicy};
-use adk_rust::prelude::InMemoryArtifactService;
 use adk_session::SessionService;
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -16,7 +16,10 @@ use crate::provider::resolve_model;
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
 use crate::tool_policy::filter_tools_by_policy;
-use crate::tools::{build_builtin_tools, FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME};
+use crate::tools::{
+    EXECUTE_BASH_TOOL_NAME, FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, GITHUB_OPS_TOOL_NAME,
+    build_builtin_tools,
+};
 
 #[cfg(test)]
 pub fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
@@ -176,7 +179,12 @@ pub fn build_single_agent_with_tools(
     };
 
     // Build sub-agents from the same tool set (they inherit ConfirmingTool wrapping).
-    let sub_agents = build_sub_agents(model.clone(), tools, tool_confirmation_policy.clone(), tool_timeout);
+    let sub_agents = build_sub_agents(
+        model.clone(),
+        tools,
+        tool_confirmation_policy.clone(),
+        tool_timeout,
+    );
 
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -190,9 +198,10 @@ pub fn build_single_agent_with_tools(
                 // events to "model", but tool responses must be "function" for OpenAI.
                 for content in &mut request.contents {
                     if content.role == "model"
-                        && content.parts.iter().any(|p| {
-                            matches!(p, adk_rust::prelude::Part::FunctionResponse { .. })
-                        })
+                        && content
+                            .parts
+                            .iter()
+                            .any(|p| matches!(p, adk_rust::prelude::Part::FunctionResponse { .. }))
                     {
                         content.role = "function".to_string();
                     }
@@ -216,25 +225,21 @@ pub fn build_single_agent_with_tools(
 // ---------------------------------------------------------------------------
 
 fn pick_tools(all: &[Arc<dyn Tool>], names: &[&str]) -> Vec<Arc<dyn Tool>> {
-    all.iter().filter(|t| names.contains(&t.name())).cloned().collect()
+    all.iter()
+        .filter(|t| names.contains(&t.name()))
+        .cloned()
+        .collect()
 }
 
-fn before_model_role_fix() -> Box<
-    dyn Fn(
-            Arc<dyn adk_rust::CallbackContext>,
-            adk_rust::prelude::LlmRequest,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = adk_rust::prelude::Result<BeforeModelResult>> + Send>,
-        > + Send
-        + Sync,
-> {
+fn before_model_role_fix() -> adk_rust::BeforeModelCallback {
     Box::new(|_ctx, mut request| {
         Box::pin(async move {
             for content in &mut request.contents {
                 if content.role == "model"
-                    && content.parts.iter().any(|p| {
-                        matches!(p, adk_rust::prelude::Part::FunctionResponse { .. })
-                    })
+                    && content
+                        .parts
+                        .iter()
+                        .any(|p| matches!(p, adk_rust::prelude::Part::FunctionResponse { .. }))
                 {
                     content.role = "function".to_string();
                 }
@@ -314,7 +319,7 @@ fn build_sub_agents(
                  - Read existing code/docs to inform plans\n\
                  - Write planning documents, specs, and checklists\n\
                  - Each task should be independently verifiable\n\
-                 When planning is complete, provide the plan summary."
+                 When planning is complete, provide the plan summary.",
             )
             .model(model.clone())
             .tool_confirmation_policy(policy)
@@ -401,11 +406,19 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
     tools = filter_tools_by_policy(tools, &cfg.agent_allow_tools, &cfg.agent_deny_tools);
 
     // Determine which tools need interactive confirmation
-    let approved: BTreeSet<String> = cfg.approve_tool.iter().map(|s| s.trim().to_string()).collect();
+    let approved: BTreeSet<String> = cfg
+        .approve_tool
+        .iter()
+        .map(|s| s.trim().to_string())
+        .collect();
     let mut confirm_names = BTreeSet::<String>::new();
 
     // Guarded built-in tools always require confirmation (unless pre-approved)
-    for name in [FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
+    for name in [
+        FS_WRITE_TOOL_NAME,
+        EXECUTE_BASH_TOOL_NAME,
+        GITHUB_OPS_TOOL_NAME,
+    ] {
         if !approved.contains(name) {
             confirm_names.insert(name.to_string());
         }

@@ -4,8 +4,8 @@
 /// ANSI color helpers, and first-run onboarding help.
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::checkpoint::CheckpointStore;
 use crate::context::{BudgetLevel, ContextUsage};
@@ -43,7 +43,10 @@ pub const COMMAND_PALETTE: &[(&str, &str)] = &[
     ("mcp", "show MCP server and tool summary"),
     ("usage", "show context usage and token breakdown"),
     ("compact", "summarize conversation to free context space"),
-    ("checkpoint", "manage conversation snapshots (save|list|restore)"),
+    (
+        "checkpoint",
+        "manage conversation snapshots (save|list|restore)",
+    ),
     ("tangent", "enter/exit exploratory branch"),
     ("todos", "view/delete/clear-finished task lists"),
     ("delegate", "(experimental) run isolated sub-agent task"),
@@ -85,7 +88,10 @@ pub fn build_prompt(
     if parts.is_empty() {
         format!("{BOLD_CYAN}zavora>{RESET} ")
     } else {
-        format!("{BOLD_CYAN}zavora{RESET} {DIM}[{RESET}{}{DIM}]{RESET}{BOLD_CYAN}>{RESET} ", parts.join(" "))
+        format!(
+            "{BOLD_CYAN}zavora{RESET} {DIM}[{RESET}{}{DIM}]{RESET}{BOLD_CYAN}>{RESET} ",
+            parts.join(" ")
+        )
     }
 }
 
@@ -104,19 +110,25 @@ pub fn print_startup_banner(provider: &str, model: &str) {
     println!("{BOLD_CYAN}  ███████╗██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║██║  ██║{RESET}");
     println!("{BOLD_CYAN}  ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝{RESET}");
     println!("  {DIM}Your AI agent, in the terminal.{RESET}  {DIM}v{version}{RESET}");
-    println!("  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}");
+    println!(
+        "  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}"
+    );
     println!();
 
     // Rotating tips
     let tips = [
         format!("Use {CYAN}/compact{RESET} to summarize history and free context space"),
         format!("Use {CYAN}/checkpoint save <label>{RESET} to snapshot your session"),
-        format!("Use {CYAN}/tangent start{RESET} to branch into exploratory work without losing context"),
+        format!(
+            "Use {CYAN}/tangent start{RESET} to branch into exploratory work without losing context"
+        ),
         format!("Use {CYAN}/usage{RESET} to see a real-time token breakdown by author"),
         format!("Use {CYAN}/delegate <task>{RESET} to run a sub-agent in an isolated session"),
         format!("Use {CYAN}/model{RESET} to open the interactive model picker"),
         format!("Use {CYAN}/todos list{RESET} to see task lists the agent has created"),
-        format!("Commands can be abbreviated — type {CYAN}/ch{RESET} and press enter to see matches"),
+        format!(
+            "Commands can be abbreviated — type {CYAN}/ch{RESET} and press enter to see matches"
+        ),
     ];
     let idx = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -129,13 +141,18 @@ pub fn print_startup_banner(provider: &str, model: &str) {
     println!(
         "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/agent{RESET} {DIM}agent mode{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
     );
-    println!("  {DIM}{}━{RESET}", "━".repeat(term_width().min(120).saturating_sub(4)));
+    println!(
+        "  {DIM}{}━{RESET}",
+        "━".repeat(term_width().min(120).saturating_sub(4))
+    );
     println!();
 }
 
 /// Get terminal width, defaulting to 80.
 fn term_width() -> usize {
-    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
 }
 
 /// Draw a bordered tip box.
@@ -144,10 +161,17 @@ fn draw_tip_box(title: &str, content: &str) {
     let inner = width - 4;
 
     // Top border with title
-    let title_plain_len = title.chars().filter(|c| c.is_ascii_graphic() || *c == ' ' || !c.is_ascii()).count();
+    let title_plain_len = title
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ' || !c.is_ascii())
+        .count();
     let side = (width.saturating_sub(title_plain_len + 4)) / 2;
     let right = width.saturating_sub(side + title_plain_len + 4);
-    println!("  {DIM}╭{}─ {RESET}{title}{DIM} ─{}╮{RESET}", "─".repeat(side), "─".repeat(right));
+    println!(
+        "  {DIM}╭{}─ {RESET}{title}{DIM} ─{}╮{RESET}",
+        "─".repeat(side),
+        "─".repeat(right)
+    );
 
     // Wrap content into lines
     let words: Vec<&str> = content.split_whitespace().collect();
@@ -159,7 +183,11 @@ fn draw_tip_box(title: &str, content: &str) {
         // Strip ANSI to measure visible length
         let word_vis: String = strip_ansi(word);
         let wlen = word_vis.len();
-        let test_len = if line.is_empty() { wlen } else { visible_len + 1 + wlen };
+        let test_len = if line.is_empty() {
+            wlen
+        } else {
+            visible_len + 1 + wlen
+        };
 
         if test_len <= inner {
             if !line.is_empty() {
@@ -243,7 +271,11 @@ pub fn suggest_command(input: &str) -> Option<String> {
     match fuzzy_match_command(input) {
         FuzzyResult::Exact(cmd) => Some(format!("Did you mean {CYAN}/{cmd}{RESET}?")),
         FuzzyResult::Ambiguous(cmds) => {
-            let list = cmds.iter().map(|c| format!("{CYAN}/{c}{RESET}")).collect::<Vec<_>>().join(", ");
+            let list = cmds
+                .iter()
+                .map(|c| format!("{CYAN}/{c}{RESET}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             Some(format!("Did you mean one of: {list}?"))
         }
         FuzzyResult::NoMatch => None,
@@ -269,7 +301,9 @@ pub fn print_onboarding() {
     println!("  {DIM}4.{RESET} Use {CYAN}/model{RESET} to pick a model interactively");
     println!("  {DIM}5.{RESET} Use {CYAN}/tools{RESET} to see available tools");
     println!();
-    println!("  {DIM}Tip: Commands can be abbreviated — type /ch and press enter to see matches.{RESET}");
+    println!(
+        "  {DIM}Tip: Commands can be abbreviated — type /ch and press enter to see matches.{RESET}"
+    );
     println!();
 }
 

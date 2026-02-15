@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use adk_rust::prelude::*;
 use adk_rust::ReadonlyContext;
+use adk_rust::prelude::*;
 use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
@@ -113,16 +113,13 @@ pub struct McpServerDiagnostic {
 
 /// Check auth readiness without connecting. Returns a hint if auth is misconfigured.
 pub fn check_auth_hint(server: &McpServerConfig) -> Option<String> {
-    let Some(env_key) = server.auth_bearer_env.as_deref() else {
-        return None;
-    };
+    let env_key = server.auth_bearer_env.as_deref()?;
     match std::env::var(env_key) {
-        Ok(val) if val.trim().is_empty() => {
-            Some(format!("env '{}' is set but empty", env_key))
-        }
-        Err(_) => {
-            Some(format!("env '{}' is not set — set it or remove auth_bearer_env", env_key))
-        }
+        Ok(val) if val.trim().is_empty() => Some(format!("env '{}' is set but empty", env_key)),
+        Err(_) => Some(format!(
+            "env '{}' is not set — set it or remove auth_bearer_env",
+            env_key
+        )),
         Ok(_) => None,
     }
 }
@@ -314,17 +311,25 @@ pub async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) 
 
     let mut failures = 0usize;
     for server in &servers {
-        let diag = diagnose_mcp_server(server, cfg.tool_retry_attempts, cfg.tool_retry_delay_ms).await;
+        let diag =
+            diagnose_mcp_server(server, cfg.tool_retry_attempts, cfg.tool_retry_delay_ms).await;
         match &diag.state {
-            McpServerState::Reachable { tool_count, latency_ms } => {
+            McpServerState::Reachable {
+                tool_count,
+                latency_ms,
+            } => {
                 println!(
                     "✓ '{}' reachable ({} tool(s), {}ms)",
                     diag.name, tool_count, latency_ms
                 );
                 // Re-discover to print tool names
                 if let Ok(tools) = discover_mcp_tools_for_server(
-                    server, cfg.tool_retry_attempts, cfg.tool_retry_delay_ms,
-                ).await {
+                    server,
+                    cfg.tool_retry_attempts,
+                    cfg.tool_retry_delay_ms,
+                )
+                .await
+                {
                     for tool in tools {
                         println!("  - {}", tool.name());
                     }

@@ -320,4 +320,3 @@ where
 pub fn github_ops_tool_response(args: &Value) -> Value {
     github_ops_tool_response_with_runner(args, github_token_present(), run_gh_command)
 }
-

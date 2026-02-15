@@ -8,29 +8,27 @@ use adk_session::SessionService;
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::checkpoint::{
+    CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
+};
 use crate::cli::{GuardrailMode, Provider};
+use crate::compact::{CompactStrategy, compact_session};
 use crate::config::RuntimeConfig;
+use crate::context::{ContextUsage, compute_context_usage};
 use crate::error::format_cli_error;
 use crate::guardrail::{apply_guardrail, buffered_output_required};
 use crate::provider::parse_provider_name;
 use crate::retrieval::RetrievalService;
-use crate::runner::{
-    ResolvedRuntimeTools, ToolConfirmationSettings, build_single_runner_for_chat,
-};
+use crate::runner::{ResolvedRuntimeTools, ToolConfirmationSettings, build_single_runner_for_chat};
 use crate::session::build_session_service;
-use crate::streaming::{run_prompt_with_retrieval, run_prompt_streaming_with_retrieval};
+use crate::streaming::{run_prompt_streaming_with_retrieval, run_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
-use crate::checkpoint::{
-    CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
-};
-use crate::compact::{CompactStrategy, compact_session};
-use crate::context::{ContextUsage, compute_context_usage};
-use crate::tool_policy::matches_wildcard;
-use crate::todos;
 use crate::theme::{
-    build_prompt, suggest_command, is_first_run, print_onboarding, print_startup_banner,
-    BOLD, CYAN, DIM, GREEN, RESET, YELLOW,
+    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, is_first_run, print_onboarding,
+    print_startup_banner, suggest_command,
 };
+use crate::todos;
+use crate::tool_policy::matches_wildcard;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -133,7 +131,9 @@ pub fn print_chat_help() {
     println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
     println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
     println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
-    println!("  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}");
+    println!(
+        "  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}"
+    );
     println!();
 }
 
@@ -382,7 +382,8 @@ pub fn print_chat_tools(
         println!("  <none>");
     } else {
         for name in &built_in_tools {
-            let suffix = tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
+            let suffix =
+                tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
             println!("  - {name}{suffix}");
         }
     }
@@ -391,7 +392,8 @@ pub fn print_chat_tools(
         println!("  <none>");
     } else {
         for name in &mcp_tools {
-            let suffix = tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
+            let suffix =
+                tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
             println!("  - {name}{suffix}");
         }
     }
@@ -447,10 +449,7 @@ pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools)
             None if server.auth_bearer_env.is_some() => "✓ configured".to_string(),
             None => "none".to_string(),
         };
-        let server_tools: Vec<&String> = runtime_tools
-            .mcp_tool_names
-            .iter()
-            .collect();
+        let server_tools: Vec<&String> = runtime_tools.mcp_tool_names.iter().collect();
         let tool_count = server_tools.len();
         println!(
             "  {} endpoint={} auth={} tools={}",
@@ -473,6 +472,7 @@ pub enum ChatCommandAction {
     Exit,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_chat_command(
     command: ChatCommand,
     cfg: &mut RuntimeConfig,
@@ -521,7 +521,7 @@ pub async fn dispatch_chat_command(
         }
         ChatCommand::Checkpoint(sub) => {
             let parts: Vec<&str> = sub.split_whitespace().collect();
-            match parts.first().map(|s| *s) {
+            match parts.first().copied() {
                 Some("save") => {
                     let label = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
                     match snapshot_session_events(session_service, cfg).await {
@@ -541,7 +541,10 @@ pub async fn dispatch_chat_command(
                             if let Some(cp) = checkpoint_store.get(tag) {
                                 let events = cp.events.clone();
                                 match restore_session_events(session_service, cfg, &events).await {
-                                    Ok(()) => println!("Restored to checkpoint [{}] '{}'.", cp.tag, cp.label),
+                                    Ok(()) => println!(
+                                        "Restored to checkpoint [{}] '{}'.",
+                                        cp.tag, cp.label
+                                    ),
                                     Err(e) => eprintln!("Restore failed: {e}"),
                                 }
                             } else {
@@ -569,8 +572,12 @@ pub async fn dispatch_chat_command(
                         match snapshot_session_events(session_service, cfg).await {
                             Ok(current) => {
                                 if let Some(events) = checkpoint_store.exit_tangent_tail(&current) {
-                                    match restore_session_events(session_service, cfg, &events).await {
-                                        Ok(()) => println!("Exited tangent mode (kept last exchange)."),
+                                    match restore_session_events(session_service, cfg, &events)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            println!("Exited tangent mode (kept last exchange).")
+                                        }
                                         Err(e) => eprintln!("Tangent tail restore failed: {e}"),
                                     }
                                 }
@@ -593,7 +600,9 @@ pub async fn dispatch_chat_command(
                         match snapshot_session_events(session_service, cfg).await {
                             Ok(events) => {
                                 let tag = checkpoint_store.enter_tangent(events);
-                                println!("Entered tangent mode (baseline checkpoint [{tag}]). Use /tangent to exit or /tangent tail to keep last exchange.");
+                                println!(
+                                    "Entered tangent mode (baseline checkpoint [{tag}]). Use /tangent to exit or /tangent tail to keep last exchange."
+                                );
                             }
                             Err(e) => eprintln!("Failed to enter tangent: {e}"),
                         }
@@ -605,7 +614,7 @@ pub async fn dispatch_chat_command(
         ChatCommand::Todos(sub) => {
             let workspace = std::env::current_dir().unwrap_or_default();
             let parts: Vec<&str> = sub.split_whitespace().collect();
-            match parts.first().map(|s| *s) {
+            match parts.first().copied() {
                 Some("view") => {
                     if let Some(id) = parts.get(1) {
                         match todos::load_todo(&workspace, id) {
@@ -626,18 +635,14 @@ pub async fn dispatch_chat_command(
                         println!("Usage: /todos delete <id>");
                     }
                 }
-                Some("clear-finished") => {
-                    match todos::clear_finished_todos(&workspace) {
-                        Ok(n) => println!("Cleared {n} finished todo list(s)."),
-                        Err(e) => eprintln!("Failed to clear: {e}"),
-                    }
-                }
-                _ => {
-                    match todos::format_todos_summary(&workspace) {
-                        Ok(summary) => print!("{summary}"),
-                        Err(e) => eprintln!("Failed to list todos: {e}"),
-                    }
-                }
+                Some("clear-finished") => match todos::clear_finished_todos(&workspace) {
+                    Ok(n) => println!("Cleared {n} finished todo list(s)."),
+                    Err(e) => eprintln!("Failed to clear: {e}"),
+                },
+                _ => match todos::format_todos_summary(&workspace) {
+                    Ok(summary) => print!("{summary}"),
+                    Err(e) => eprintln!("Failed to list todos: {e}"),
+                },
             }
             Ok(ChatCommandAction::Continue)
         }
@@ -874,7 +879,9 @@ pub async fn run_chat(
         let prompt = build_prompt(&checkpoint_store, context_usage.as_ref());
         let input = match rl.readline(&prompt) {
             Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => break,
+            Err(
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+            ) => break,
             Err(e) => return Err(anyhow::anyhow!("readline error: {e}")),
         };
         let input = input.trim();
@@ -1002,4 +1009,3 @@ pub async fn run_chat(
 
     Ok(())
 }
-

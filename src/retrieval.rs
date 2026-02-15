@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::config::RuntimeConfig;
 use crate::cli::RetrievalBackend;
+use crate::config::RuntimeConfig;
 
 #[derive(Debug, Clone)]
 pub struct RetrievedChunk {
@@ -176,7 +176,7 @@ pub fn build_retrieval_service(cfg: &RuntimeConfig) -> Result<Arc<dyn RetrievalS
             #[cfg(feature = "semantic-search")]
             {
                 let service = SemanticLocalRetrievalService::load(path)?;
-                return Ok(Arc::new(service));
+                Ok(Arc::new(service))
             }
 
             #[cfg(not(feature = "semantic-search"))]

@@ -263,9 +263,17 @@ pub mod shadow {
 
             // Init bare repo if not already initialized.
             if !shadow_path.join("HEAD").exists() {
-                run_git(&shadow_path, None, &["init", "--bare", &shadow_path.to_string_lossy()])?;
+                run_git(
+                    &shadow_path,
+                    None,
+                    &["init", "--bare", &shadow_path.to_string_lossy()],
+                )?;
                 run_git(&shadow_path, None, &["config", "user.name", "zavora"])?;
-                run_git(&shadow_path, None, &["config", "user.email", "zavora@local"])?;
+                run_git(
+                    &shadow_path,
+                    None,
+                    &["config", "user.email", "zavora@local"],
+                )?;
                 run_git(&shadow_path, None, &["config", "core.preloadindex", "true"])?;
 
                 // Initial commit.
@@ -304,9 +312,11 @@ pub mod shadow {
             if !self.checkpoints.iter().any(|c| c.tag == tag) {
                 bail!("checkpoint '{tag}' not found");
             }
-            let out = run_git(&self.shadow_path, Some(&self.work_tree), &[
-                "checkout", tag, "--", ".",
-            ])?;
+            let out = run_git(
+                &self.shadow_path,
+                Some(&self.work_tree),
+                &["checkout", tag, "--", "."],
+            )?;
             if !out.status.success() {
                 bail!("restore failed: {}", String::from_utf8_lossy(&out.stderr));
             }
@@ -321,7 +331,11 @@ pub mod shadow {
 
         /// Compute file stats between two checkpoints.
         pub fn file_stats(&self, from: &str, to: &str) -> Result<FileStats> {
-            let out = run_git(&self.shadow_path, None, &["diff", "--name-status", from, to])?;
+            let out = run_git(
+                &self.shadow_path,
+                None,
+                &["diff", "--name-status", from, to],
+            )?;
             let mut stats = FileStats::default();
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 match line.chars().next() {
@@ -347,7 +361,10 @@ pub mod shadow {
             }
             let mut out = String::from("Checkpoints:\n");
             for cp in &self.checkpoints {
-                out.push_str(&format!("  [{}] {} ({})\n", cp.tag, cp.description, cp.timestamp));
+                out.push_str(&format!(
+                    "  [{}] {} ({})\n",
+                    cp.tag, cp.description, cp.timestamp
+                ));
             }
             out
         }
@@ -363,7 +380,11 @@ pub mod shadow {
     // -- helpers --
 
     fn is_git_installed() -> bool {
-        Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     fn run_git(dir: &Path, work_tree: Option<&Path>, args: &[&str]) -> Result<Output> {
@@ -378,9 +399,11 @@ pub mod shadow {
 
     fn stage_commit_tag(shadow: &Path, work_tree: &Path, message: &str, tag: &str) -> Result<()> {
         run_git(shadow, Some(work_tree), &["add", "-A"])?;
-        let out = run_git(shadow, Some(work_tree), &[
-            "commit", "--allow-empty", "--no-verify", "-m", message,
-        ])?;
+        let out = run_git(
+            shadow,
+            Some(work_tree),
+            &["commit", "--allow-empty", "--no-verify", "-m", message],
+        )?;
         if !out.status.success() {
             bail!("commit failed: {}", String::from_utf8_lossy(&out.stderr));
         }
@@ -398,6 +421,11 @@ pub mod shadow {
             .unwrap_or_default()
             .as_secs();
         let secs = now % 86400;
-        format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     }
 }
