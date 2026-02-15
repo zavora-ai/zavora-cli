@@ -247,6 +247,26 @@ Runtime behavior:
 - MCP discovery/invocation retries follow configured retry attempts/delay
 - tool lifecycle telemetry emits structured events for `requested`, `succeeded`, and `failed`
 
+## Coding File Read Tool (`fs_read`)
+
+`fs_read` is a built-in tool for file and directory inspection during agent runs.
+
+- Reads file content with bounded controls (`start_line`, `max_lines`, `max_bytes`)
+- Reads directory entries with bounded controls (`max_entries`)
+- Enforces deterministic path policy:
+  - denies paths outside workspace root
+  - denies policy-blocked segments/files (for example `.git`, `.zavora`, `.env*`)
+- Returns structured tool errors so telemetry captures `tool.failed` events consistently
+
+To require explicit approval for this tool in sensitive workflows:
+
+```toml
+[profiles.default]
+tool_confirmation_mode = "never"
+require_confirm_tool = ["fs_read"]
+approve_tool = [] # deny until explicitly approved
+```
+
 ## Telemetry Baseline and Reporting
 
 Structured telemetry is enabled by default and written as JSONL.

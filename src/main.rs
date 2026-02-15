@@ -2703,6 +2703,363 @@ fn init_tracing(log_filter: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
 }
 
+const FS_READ_DEFAULT_MAX_BYTES: usize = 8192;
+const FS_READ_MAX_BYTES_LIMIT: usize = 65536;
+const FS_READ_DEFAULT_MAX_LINES: usize = 200;
+const FS_READ_MAX_LINES_LIMIT: usize = 2000;
+const FS_READ_DEFAULT_MAX_ENTRIES: usize = 100;
+const FS_READ_MAX_ENTRIES_LIMIT: usize = 500;
+const FS_READ_DENIED_SEGMENTS: &[&str] = &[".git", ".zavora"];
+const FS_READ_DENIED_FILE_NAMES: &[&str] =
+    &[".env", ".env.local", ".env.development", ".env.production"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FsReadRequest {
+    path: String,
+    start_line: usize,
+    max_lines: usize,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FsReadToolError {
+    code: &'static str,
+    message: String,
+}
+
+impl FsReadToolError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn fs_read_error_payload(path: &str, err: FsReadToolError) -> Value {
+    json!({
+        "status": "error",
+        "code": err.code,
+        "error": err.message,
+        "path": path
+    })
+}
+
+fn parse_fs_read_usize_arg(
+    args: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, FsReadToolError> {
+    let Some(raw_value) = args.get(key) else {
+        return Ok(default);
+    };
+
+    let Some(value) = raw_value.as_u64() else {
+        return Err(FsReadToolError::new(
+            "invalid_args",
+            format!("'{key}' must be a positive integer"),
+        ));
+    };
+
+    let parsed = usize::try_from(value).map_err(|_| {
+        FsReadToolError::new(
+            "invalid_args",
+            format!("'{key}' is too large for this platform"),
+        )
+    })?;
+    if parsed < min || parsed > max {
+        return Err(FsReadToolError::new(
+            "invalid_args",
+            format!("'{key}' must be between {min} and {max}"),
+        ));
+    }
+
+    Ok(parsed)
+}
+
+fn parse_fs_read_request(args: &Value) -> Result<FsReadRequest, FsReadToolError> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if path.is_empty() {
+        return Err(FsReadToolError::new(
+            "invalid_args",
+            "'path' is required for fs_read",
+        ));
+    }
+
+    Ok(FsReadRequest {
+        path,
+        start_line: parse_fs_read_usize_arg(args, "start_line", 1, 1, 1_000_000)?,
+        max_lines: parse_fs_read_usize_arg(
+            args,
+            "max_lines",
+            FS_READ_DEFAULT_MAX_LINES,
+            1,
+            FS_READ_MAX_LINES_LIMIT,
+        )?,
+        max_bytes: parse_fs_read_usize_arg(
+            args,
+            "max_bytes",
+            FS_READ_DEFAULT_MAX_BYTES,
+            1,
+            FS_READ_MAX_BYTES_LIMIT,
+        )?,
+        max_entries: parse_fs_read_usize_arg(
+            args,
+            "max_entries",
+            FS_READ_DEFAULT_MAX_ENTRIES,
+            1,
+            FS_READ_MAX_ENTRIES_LIMIT,
+        )?,
+    })
+}
+
+fn fs_read_workspace_root() -> Result<PathBuf, FsReadToolError> {
+    let cwd = std::env::current_dir().map_err(|_| {
+        FsReadToolError::new(
+            "internal_error",
+            "failed to resolve workspace root from current directory",
+        )
+    })?;
+
+    cwd.canonicalize().map_err(|_| {
+        FsReadToolError::new(
+            "internal_error",
+            "failed to canonicalize workspace root path",
+        )
+    })
+}
+
+fn resolve_fs_read_path(
+    workspace_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, FsReadToolError> {
+    let requested = PathBuf::from(requested_path);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        workspace_root.join(requested)
+    };
+
+    if !absolute.exists() {
+        return Err(FsReadToolError::new(
+            "invalid_path",
+            format!("path '{}' does not exist", requested_path),
+        ));
+    }
+
+    absolute.canonicalize().map_err(|_| {
+        FsReadToolError::new(
+            "invalid_path",
+            format!("path '{}' could not be resolved", requested_path),
+        )
+    })
+}
+
+fn enforce_fs_read_policy(
+    requested_path: &str,
+    resolved: &Path,
+    workspace_root: &Path,
+) -> Result<(), FsReadToolError> {
+    if !resolved.starts_with(workspace_root) {
+        return Err(FsReadToolError::new(
+            "denied_path",
+            format!(
+                "fs_read denied path '{}': outside workspace root '{}'",
+                requested_path,
+                workspace_root.display()
+            ),
+        ));
+    }
+
+    for component in resolved.components() {
+        let segment = component.as_os_str().to_string_lossy();
+        if FS_READ_DENIED_SEGMENTS
+            .iter()
+            .any(|denied| segment.eq_ignore_ascii_case(denied))
+        {
+            return Err(FsReadToolError::new(
+                "denied_path",
+                format!(
+                    "fs_read denied path '{}': segment '{}' is blocked by policy",
+                    requested_path, segment
+                ),
+            ));
+        }
+    }
+
+    if let Some(name) = resolved.file_name().and_then(|value| value.to_str())
+        && FS_READ_DENIED_FILE_NAMES
+            .iter()
+            .any(|denied| name.eq_ignore_ascii_case(denied))
+    {
+        return Err(FsReadToolError::new(
+            "denied_path",
+            format!(
+                "fs_read denied path '{}': filename '{}' is blocked by policy",
+                requested_path, name
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn fs_read_display_path(path: &Path, workspace_root: &Path) -> String {
+    path.strip_prefix(workspace_root)
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                format!("./{}", relative.display())
+            }
+        })
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+fn fs_read_file_payload(
+    resolved: &Path,
+    display_path: &str,
+    request: &FsReadRequest,
+) -> Result<Value, FsReadToolError> {
+    let data = std::fs::read(resolved).map_err(|_| {
+        FsReadToolError::new(
+            "io_error",
+            format!("failed to read file '{}'", display_path),
+        )
+    })?;
+
+    let bytes_to_use = data.len().min(request.max_bytes);
+    let truncated_by_bytes = data.len() > bytes_to_use;
+    let content = String::from_utf8_lossy(&data[..bytes_to_use]).to_string();
+    let lines = content.lines().collect::<Vec<&str>>();
+
+    let start_index = request.start_line.saturating_sub(1).min(lines.len());
+    let end_index = start_index
+        .saturating_add(request.max_lines)
+        .min(lines.len());
+    let selected = lines[start_index..end_index].join("\n");
+    let omitted_lines = lines.len().saturating_sub(end_index);
+
+    Ok(json!({
+        "status": "ok",
+        "kind": "file",
+        "path": display_path,
+        "start_line": request.start_line,
+        "line_count": end_index.saturating_sub(start_index),
+        "omitted_lines": omitted_lines,
+        "truncated": truncated_by_bytes || omitted_lines > 0,
+        "content": selected
+    }))
+}
+
+fn fs_read_directory_payload(
+    resolved: &Path,
+    display_path: &str,
+    request: &FsReadRequest,
+) -> Result<Value, FsReadToolError> {
+    let mut entries = std::fs::read_dir(resolved)
+        .map_err(|_| {
+            FsReadToolError::new(
+                "io_error",
+                format!("failed to read directory '{}'", display_path),
+            )
+        })?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let file_type = entry.file_type().ok()?;
+            let kind = if file_type.is_dir() {
+                "dir"
+            } else if file_type.is_file() {
+                "file"
+            } else if file_type.is_symlink() {
+                "symlink"
+            } else {
+                "other"
+            };
+            Some((name, kind.to_string()))
+        })
+        .collect::<Vec<(String, String)>>();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total_entries = entries.len();
+    let truncated = total_entries > request.max_entries;
+    if truncated {
+        entries.truncate(request.max_entries);
+    }
+
+    let rendered_entries = entries
+        .into_iter()
+        .map(|(name, kind)| json!({ "name": name, "kind": kind }))
+        .collect::<Vec<Value>>();
+
+    Ok(json!({
+        "status": "ok",
+        "kind": "directory",
+        "path": display_path,
+        "entry_count": total_entries,
+        "truncated": truncated,
+        "entries": rendered_entries
+    }))
+}
+
+fn fs_read_tool_response_with_root(args: &Value, workspace_root: &Path) -> Value {
+    let request = match parse_fs_read_request(args) {
+        Ok(request) => request,
+        Err(err) => return fs_read_error_payload("<missing>", err),
+    };
+
+    let resolved = match resolve_fs_read_path(workspace_root, &request.path) {
+        Ok(path) => path,
+        Err(err) => return fs_read_error_payload(&request.path, err),
+    };
+    if let Err(err) = enforce_fs_read_policy(&request.path, &resolved, workspace_root) {
+        return fs_read_error_payload(&request.path, err);
+    }
+
+    let display_path = fs_read_display_path(&resolved, workspace_root);
+    if resolved.is_file() {
+        return match fs_read_file_payload(&resolved, &display_path, &request) {
+            Ok(value) => value,
+            Err(err) => fs_read_error_payload(&request.path, err),
+        };
+    }
+
+    if resolved.is_dir() {
+        return match fs_read_directory_payload(&resolved, &display_path, &request) {
+            Ok(value) => value,
+            Err(err) => fs_read_error_payload(&request.path, err),
+        };
+    }
+
+    fs_read_error_payload(
+        &request.path,
+        FsReadToolError::new(
+            "unsupported_path",
+            format!(
+                "fs_read supports only files and directories (path '{}')",
+                request.path
+            ),
+        ),
+    )
+}
+
+fn fs_read_tool_response(args: &Value) -> Value {
+    let workspace_root = match fs_read_workspace_root() {
+        Ok(root) => root,
+        Err(err) => return fs_read_error_payload("<workspace>", err),
+    };
+    fs_read_tool_response_with_root(args, &workspace_root)
+}
+
 fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
     let current_time = FunctionTool::new(
         "current_unix_time",
@@ -2734,7 +3091,18 @@ fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         },
     );
 
-    vec![Arc::new(current_time), Arc::new(release_template)]
+    let fs_read = FunctionTool::new(
+        "fs_read",
+        "Reads file content or directory entries within the workspace using path policy checks. \
+         Args: path (required), start_line, max_lines, max_bytes, max_entries.",
+        |_ctx, args| async move { Ok(fs_read_tool_response(&args)) },
+    );
+
+    vec![
+        Arc::new(current_time),
+        Arc::new(release_template),
+        Arc::new(fs_read),
+    ]
 }
 
 #[cfg(test)]
@@ -5362,6 +5730,100 @@ mod tests {
     }
 
     #[test]
+    fn fs_read_reads_allowed_file_content() {
+        let dir = tempdir().expect("temp directory should create");
+        std::fs::write(dir.path().join("notes.txt"), "alpha\nbeta\ngamma\n")
+            .expect("fixture file should write");
+        let workspace_root = dir
+            .path()
+            .canonicalize()
+            .expect("workspace root should resolve");
+
+        let payload = fs_read_tool_response_with_root(
+            &json!({
+                "path": "notes.txt",
+                "start_line": 2,
+                "max_lines": 1
+            }),
+            &workspace_root,
+        );
+
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["kind"], "file");
+        assert_eq!(payload["content"], "beta");
+        assert_eq!(payload["line_count"], 1);
+    }
+
+    #[test]
+    fn fs_read_lists_directory_entries() {
+        let dir = tempdir().expect("temp directory should create");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("fixture dir should create");
+        std::fs::write(dir.path().join("README.md"), "hello").expect("fixture file should write");
+        let workspace_root = dir
+            .path()
+            .canonicalize()
+            .expect("workspace root should resolve");
+
+        let payload = fs_read_tool_response_with_root(
+            &json!({
+                "path": ".",
+                "max_entries": 10
+            }),
+            &workspace_root,
+        );
+
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["kind"], "directory");
+        assert_eq!(payload["entry_count"], 2);
+        let entries = payload["entries"]
+            .as_array()
+            .expect("entries should be an array");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.get("name") == Some(&Value::String("README.md".to_string())))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.get("name") == Some(&Value::String("docs".to_string())))
+        );
+    }
+
+    #[test]
+    fn fs_read_denies_blocked_paths() {
+        let dir = tempdir().expect("temp directory should create");
+        std::fs::write(dir.path().join(".env"), "OPENAI_API_KEY=test").expect("fixture file");
+        let workspace_root = dir
+            .path()
+            .canonicalize()
+            .expect("workspace root should resolve");
+
+        let payload = fs_read_tool_response_with_root(&json!({ "path": ".env" }), &workspace_root);
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["code"], "denied_path");
+        assert!(
+            extract_tool_failure_message(&payload)
+                .as_deref()
+                .unwrap_or_default()
+                .contains("denied path")
+        );
+    }
+
+    #[test]
+    fn fs_read_reports_invalid_paths() {
+        let dir = tempdir().expect("temp directory should create");
+        let workspace_root = dir
+            .path()
+            .canonicalize()
+            .expect("workspace root should resolve");
+        let payload =
+            fs_read_tool_response_with_root(&json!({ "path": "missing.txt" }), &workspace_root);
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["code"], "invalid_path");
+    }
+
+    #[test]
     fn error_taxonomy_distinguishes_provider_session_and_tooling() {
         let provider_err = anyhow::anyhow!("OPENAI_API_KEY is required for OpenAI provider");
         let session_err = anyhow::anyhow!("failed to load session 'abc'");
@@ -5840,6 +6302,24 @@ guardrail_redact_replacement = "***"
                 .run_config
                 .tool_confirmation_decisions
                 .get("release_template"),
+            Some(&ToolConfirmationDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_can_require_fs_read() {
+        let mut cfg = base_cfg();
+        cfg.tool_confirmation_mode = ToolConfirmationMode::Never;
+        cfg.require_confirm_tool = vec!["fs_read".to_string()];
+        let runtime_tools = make_runtime_tools(&["fs_read", "current_unix_time"], &[]);
+
+        let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+        assert!(settings.policy.requires_confirmation("fs_read"));
+        assert_eq!(
+            settings
+                .run_config
+                .tool_confirmation_decisions
+                .get("fs_read"),
             Some(&ToolConfirmationDecision::Deny)
         );
     }
