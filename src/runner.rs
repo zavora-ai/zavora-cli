@@ -140,7 +140,15 @@ pub fn build_single_agent_with_tools(
              - Do not add tests unless explicitly requested\n\
              - Decline requests for malicious code\n\
              - When uncertain, ask for clarification rather than guessing\n\
-             </rules>"
+             </rules>\n\
+             \n\
+             <delegation>\n\
+             You have specialist sub-agents. Transfer to them for focused tasks:\n\
+             - git_agent: git commits, branches, merges, rebasing, PR workflows, conflict resolution\n\
+             - research_agent: codebase exploration, file search, log analysis, investigative tasks\n\
+             - planner_agent: task breakdown, project planning, todo list management, spec writing\n\
+             Handle simple/quick tasks yourself. Delegate when the task is clearly in a specialist's domain.\n\
+             </delegation>"
         )];
         if let Some(agent_instruction) = cfg
             .agent_instruction
@@ -166,6 +174,9 @@ pub fn build_single_agent_with_tools(
          Prioritize actionable output. When planning work, prefer release-oriented increments."
             .to_string()
     };
+
+    // Build sub-agents from the same tool set (they inherit ConfirmingTool wrapping).
+    let sub_agents = build_sub_agents(model.clone(), tools, tool_confirmation_policy.clone(), tool_timeout);
 
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -193,8 +204,131 @@ pub fn build_single_agent_with_tools(
     for tool in tools {
         builder = builder.tool(tool.clone());
     }
+    for agent in sub_agents {
+        builder = builder.sub_agent(agent);
+    }
 
     Ok(Arc::new(builder.build()?))
+}
+
+// ---------------------------------------------------------------------------
+// Sub-agent builders
+// ---------------------------------------------------------------------------
+
+fn pick_tools(all: &[Arc<dyn Tool>], names: &[&str]) -> Vec<Arc<dyn Tool>> {
+    all.iter().filter(|t| names.contains(&t.name())).cloned().collect()
+}
+
+fn before_model_role_fix() -> Box<
+    dyn Fn(
+            Arc<dyn adk_rust::CallbackContext>,
+            adk_rust::prelude::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = adk_rust::prelude::Result<BeforeModelResult>> + Send>,
+        > + Send
+        + Sync,
+> {
+    Box::new(|_ctx, mut request| {
+        Box::pin(async move {
+            for content in &mut request.contents {
+                if content.role == "model"
+                    && content.parts.iter().any(|p| {
+                        matches!(p, adk_rust::prelude::Part::FunctionResponse { .. })
+                    })
+                {
+                    content.role = "function".to_string();
+                }
+            }
+            Ok(BeforeModelResult::Continue(request))
+        })
+    })
+}
+
+fn build_sub_agents(
+    model: Arc<dyn Llm>,
+    tools: &[Arc<dyn Tool>],
+    policy: ToolConfirmationPolicy,
+    timeout: Duration,
+) -> Vec<Arc<dyn Agent>> {
+    let mut agents: Vec<Arc<dyn Agent>> = Vec::new();
+
+    // --- git_agent ---
+    {
+        let mut b = LlmAgentBuilder::new("git_agent")
+            .description("Specialist for git operations: commits, branches, merges, rebasing, history, and PR workflows")
+            .instruction(
+                "You are a git specialist. You handle all version-control tasks:\n\
+                 - Commits, branches, merges, rebasing, cherry-pick\n\
+                 - Conflict resolution and history inspection\n\
+                 - Conventional commit messages (feat/fix/refactor/docs/test/chore)\n\
+                 - PR creation and review workflows via gh CLI\n\
+                 - Always verify build/tests pass before committing\n\
+                 - Make atomic commits: one logical change per commit\n\
+                 When your task is complete, provide a brief summary of what was done."
+            )
+            .model(model.clone())
+            .tool_confirmation_policy(policy.clone())
+            .tool_timeout(timeout)
+            .before_model_callback(before_model_role_fix());
+        for t in pick_tools(tools, &[EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME]) {
+            b = b.tool(t);
+        }
+        if let Ok(a) = b.build() {
+            agents.push(Arc::new(a));
+        }
+    }
+
+    // --- research_agent ---
+    {
+        let mut b = LlmAgentBuilder::new("research_agent")
+            .description("Specialist for codebase exploration, file search, log analysis, and investigative tasks")
+            .instruction(
+                "You are a research specialist. You investigate codebases and systems:\n\
+                 - Search files with grep, find, ripgrep patterns\n\
+                 - Read and analyze source code, configs, logs\n\
+                 - Trace call chains and data flows\n\
+                 - Summarize findings with file paths and line numbers\n\
+                 - Be thorough: check multiple files, cross-reference, verify assumptions\n\
+                 When your investigation is complete, provide a structured summary."
+            )
+            .model(model.clone())
+            .tool_confirmation_policy(policy.clone())
+            .tool_timeout(timeout)
+            .before_model_callback(before_model_role_fix());
+        for t in pick_tools(tools, &[EXECUTE_BASH_TOOL_NAME, FS_READ_TOOL_NAME]) {
+            b = b.tool(t);
+        }
+        if let Ok(a) = b.build() {
+            agents.push(Arc::new(a));
+        }
+    }
+
+    // --- planner_agent ---
+    {
+        let mut b = LlmAgentBuilder::new("planner_agent")
+            .description("Specialist for task breakdown, project planning, and todo management")
+            .instruction(
+                "You are a planning specialist. You break down work into actionable steps:\n\
+                 - Decompose complex tasks into ordered, concrete steps\n\
+                 - Create and manage todo lists for tracking progress\n\
+                 - Read existing code/docs to inform plans\n\
+                 - Write planning documents, specs, and checklists\n\
+                 - Each task should be independently verifiable\n\
+                 When planning is complete, provide the plan summary."
+            )
+            .model(model.clone())
+            .tool_confirmation_policy(policy)
+            .tool_timeout(timeout)
+            .before_model_callback(before_model_role_fix());
+        for t in pick_tools(tools, &[FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, "todo_list"]) {
+            b = b.tool(t);
+        }
+        if let Ok(a) = b.build() {
+            agents.push(Arc::new(a));
+        }
+    }
+
+    agents
 }
 
 #[derive(Clone)]
