@@ -21,6 +21,7 @@ use adk_session::{
 use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -523,6 +524,8 @@ struct McpServerConfig {
     auth_bearer_env: Option<String>,
     #[serde(default)]
     tool_allowlist: Vec<String>,
+    #[serde(default)]
+    tool_aliases: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
