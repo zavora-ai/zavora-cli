@@ -27,7 +27,7 @@ security-check:
 perf-check:
 	./scripts/perf_reliability.sh
 
-ci: fmt-check check lint test quality-gate
+ci: fmt-check check lint test quality-gate security-check
 
 release-check: ci security-check
 	@echo "Release preflight checks passed."
