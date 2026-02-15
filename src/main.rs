@@ -21,7 +21,6 @@ use adk_session::{
 use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -411,6 +410,8 @@ struct RuntimeConfig {
     guardrail_terms: Vec<String>,
     guardrail_redact_replacement: String,
     mcp_servers: Vec<McpServerConfig>,
+    max_prompt_chars: usize,
+    server_runner_cache_max: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -525,6 +526,7 @@ struct McpServerConfig {
     #[serde(default)]
     tool_allowlist: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     tool_aliases: HashMap<String, String>,
 }
 
@@ -727,6 +729,7 @@ struct TelemetrySink {
     run_id: String,
     command: String,
     session_id: String,
+    file_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl TelemetrySink {
@@ -738,6 +741,7 @@ impl TelemetrySink {
             run_id,
             command,
             session_id: cfg.session_id.clone(),
+            file_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -781,6 +785,8 @@ impl TelemetrySink {
                 )
             })?;
         }
+
+        let _guard = self.file_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -1388,6 +1394,17 @@ fn buffered_output_required(mode: GuardrailMode) -> bool {
     matches!(mode, GuardrailMode::Block | GuardrailMode::Redact)
 }
 
+fn enforce_prompt_limit(prompt: &str, max_chars: usize) -> Result<()> {
+    if max_chars > 0 && prompt.len() > max_chars {
+        return Err(anyhow::anyhow!(
+            "prompt exceeds maximum length ({} chars > {} limit). Shorten the prompt or increase max_prompt_chars.",
+            prompt.len(),
+            max_chars
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ServerState {
     cfg: RuntimeConfig,
@@ -1399,6 +1416,8 @@ struct ServerState {
     provider_label: String,
     model_name: String,
     runner_cache: Arc<tokio::sync::RwLock<HashMap<String, Arc<Runner>>>>,
+    auth_token: Option<String>,
+    runner_cache_max: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1479,8 +1498,39 @@ async fn get_or_build_server_runner(
     if let Some(existing) = cache.get(&key).cloned() {
         return Ok((existing, "hit-race"));
     }
+
+    // Evict oldest entry when cache is at capacity.
+    if cache.len() >= state.runner_cache_max && !cache.is_empty() {
+        if let Some(evict_key) = cache.keys().next().cloned() {
+            cache.remove(&evict_key);
+            tracing::info!(evicted_key = %evict_key, cache_size = cache.len(), "server runner cache eviction");
+        }
+    }
+
     cache.insert(key, runner.clone());
     Ok((runner, "miss"))
+}
+
+fn check_server_auth(state: &ServerState, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let Some(expected_token) = state.auth_token.as_deref() else {
+        return Ok(()); // no token configured, auth disabled
+    };
+
+    let header_value = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    let provided_token = header_value.strip_prefix("Bearer ").unwrap_or_default().trim();
+
+    if provided_token.is_empty() || provided_token != expected_token {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid Authorization bearer token",
+        ));
+    }
+
+    Ok(())
 }
 
 async fn handle_server_health(State(state): State<Arc<ServerState>>) -> Json<ServerHealthResponse> {
@@ -1493,8 +1543,12 @@ async fn handle_server_health(State(state): State<Arc<ServerState>>) -> Json<Ser
 
 async fn handle_server_ask(
     State(state): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ServerAskRequest>,
 ) -> ApiResult<ServerAskResponse> {
+    if let Err(err) = check_server_auth(&state, &headers) {
+        return Err(err);
+    }
     let started_at = Instant::now();
     let mut cfg = state.cfg.clone();
     if let Some(session_id) = request.session_id {
@@ -1511,6 +1565,9 @@ async fn handle_server_ask(
             "prompt cannot be empty for /v1/ask",
         ));
     }
+
+    enforce_prompt_limit(&prompt, cfg.max_prompt_chars)
+        .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
 
     let guarded_prompt = apply_guardrail(
         &cfg,
@@ -1596,8 +1653,12 @@ fn process_a2a_ping(request: A2aPingRequest) -> Result<A2aPingResponse> {
 
 async fn handle_a2a_ping(
     State(state): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<A2aPingRequest>,
 ) -> ApiResult<A2aPingResponse> {
+    if let Err(err) = check_server_auth(&state, &headers) {
+        return Err(err);
+    }
     state.telemetry.emit(
         "a2a.ping.received",
         json!({
@@ -1677,6 +1738,11 @@ async fn run_server(
         provider_label: provider_label.clone(),
         model_name: model_name.clone(),
         runner_cache: Arc::new(tokio::sync::RwLock::new(runner_cache)),
+        auth_token: std::env::var("ZAVORA_SERVER_AUTH_TOKEN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        runner_cache_max: cfg.server_runner_cache_max.max(1),
     });
 
     telemetry.emit(
@@ -1700,8 +1766,33 @@ async fn run_server(
         .await
         .context("failed to bind server listener")?;
     axum::serve(listener, build_server_router(state))
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server runtime failed")
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { println!("\nReceived Ctrl+C, shutting down gracefully..."); }
+        _ = terminate => { println!("\nReceived SIGTERM, shutting down gracefully..."); }
+    }
 }
 
 fn run_a2a_smoke(telemetry: &TelemetrySink) -> Result<()> {
@@ -1829,6 +1920,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
             let prompt = prompt.join(" ");
+            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
             let prompt =
                 apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
@@ -1894,6 +1986,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
             let prompt = prompt.join(" ");
+            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
             let prompt =
                 apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
@@ -2419,6 +2512,8 @@ fn resolve_runtime_config_with_agents(
             .or(profile.guardrail_redact_replacement)
             .unwrap_or_else(|| "[REDACTED]".to_string()),
         mcp_servers,
+        max_prompt_chars: 32_000,
+        server_runner_cache_max: 64,
     })
 }
 
@@ -4076,9 +4171,29 @@ fn is_read_only_command(command: &str) -> bool {
         return false;
     }
 
-    EXECUTE_BASH_READ_ONLY_PREFIXES
+    let has_read_only_prefix = EXECUTE_BASH_READ_ONLY_PREFIXES
         .iter()
-        .any(|prefix| normalized == *prefix || normalized.starts_with(prefix))
+        .any(|prefix| normalized == *prefix || normalized.starts_with(prefix));
+
+    if !has_read_only_prefix {
+        return false;
+    }
+
+    // Reject command chaining operators that could smuggle writes after a read-only prefix.
+    if contains_command_chaining(&normalized) {
+        return false;
+    }
+
+    true
+}
+
+fn contains_command_chaining(command: &str) -> bool {
+    for pattern in &[";", "&&", "||", "|", "$(", "`"] {
+        if command.contains(pattern) {
+            return true;
+        }
+    }
+    false
 }
 
 fn matched_denied_pattern(command: &str) -> Option<&'static str> {
@@ -7033,6 +7148,8 @@ mod tests {
             guardrail_terms: vec!["secret".to_string(), "password".to_string()],
             guardrail_redact_replacement: "[REDACTED]".to_string(),
             mcp_servers: Vec::new(),
+            max_prompt_chars: 32_000,
+            server_runner_cache_max: 64,
         }
     }
 
@@ -8369,6 +8486,7 @@ guardrail_redact_replacement = "***"
                 timeout_secs: Some(10),
                 auth_bearer_env: None,
                 tool_allowlist: Vec::new(),
+                tool_aliases: HashMap::new(),
             },
             McpServerConfig {
                 name: "ops".to_string(),
@@ -8377,6 +8495,7 @@ guardrail_redact_replacement = "***"
                 timeout_secs: Some(10),
                 auth_bearer_env: None,
                 tool_allowlist: Vec::new(),
+                tool_aliases: HashMap::new(),
             },
             McpServerConfig {
                 name: "analytics".to_string(),
@@ -8385,6 +8504,7 @@ guardrail_redact_replacement = "***"
                 timeout_secs: None,
                 auth_bearer_env: None,
                 tool_allowlist: Vec::new(),
+                tool_aliases: HashMap::new(),
             },
         ];
 
@@ -8412,6 +8532,7 @@ guardrail_redact_replacement = "***"
             timeout_secs: Some(15),
             auth_bearer_env: Some("__ZAVORA_TEST_MCP_TOKEN_MISSING__".to_string()),
             tool_allowlist: Vec::new(),
+            tool_aliases: HashMap::new(),
         };
 
         let err = resolve_mcp_auth(&server).expect_err("missing env should fail");

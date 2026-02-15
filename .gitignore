@@ -2,3 +2,9 @@
 .env
 .zavora/
 evals/reports/latest.json
+.DS_Store
+*.swp
+*.swo
+*.bak
+.idea/
+.vscode/
