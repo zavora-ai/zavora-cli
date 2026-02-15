@@ -73,7 +73,23 @@ pub fn build_single_agent_with_tools(
         .instruction(instruction)
         .model(model)
         .tool_confirmation_policy(tool_confirmation_policy)
-        .tool_timeout(tool_timeout);
+        .tool_timeout(tool_timeout)
+        .before_model_callback(Box::new(|_ctx, mut request| {
+            Box::pin(async move {
+                // Fix tool response roles: conversation_history() maps all non-user
+                // events to "model", but tool responses must be "function" for OpenAI.
+                for content in &mut request.contents {
+                    if content.role == "model"
+                        && content.parts.iter().any(|p| {
+                            matches!(p, adk_rust::prelude::Part::FunctionResponse { .. })
+                        })
+                    {
+                        content.role = "function".to_string();
+                    }
+                }
+                Ok(adk_rust::prelude::BeforeModelResult::Continue(request))
+            })
+        }));
 
     for tool in tools {
         builder = builder.tool(tool.clone());
