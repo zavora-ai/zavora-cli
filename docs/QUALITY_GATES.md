@@ -14,6 +14,8 @@ This executes:
 
 1. Eval harness threshold gate (`zavora-cli eval run`)
 2. Guardrail regression tests (`cargo test guardrail_`)
+3. Security hardening gate (`make security-check`) during release workflow
+4. RustSec advisory policy tracked in `.cargo/audit.toml` (temporary ignores must be reviewed each release)
 
 ## Thresholds
 

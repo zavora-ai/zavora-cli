@@ -103,6 +103,7 @@ Use `make` targets:
 - `make test`
 - `make eval`
 - `make quality-gate`
+- `make security-check`
 - `make ci`
 - `make release-check`
 
@@ -440,3 +441,5 @@ See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.
 See `docs/GUARDRAIL_POLICY.md` for guardrail modes, telemetry events, and enforcement behavior.
 See `docs/QUALITY_GATES.md` for CI/release gate thresholds and remediation flow.
 See `docs/SERVER_MODE.md` for server startup, API contract, and A2A smoke flow.
+See `docs/SECURITY_HARDENING.md` for security controls and release security checks.
+Temporary upstream RustSec exceptions are tracked in `.cargo/audit.toml` and reviewed each release.

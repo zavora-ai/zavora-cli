@@ -1,0 +1,13 @@
+# Temporary advisory policy for transitive dependencies we do not directly control.
+# Review this file on every release and remove ignores as soon as upstream fixes exist.
+[advisories]
+ignore = [
+  # Transitive via sqlx-mysql in adk-session; no upstream fix currently available.
+  "RUSTSEC-2023-0071",
+  # Transitive via async-openai in adk-model; upstream crate marked unmaintained.
+  "RUSTSEC-2025-0012",
+  # Transitive via backoff in async-openai path; unmaintained warning.
+  "RUSTSEC-2024-0384",
+  # Transitive via reqwest 0.11 path in claudius/adk-model; unmaintained warning.
+  "RUSTSEC-2025-0134",
+]

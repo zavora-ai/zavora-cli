@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test eval quality-gate ci release-check
+.PHONY: fmt fmt-check check lint test eval quality-gate security-check ci release-check
 
 fmt:
 	cargo fmt --all
@@ -21,7 +21,10 @@ eval:
 quality-gate:
 	./scripts/quality_gate.sh
 
+security-check:
+	./scripts/security_check.sh
+
 ci: fmt-check check lint test quality-gate
 
-release-check: ci
+release-check: ci security-check
 	@echo "Release preflight checks passed."
