@@ -33,3 +33,6 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Quality Gate (eval + guardrails)
+        run: make quality-gate

@@ -9,8 +9,10 @@ Run this checklist before creating a `vX.Y.Z` tag.
 - [ ] `cargo check`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
+- [ ] `make quality-gate`
 - [ ] `cargo run -- eval run --dataset evals/datasets/retrieval-baseline.v1.json --output .zavora/evals/release-candidate.json --benchmark-iterations 200 --fail-under 0.90`
 - [ ] Eval report reviewed and baseline updated in `docs/EVAL_BASELINE.md` (when release baseline changes)
+- [ ] Guardrail regression tests reviewed (`cargo test guardrail_`)
 
 ## Release Notes
 

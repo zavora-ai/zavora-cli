@@ -94,6 +94,7 @@ Use `make` targets:
 - `make lint`
 - `make test`
 - `make eval`
+- `make quality-gate`
 - `make ci`
 - `make release-check`
 
@@ -328,6 +329,7 @@ What the eval command produces:
 - machine-readable JSON report for release artifacts
 
 Release baseline reports are tracked under `evals/reports/` and summarized in `docs/EVAL_BASELINE.md`.
+CI quality enforcement uses `make quality-gate` (eval threshold + guardrail regression tests).
 
 ## Retrieval Abstraction
 
@@ -397,3 +399,4 @@ See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime
 See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.
 See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.
 See `docs/GUARDRAIL_POLICY.md` for guardrail modes, telemetry events, and enforcement behavior.
+See `docs/QUALITY_GATES.md` for CI/release gate thresholds and remediation flow.
