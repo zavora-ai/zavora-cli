@@ -27,7 +27,10 @@ use crate::compact::{CompactStrategy, compact_session};
 use crate::context::{ContextUsage, compute_context_usage};
 use crate::tool_policy::matches_wildcard;
 use crate::todos;
-use crate::theme::{build_prompt, suggest_command, is_first_run, print_onboarding};
+use crate::theme::{
+    build_prompt, suggest_command, is_first_run, print_onboarding, print_startup_banner,
+    BOLD, CYAN, DIM, GREEN, RESET, YELLOW,
+};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -109,20 +112,26 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
 }
 
 pub fn print_chat_help() {
-    println!("Chat commands:");
-    println!("- /help: show command quick reference");
-    println!("- /status: show active profile/provider/model/session");
-    println!("- /provider <name>: switch provider and rebuild runtime");
-    println!("- /model [id]: pick a model interactively or switch directly by id");
-    println!("- /tools: show active built-in/MCP tools and confirmation policy");
-    println!("- /mcp: show MCP server and tool summary");
-    println!("- /usage: show context usage and token breakdown");
-    println!("- /compact: summarize conversation to free context space");
-    println!("- /checkpoint save|list|restore: manage conversation snapshots");
-    println!("- /tangent: enter/exit exploratory branch (tail: keep last exchange)");
-    println!("- /todos: view/delete/clear-finished task lists");
-    println!("- /delegate <task>: (experimental) run isolated sub-agent task");
-    println!("- /exit: end interactive chat");
+    println!();
+    println!("  {BOLD}Commands{RESET}");
+    println!("  {CYAN}/help{RESET}              {DIM}show this reference{RESET}");
+    println!("  {CYAN}/status{RESET}            {DIM}active provider, model, session{RESET}");
+    println!("  {CYAN}/usage{RESET}             {DIM}context window token breakdown{RESET}");
+    println!("  {CYAN}/compact{RESET}           {DIM}summarize history to free context{RESET}");
+    println!("  {CYAN}/tools{RESET}             {DIM}list active tools and policy{RESET}");
+    println!("  {CYAN}/mcp{RESET}               {DIM}MCP server diagnostics{RESET}");
+    println!();
+    println!("  {BOLD}Session{RESET}");
+    println!("  {CYAN}/checkpoint{RESET} save|list|restore  {DIM}manage snapshots{RESET}");
+    println!("  {CYAN}/tangent{RESET} start|end  {DIM}exploratory branch{RESET}");
+    println!("  {CYAN}/todos{RESET} list|show|clear  {DIM}task lists{RESET}");
+    println!("  {CYAN}/delegate{RESET} <task>    {DIM}run isolated sub-agent{RESET}");
+    println!();
+    println!("  {BOLD}Config{RESET}");
+    println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
+    println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
+    println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
+    println!();
 }
 
 pub fn print_chat_usage() {
@@ -457,10 +466,13 @@ pub async fn dispatch_chat_command(
     match command {
         ChatCommand::Exit => Ok(ChatCommandAction::Exit),
         ChatCommand::Status => {
-            println!(
-                "profile={} provider={:?} model={} session_id={}",
-                cfg.profile, resolved_provider, model_name, cfg.session_id
-            );
+            let prov = format!("{:?}", resolved_provider).to_ascii_lowercase();
+            println!();
+            println!("  {DIM}Profile:{RESET}  {GREEN}{}{RESET}", cfg.profile);
+            println!("  {DIM}Provider:{RESET} {GREEN}{prov}{RESET}");
+            println!("  {DIM}Model:{RESET}    {GREEN}{model_name}{RESET}");
+            println!("  {DIM}Session:{RESET}  {}{RESET}", cfg.session_id);
+            println!();
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Help => {
@@ -776,13 +788,14 @@ pub async fn run_chat(
     );
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-    println!("Interactive mode started. Type /help for commands or /exit to quit.");
-    println!("Quick start: /provider <name>, /model (picker), /tools, /mcp, /usage.");
+    let provider_label = format!("{:?}", resolved_provider).to_ascii_lowercase();
+    print_startup_banner(&provider_label, &model_name);
     if buffered_output_required(cfg.guardrail_output_mode) {
         println!(
-            "Guardrail output mode {:?} active: chat will buffer model responses before printing.",
+            "  {YELLOW}Guardrail output mode {:?} active: responses will be buffered.{RESET}",
             cfg.guardrail_output_mode
         );
+        println!();
     }
     let stdin = io::stdin();
     let mut line = String::new();

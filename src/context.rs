@@ -82,9 +82,9 @@ impl ContextUsage {
     pub fn prompt_indicator(&self) -> String {
         let pct = (self.utilization() * 100.0) as u32;
         match self.budget_level() {
-            BudgetLevel::Normal => format!("[{}%]", pct),
-            BudgetLevel::Warning => format!("[⚠ {}%]", pct),
-            BudgetLevel::Critical => format!("[🔴 {}%]", pct),
+            BudgetLevel::Normal => format!("{}%", pct),
+            BudgetLevel::Warning => format!("⚠ {}%", pct),
+            BudgetLevel::Critical => format!("🔴 {}%", pct),
         }
     }
 
@@ -95,23 +95,33 @@ impl ContextUsage {
         let pct = (self.utilization() * 100.0) as u32;
         let remaining = window.saturating_sub(total_tokens);
 
+        let pct_color = match self.budget_level() {
+            BudgetLevel::Normal => "\x1b[32m",   // green
+            BudgetLevel::Warning => "\x1b[1;33m", // bold yellow
+            BudgetLevel::Critical => "\x1b[1;31m", // bold red
+        };
+        let d = "\x1b[2m"; // dim
+        let r = "\x1b[0m"; // reset
+        let b = "\x1b[1m"; // bold
+
         let mut out = String::new();
-        out.push_str(&format!("Context usage: {}/{} tokens ({}%)\n", total_tokens, window, pct));
-        out.push_str(&format!("  User:      {} tokens\n", estimate_tokens(self.user_chars)));
-        out.push_str(&format!("  Assistant: {} tokens\n", estimate_tokens(self.assistant_chars)));
-        out.push_str(&format!("  Tools:     {} tokens\n", estimate_tokens(self.tool_chars)));
-        out.push_str(&format!("  System:    {} tokens\n", estimate_tokens(self.system_chars)));
-        out.push_str(&format!("  Remaining: {} tokens\n", remaining));
+        out.push_str(&format!("\n  {b}Context{r}  {pct_color}{total_tokens}/{window} tokens ({pct}%){r}\n\n"));
+        out.push_str(&format!("  {d}User:{r}      {:>6} tokens\n", estimate_tokens(self.user_chars)));
+        out.push_str(&format!("  {d}Assistant:{r}  {:>6} tokens\n", estimate_tokens(self.assistant_chars)));
+        out.push_str(&format!("  {d}Tools:{r}     {:>6} tokens\n", estimate_tokens(self.tool_chars)));
+        out.push_str(&format!("  {d}System:{r}    {:>6} tokens\n", estimate_tokens(self.system_chars)));
+        out.push_str(&format!("  {d}Remaining:{r} {:>6} tokens\n", remaining));
 
         match self.budget_level() {
             BudgetLevel::Normal => {}
             BudgetLevel::Warning => {
-                out.push_str("⚠ Context usage above 80%. Consider using /compact to free space.\n");
+                out.push_str(&format!("\n  {pct_color}⚠ Above 80% — consider /compact to free space.{r}\n"));
             }
             BudgetLevel::Critical => {
-                out.push_str("🔴 Context nearly full. Use /compact now or auto-compaction will trigger.\n");
+                out.push_str(&format!("\n  {pct_color}🔴 Nearly full — use /compact now.{r}\n"));
             }
         }
+        out.push('\n');
         out
     }
 }

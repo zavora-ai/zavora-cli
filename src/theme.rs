@@ -1,11 +1,30 @@
 /// Unified UI theme, command palette, and onboarding UX.
 ///
 /// Provides prompt visuals with mode indicators, fuzzy slash command matching,
-/// and first-run onboarding help.
+/// ANSI color helpers, and first-run onboarding help.
 use std::path::Path;
 
 use crate::checkpoint::CheckpointStore;
-use crate::context::ContextUsage;
+use crate::context::{BudgetLevel, ContextUsage};
+
+// ---------------------------------------------------------------------------
+// ANSI color helpers
+// ---------------------------------------------------------------------------
+
+pub const RESET: &str = "\x1b[0m";
+pub const BOLD: &str = "\x1b[1m";
+pub const DIM: &str = "\x1b[2m";
+pub const CYAN: &str = "\x1b[36m";
+pub const GREEN: &str = "\x1b[32m";
+pub const YELLOW: &str = "\x1b[33m";
+pub const RED: &str = "\x1b[31m";
+pub const MAGENTA: &str = "\x1b[35m";
+pub const BLUE: &str = "\x1b[34m";
+pub const BOLD_CYAN: &str = "\x1b[1;36m";
+pub const BOLD_GREEN: &str = "\x1b[1;32m";
+pub const BOLD_YELLOW: &str = "\x1b[1;33m";
+pub const BOLD_RED: &str = "\x1b[1;31m";
+pub const BOLD_MAGENTA: &str = "\x1b[1;35m";
 
 // ---------------------------------------------------------------------------
 // Known commands for fuzzy matching
@@ -32,31 +51,48 @@ pub const COMMAND_PALETTE: &[(&str, &str)] = &[
 // Prompt builder
 // ---------------------------------------------------------------------------
 
-/// Build the interactive prompt string with mode indicators.
+/// Build the interactive prompt string with mode indicators and color.
 pub fn build_prompt(
     checkpoint_store: &CheckpointStore,
     context_usage: Option<&ContextUsage>,
 ) -> String {
     let mut parts = Vec::new();
 
-    // Budget indicator
+    // Budget indicator with color
     if let Some(usage) = context_usage {
-        let indicator = usage.prompt_indicator();
-        if !indicator.is_empty() {
-            parts.push(indicator);
-        }
+        let pct = (usage.utilization() * 100.0) as u32;
+        let indicator = match usage.budget_level() {
+            BudgetLevel::Normal => format!("{DIM}{}%{RESET}", pct),
+            BudgetLevel::Warning => format!("{BOLD_YELLOW}⚠ {}%{RESET}", pct),
+            BudgetLevel::Critical => format!("{BOLD_RED}🔴 {}%{RESET}", pct),
+        };
+        parts.push(indicator);
     }
 
     // Tangent mode indicator
     if checkpoint_store.in_tangent() {
-        parts.push("↯tangent".to_string());
+        parts.push(format!("{MAGENTA}↯tangent{RESET}"));
     }
 
     if parts.is_empty() {
-        "zavora> ".to_string()
+        format!("{BOLD_CYAN}zavora>{RESET} ")
     } else {
-        format!("zavora [{}]> ", parts.join(" "))
+        format!("{BOLD_CYAN}zavora{RESET} {DIM}[{RESET}{}{DIM}]{RESET}{BOLD_CYAN}>{RESET} ", parts.join(" "))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Startup banner
+// ---------------------------------------------------------------------------
+
+/// Print the chat startup banner.
+pub fn print_startup_banner(provider: &str, model: &str) {
+    println!();
+    println!("  {BOLD_CYAN}zavora-cli{RESET} {DIM}v{}{RESET}", env!("CARGO_PKG_VERSION"));
+    println!("  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}");
+    println!();
+    println!("  Type a message to chat, {CYAN}/help{RESET} for commands, {CYAN}/exit{RESET} to quit.");
+    println!();
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +100,6 @@ pub fn build_prompt(
 // ---------------------------------------------------------------------------
 
 /// Find the best fuzzy match for a command prefix among known commands.
-/// Returns the matched command name if exactly one command starts with the input,
-/// or a list of candidates if ambiguous.
 pub fn fuzzy_match_command(input: &str) -> FuzzyResult {
     let lower = input.to_ascii_lowercase();
     let matches: Vec<&str> = COMMAND_PALETTE
@@ -95,9 +129,9 @@ pub enum FuzzyResult {
 /// Format a "did you mean?" suggestion for an unknown command.
 pub fn suggest_command(input: &str) -> Option<String> {
     match fuzzy_match_command(input) {
-        FuzzyResult::Exact(cmd) => Some(format!("Did you mean /{cmd}?")),
+        FuzzyResult::Exact(cmd) => Some(format!("Did you mean {CYAN}/{cmd}{RESET}?")),
         FuzzyResult::Ambiguous(cmds) => {
-            let list = cmds.iter().map(|c| format!("/{c}")).collect::<Vec<_>>().join(", ");
+            let list = cmds.iter().map(|c| format!("{CYAN}/{c}{RESET}")).collect::<Vec<_>>().join(", ");
             Some(format!("Did you mean one of: {list}?"))
         }
         FuzzyResult::NoMatch => None,
@@ -115,15 +149,15 @@ pub fn is_first_run(workspace: &Path) -> bool {
 
 /// Print first-run onboarding help.
 pub fn print_onboarding() {
-    println!("Welcome to zavora-cli! Here's how to get started:");
+    println!("  {BOLD}Welcome to zavora-cli!{RESET} Here's how to get started:");
     println!();
-    println!("  1. Type a message to chat with the AI agent");
-    println!("  2. Use /help to see all available commands");
-    println!("  3. Use /provider <name> to switch AI providers");
-    println!("  4. Use /model to pick a model interactively");
-    println!("  5. Use /tools to see available tools");
+    println!("  {DIM}1.{RESET} Type a message to chat with the AI agent");
+    println!("  {DIM}2.{RESET} Use {CYAN}/help{RESET} to see all available commands");
+    println!("  {DIM}3.{RESET} Use {CYAN}/provider{RESET} <name> to switch AI providers");
+    println!("  {DIM}4.{RESET} Use {CYAN}/model{RESET} to pick a model interactively");
+    println!("  {DIM}5.{RESET} Use {CYAN}/tools{RESET} to see available tools");
     println!();
-    println!("Tip: Commands can be abbreviated — type /ch and press enter to see matches.");
+    println!("  {DIM}Tip: Commands can be abbreviated — type /ch and press enter to see matches.{RESET}");
     println!();
 }
 
@@ -131,7 +165,7 @@ pub fn print_onboarding() {
 pub fn format_command_palette() -> String {
     let mut out = String::from("Command palette:\n");
     for (name, desc) in COMMAND_PALETTE {
-        out.push_str(&format!("  /{name:<12} {desc}\n"));
+        out.push_str(&format!("  {CYAN}/{name:<12}{RESET} {DIM}{desc}{RESET}\n"));
     }
     out
 }

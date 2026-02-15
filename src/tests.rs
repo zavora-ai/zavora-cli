@@ -2423,7 +2423,7 @@ fn test_context_usage_format() {
         context_window_tokens: 128_000,
     };
     let output = usage.format_usage();
-    assert!(output.contains("Context usage:"));
+    assert!(output.contains("Context"));
     assert!(output.contains("User:"));
     assert!(output.contains("Assistant:"));
     assert!(output.contains("Tools:"));
@@ -2861,7 +2861,7 @@ fn test_suggest_command_none() {
 fn test_build_prompt_default() {
     let store = CheckpointStore::new();
     let prompt = build_prompt(&store, None);
-    assert_eq!(prompt, "zavora> ");
+    assert!(prompt.contains("zavora>"));
 }
 
 #[test]
