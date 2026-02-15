@@ -117,6 +117,8 @@ approve_tool = []
 tool_timeout_secs = 45
 tool_retry_attempts = 2
 tool_retry_delay_ms = 500
+telemetry_enabled = true
+telemetry_path = ".zavora/telemetry/events.jsonl"
 
 [profiles.ops]
 provider = "anthropic"
@@ -219,6 +221,42 @@ Runtime behavior:
 - single-agent tool timeout is enforced via ADK `tool_timeout`
 - MCP discovery/invocation retries follow configured retry attempts/delay
 - tool lifecycle telemetry emits structured events for `requested`, `succeeded`, and `failed`
+
+## Telemetry Baseline and Reporting
+
+Structured telemetry is enabled by default and written as JSONL.
+
+Profile/runtime controls:
+
+```toml
+[profiles.default]
+telemetry_enabled = true
+telemetry_path = ".zavora/telemetry/events.jsonl"
+```
+
+CLI/env overrides:
+
+```bash
+cargo run -- \
+  --telemetry-enabled false \
+  --telemetry-path .zavora/telemetry/custom-events.jsonl \
+  doctor
+```
+
+- `ZAVORA_TELEMETRY_ENABLED=true|false`
+- `ZAVORA_TELEMETRY_PATH=<path>`
+
+Minimal dashboard report:
+
+```bash
+cargo run -- telemetry report --limit 2000
+```
+
+The report summarizes:
+- parsed events and parse errors
+- unique command runs
+- command completion/failure counts
+- tool lifecycle counts (`requested`, `succeeded`, `failed`)
 
 ## Retrieval Abstraction
 

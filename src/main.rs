@@ -1,8 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use adk_rust::futures::StreamExt;
 use adk_rust::prelude::{
@@ -118,6 +119,17 @@ enum SessionCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum TelemetryCommands {
+    #[command(about = "Summarize telemetry events from a JSONL stream")]
+    Report {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = 5000)]
+        limit: usize,
+    },
+}
+
 const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli ask \"Design a Rust CLI with release-based milestones\"\n\
   zavora-cli --provider openai --model gpt-4o-mini chat\n\
@@ -127,6 +139,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli mcp list\n\
   zavora-cli mcp discover --server ops-tools\n\
   zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
+  zavora-cli telemetry report --limit 2000\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
@@ -197,6 +210,12 @@ struct Cli {
     #[arg(long, env = "ZAVORA_TOOL_RETRY_DELAY_MS")]
     tool_retry_delay_ms: Option<u64>,
 
+    #[arg(long, env = "ZAVORA_TELEMETRY_ENABLED", action = clap::ArgAction::Set)]
+    telemetry_enabled: Option<bool>,
+
+    #[arg(long, env = "ZAVORA_TELEMETRY_PATH")]
+    telemetry_path: Option<String>,
+
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
 
@@ -248,6 +267,11 @@ enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    #[command(about = "Telemetry utilities and reporting")]
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +296,8 @@ struct RuntimeConfig {
     tool_timeout_secs: u64,
     tool_retry_attempts: u32,
     tool_retry_delay_ms: u64,
+    telemetry_enabled: bool,
+    telemetry_path: String,
     mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -305,6 +331,8 @@ struct ProfileConfig {
     tool_timeout_secs: Option<u64>,
     tool_retry_attempts: Option<u32>,
     tool_retry_delay_ms: Option<u64>,
+    telemetry_enabled: Option<bool>,
+    telemetry_path: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
 }
@@ -396,6 +424,258 @@ fn format_cli_error(err: &anyhow::Error) -> String {
     format!("[{}] {}\nHint: {}", category.code(), err, category.hint())
 }
 
+fn command_label(command: &Commands) -> String {
+    match command {
+        Commands::Ask { .. } => "ask".to_string(),
+        Commands::Chat => "chat".to_string(),
+        Commands::Workflow { mode, .. } => format!("workflow.{}", workflow_mode_label(*mode)),
+        Commands::ReleasePlan { .. } => "release-plan".to_string(),
+        Commands::Doctor => "doctor".to_string(),
+        Commands::Migrate => "migrate".to_string(),
+        Commands::Profiles { command } => match command {
+            ProfileCommands::List => "profiles.list".to_string(),
+            ProfileCommands::Show => "profiles.show".to_string(),
+        },
+        Commands::Mcp { command } => match command {
+            McpCommands::List => "mcp.list".to_string(),
+            McpCommands::Discover { .. } => "mcp.discover".to_string(),
+        },
+        Commands::Sessions { command } => match command {
+            SessionCommands::List => "sessions.list".to_string(),
+            SessionCommands::Show { .. } => "sessions.show".to_string(),
+            SessionCommands::Delete { .. } => "sessions.delete".to_string(),
+            SessionCommands::Prune { .. } => "sessions.prune".to_string(),
+        },
+        Commands::Telemetry { command } => match command {
+            TelemetryCommands::Report { .. } => "telemetry.report".to_string(),
+        },
+    }
+}
+
+fn workflow_mode_label(mode: WorkflowMode) -> &'static str {
+    match mode {
+        WorkflowMode::Single => "single",
+        WorkflowMode::Sequential => "sequential",
+        WorkflowMode::Parallel => "parallel",
+        WorkflowMode::Loop => "loop",
+        WorkflowMode::Graph => "graph",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TelemetrySink {
+    enabled: bool,
+    path: PathBuf,
+    run_id: String,
+    command: String,
+    session_id: String,
+}
+
+impl TelemetrySink {
+    fn new(cfg: &RuntimeConfig, command: String) -> Self {
+        let run_id = format!("run-{}-{}", unix_ms_now(), std::process::id());
+        Self {
+            enabled: cfg.telemetry_enabled,
+            path: PathBuf::from(&cfg.telemetry_path),
+            run_id,
+            command,
+            session_id: cfg.session_id.clone(),
+        }
+    }
+
+    fn emit(&self, event: &str, payload: Value) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut record = serde_json::Map::new();
+        record.insert("ts_unix_ms".to_string(), json!(unix_ms_now()));
+        record.insert("event".to_string(), json!(event));
+        record.insert("run_id".to_string(), json!(self.run_id));
+        record.insert("command".to_string(), json!(self.command));
+        record.insert("session_id".to_string(), json!(self.session_id));
+
+        if let Some(map) = payload.as_object() {
+            for (key, value) in map {
+                record.insert(key.clone(), value.clone());
+            }
+        }
+
+        let value = Value::Object(record);
+        if let Err(err) = self.append_event_line(&value) {
+            tracing::warn!(
+                event = event,
+                path = %self.path.display(),
+                error = %err,
+                "telemetry write failed"
+            );
+        }
+    }
+
+    fn append_event_line(&self, value: &Value) -> Result<()> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create telemetry directory '{}'",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("failed to open telemetry path '{}'", self.path.display()))?;
+
+        serde_json::to_writer(&mut file, value).with_context(|| {
+            format!("failed to serialize telemetry event for '{}'", self.command)
+        })?;
+        writeln!(file).context("failed to write telemetry newline")
+    }
+}
+
+#[derive(Debug, Default)]
+struct TelemetrySummary {
+    total_lines: usize,
+    parsed_events: usize,
+    parse_errors: usize,
+    unique_runs: BTreeSet<String>,
+    command_counts: HashMap<String, usize>,
+    command_completed: usize,
+    command_failed: usize,
+    tool_requested: usize,
+    tool_succeeded: usize,
+    tool_failed: usize,
+    last_event_ts_unix_ms: Option<u128>,
+}
+
+fn summarize_telemetry_lines(lines: Vec<String>, limit: usize) -> TelemetrySummary {
+    let mut summary = TelemetrySummary::default();
+    let max_events = limit.max(1);
+    summary.total_lines = lines.len();
+
+    for line in lines.into_iter().rev().take(max_events) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parsed = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => {
+                summary.parse_errors += 1;
+                continue;
+            }
+        };
+
+        summary.parsed_events += 1;
+
+        if let Some(run_id) = parsed.get("run_id").and_then(Value::as_str)
+            && !run_id.is_empty()
+        {
+            summary.unique_runs.insert(run_id.to_string());
+        }
+
+        if let Some(command) = parsed.get("command").and_then(Value::as_str)
+            && !command.is_empty()
+        {
+            *summary
+                .command_counts
+                .entry(command.to_string())
+                .or_insert(0) += 1;
+        }
+
+        if let Some(ts) = parsed.get("ts_unix_ms").and_then(Value::as_u64) {
+            let ts_u128 = ts as u128;
+            summary.last_event_ts_unix_ms = Some(
+                summary
+                    .last_event_ts_unix_ms
+                    .map(|existing| existing.max(ts_u128))
+                    .unwrap_or(ts_u128),
+            );
+        }
+
+        match parsed
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "command.completed" => summary.command_completed += 1,
+            "command.failed" => summary.command_failed += 1,
+            "tool.requested" => summary.tool_requested += 1,
+            "tool.succeeded" => summary.tool_succeeded += 1,
+            "tool.failed" => summary.tool_failed += 1,
+            _ => {}
+        }
+    }
+
+    summary
+}
+
+fn run_telemetry_report(
+    cfg: &RuntimeConfig,
+    path_override: Option<String>,
+    limit: usize,
+) -> Result<()> {
+    let path = PathBuf::from(path_override.unwrap_or_else(|| cfg.telemetry_path.clone()));
+    if !path.exists() {
+        println!("No telemetry file found at '{}'.", path.display());
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("failed to open telemetry file '{}'", path.display()))?;
+    let reader = io::BufReader::new(file);
+    let lines = reader
+        .lines()
+        .collect::<std::result::Result<Vec<String>, std::io::Error>>()
+        .with_context(|| format!("failed to read telemetry file '{}'", path.display()))?;
+
+    let summary = summarize_telemetry_lines(lines, limit);
+    let mut commands = summary.command_counts.iter().collect::<Vec<_>>();
+    commands.sort_by_key(|(name, count)| (std::cmp::Reverse(**count), (*name).clone()));
+
+    println!("Telemetry report");
+    println!("Path: {}", path.display());
+    println!("Lines in file: {}", summary.total_lines);
+    println!(
+        "Events analyzed: {} (parse_errors={})",
+        summary.parsed_events, summary.parse_errors
+    );
+    println!("Unique runs: {}", summary.unique_runs.len());
+    println!(
+        "Command outcomes: completed={} failed={}",
+        summary.command_completed, summary.command_failed
+    );
+    println!(
+        "Tool lifecycle: requested={} succeeded={} failed={}",
+        summary.tool_requested, summary.tool_succeeded, summary.tool_failed
+    );
+
+    if !commands.is_empty() {
+        println!("Top commands:");
+        for (name, count) in commands.into_iter().take(5) {
+            println!("- {}: {}", name, count);
+        }
+    }
+
+    if let Some(last_ts) = summary.last_event_ts_unix_ms {
+        println!("Last event ts_unix_ms: {last_ts}");
+    }
+
+    Ok(())
+}
+
+fn unix_ms_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -412,6 +692,19 @@ async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
     let profiles = load_profiles(&cli.config_path)?;
     let cfg = resolve_runtime_config(&cli, &profiles)?;
+    let command = command_label(&cli.command);
+    let telemetry = TelemetrySink::new(&cfg, command.clone());
+    let started_at = Instant::now();
+    telemetry.emit(
+        "command.started",
+        json!({
+            "profile": cfg.profile,
+            "session_backend": format!("{:?}", cfg.session_backend),
+            "retrieval_backend": format!("{:?}", cfg.retrieval_backend),
+            "telemetry_enabled": cfg.telemetry_enabled
+        }),
+    );
+
     let retrieval_service = if matches!(
         cli.command,
         Commands::Ask { .. }
@@ -432,10 +725,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
         None
     };
 
-    match cli.command {
+    let execution: Result<()> = match cli.command {
         Commands::Ask { prompt } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
+            telemetry.emit(
+                "model.resolved",
+                json!({
+                    "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                    "model": model_name,
+                    "path": "ask"
+                }),
+            );
             let runtime_tools = resolve_runtime_tools(&cfg).await;
             let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let agent = build_single_agent_with_tools(
@@ -451,8 +752,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for ask command")?;
-            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
             println!("{answer}");
+            Ok(())
         }
         Commands::Chat => {
             let runtime_tools = resolve_runtime_tools(&cfg).await;
@@ -461,7 +764,15 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 .as_ref()
                 .context("retrieval service should be initialized for chat command")?
                 .clone();
-            run_chat(cfg.clone(), retrieval, runtime_tools, tool_confirmation).await?;
+            run_chat(
+                cfg.clone(),
+                retrieval,
+                runtime_tools,
+                tool_confirmation,
+                &telemetry,
+            )
+            .await?;
+            Ok(())
         }
         Commands::Workflow {
             mode,
@@ -470,6 +781,15 @@ async fn run_cli(cli: Cli) -> Result<()> {
         } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, workflow = ?mode, "Using workflow");
+            telemetry.emit(
+                "model.resolved",
+                json!({
+                    "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                    "model": model_name,
+                    "path": "workflow",
+                    "workflow_mode": workflow_mode_label(mode)
+                }),
+            );
             let runtime_tools = resolve_runtime_tools(&cfg).await;
             let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let agent = build_workflow_agent(
@@ -487,52 +807,108 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for workflow command")?;
-            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
             println!("{answer}");
+            Ok(())
         }
         Commands::ReleasePlan { goal, releases } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, releases, "Generating release plan");
+            telemetry.emit(
+                "model.resolved",
+                json!({
+                    "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                    "model": model_name,
+                    "path": "release-plan"
+                }),
+            );
             let agent = build_release_planning_agent(model, releases)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = goal.join(" ");
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for release-plan command")?;
-            let answer = run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval).await?;
+            let answer =
+                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
             println!("{answer}");
+            Ok(())
         }
         Commands::Doctor => {
             run_doctor(&cfg).await?;
+            Ok(())
         }
         Commands::Migrate => {
             run_migrate(&cfg).await?;
+            Ok(())
         }
         Commands::Profiles { command } => match command {
-            ProfileCommands::List => run_profiles_list(&profiles, &cfg)?,
-            ProfileCommands::Show => run_profiles_show(&cfg)?,
+            ProfileCommands::List => {
+                run_profiles_list(&profiles, &cfg)?;
+                Ok(())
+            }
+            ProfileCommands::Show => {
+                run_profiles_show(&cfg)?;
+                Ok(())
+            }
         },
         Commands::Mcp { command } => match command {
-            McpCommands::List => run_mcp_list(&cfg).await?,
-            McpCommands::Discover { server } => run_mcp_discover(&cfg, server).await?,
+            McpCommands::List => {
+                run_mcp_list(&cfg).await?;
+                Ok(())
+            }
+            McpCommands::Discover { server } => {
+                run_mcp_discover(&cfg, server).await?;
+                Ok(())
+            }
         },
         Commands::Sessions { command } => match command {
-            SessionCommands::List => run_sessions_list(&cfg).await?,
+            SessionCommands::List => {
+                run_sessions_list(&cfg).await?;
+                Ok(())
+            }
             SessionCommands::Show { session_id, recent } => {
-                run_sessions_show(&cfg, session_id, recent).await?
+                run_sessions_show(&cfg, session_id, recent).await?;
+                Ok(())
             }
             SessionCommands::Delete { session_id, force } => {
-                run_sessions_delete(&cfg, session_id, force).await?
+                run_sessions_delete(&cfg, session_id, force).await?;
+                Ok(())
             }
             SessionCommands::Prune {
                 keep,
                 dry_run,
                 force,
-            } => run_sessions_prune(&cfg, keep, dry_run, force).await?,
+            } => {
+                run_sessions_prune(&cfg, keep, dry_run, force).await?;
+                Ok(())
+            }
         },
+        Commands::Telemetry { command } => match command {
+            TelemetryCommands::Report { path, limit } => {
+                run_telemetry_report(&cfg, path, limit)?;
+                Ok(())
+            }
+        },
+    };
+
+    let duration_ms = started_at.elapsed().as_millis();
+    match &execution {
+        Ok(_) => telemetry.emit(
+            "command.completed",
+            json!({"duration_ms": duration_ms, "status": "ok"}),
+        ),
+        Err(err) => telemetry.emit(
+            "command.failed",
+            json!({
+                "duration_ms": duration_ms,
+                "status": "error",
+                "error": err.to_string()
+            }),
+        ),
     }
 
-    Ok(())
+    execution
 }
 
 fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
@@ -681,6 +1057,15 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .tool_retry_delay_ms
             .or(profile.tool_retry_delay_ms)
             .unwrap_or(500),
+        telemetry_enabled: cli
+            .telemetry_enabled
+            .or(profile.telemetry_enabled)
+            .unwrap_or(true),
+        telemetry_path: cli
+            .telemetry_path
+            .clone()
+            .or(profile.telemetry_path)
+            .unwrap_or_else(|| ".zavora/telemetry/events.jsonl".to_string()),
         mcp_servers,
     })
 }
@@ -749,6 +1134,8 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("Tool timeout (secs): {}", cfg.tool_timeout_secs);
     println!("Tool retry attempts: {}", cfg.tool_retry_attempts);
     println!("Tool retry delay (ms): {}", cfg.tool_retry_delay_ms);
+    println!("Telemetry enabled: {}", cfg.telemetry_enabled);
+    println!("Telemetry path: {}", cfg.telemetry_path);
     println!("MCP servers: {}", cfg.mcp_servers.len());
     Ok(())
 }
@@ -1929,8 +2316,17 @@ async fn build_single_runner_for_chat(
     session_service: Arc<dyn SessionService>,
     runtime_tools: &ResolvedRuntimeTools,
     tool_confirmation: &ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
 ) -> Result<(Runner, Provider, String)> {
     let (model, resolved_provider, model_name) = resolve_model(cfg)?;
+    telemetry.emit(
+        "model.resolved",
+        json!({
+            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+            "model": model_name.clone(),
+            "path": "chat"
+        }),
+    );
     let agent = build_single_agent_with_tools(
         model,
         &runtime_tools.tools,
@@ -2185,7 +2581,12 @@ fn final_stream_suffix(emitted: &str, final_text: &str) -> Option<String> {
     Some(format!("\n{final_text}"))
 }
 
-async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Result<String> {
+async fn run_prompt(
+    runner: &Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    telemetry: &TelemetrySink,
+) -> Result<String> {
     let mut stream = runner
         .run(
             cfg.user_id.clone(),
@@ -2213,7 +2614,7 @@ async fn run_prompt(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Resul
             continue;
         }
 
-        emit_tool_lifecycle_events(&event);
+        emit_tool_lifecycle_events(&event, telemetry);
 
         let _ = tracker.ingest_parts(
             &event.author,
@@ -2233,6 +2634,7 @@ async fn run_prompt_with_retrieval(
     cfg: &RuntimeConfig,
     prompt: &str,
     retrieval: &dyn RetrievalService,
+    telemetry: &TelemetrySink,
 ) -> Result<String> {
     let policy = RetrievalPolicy {
         max_chunks: cfg.retrieval_max_chunks,
@@ -2240,7 +2642,7 @@ async fn run_prompt_with_retrieval(
         min_score: cfg.retrieval_min_score,
     };
     let enriched = augment_prompt_with_retrieval(retrieval, prompt, policy)?;
-    run_prompt(runner, cfg, &enriched).await
+    run_prompt(runner, cfg, &enriched, telemetry).await
 }
 
 async fn run_chat(
@@ -2248,6 +2650,7 @@ async fn run_chat(
     retrieval_service: Arc<dyn RetrievalService>,
     runtime_tools: ResolvedRuntimeTools,
     tool_confirmation: ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
 ) -> Result<()> {
     let session_service = build_session_service(&cfg).await?;
     let (mut runner, mut resolved_provider, mut model_name) = build_single_runner_for_chat(
@@ -2255,11 +2658,21 @@ async fn run_chat(
         session_service.clone(),
         &runtime_tools,
         &tool_confirmation,
+        telemetry,
     )
     .await?;
 
     cfg.provider = resolved_provider;
     cfg.model = Some(model_name.clone());
+
+    telemetry.emit(
+        "chat.started",
+        json!({
+            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+            "model": model_name.clone(),
+            "profile": cfg.profile.clone()
+        }),
+    );
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
     println!(
@@ -2308,6 +2721,7 @@ async fn run_chat(
                 session_service.clone(),
                 &runtime_tools,
                 &tool_confirmation,
+                telemetry,
             )
             .await
             {
@@ -2315,6 +2729,13 @@ async fn run_chat(
                     runner = new_runner;
                     resolved_provider = new_resolved_provider;
                     model_name = new_model_name;
+                    telemetry.emit(
+                        "chat.provider_switched",
+                        json!({
+                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                            "model": model_name.clone()
+                        }),
+                    );
                     switched_cfg.provider = new_resolved_provider;
                     switched_cfg.model = Some(model_name.clone());
                     cfg = switched_cfg;
@@ -2350,6 +2771,7 @@ async fn run_chat(
                 session_service.clone(),
                 &runtime_tools,
                 &tool_confirmation,
+                telemetry,
             )
             .await
             {
@@ -2357,6 +2779,13 @@ async fn run_chat(
                     runner = new_runner;
                     resolved_provider = new_resolved_provider;
                     model_name = new_model_name;
+                    telemetry.emit(
+                        "chat.model_switched",
+                        json!({
+                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                            "model": model_name.clone()
+                        }),
+                    );
                     switched_cfg.provider = new_resolved_provider;
                     switched_cfg.model = Some(model_name.clone());
                     cfg = switched_cfg;
@@ -2377,8 +2806,14 @@ async fn run_chat(
             continue;
         }
 
-        run_prompt_streaming_with_retrieval(&runner, &cfg, input, retrieval_service.as_ref())
-            .await?;
+        run_prompt_streaming_with_retrieval(
+            &runner,
+            &cfg,
+            input,
+            retrieval_service.as_ref(),
+            telemetry,
+        )
+        .await?;
     }
 
     Ok(())
@@ -2394,7 +2829,12 @@ fn parse_provider_name(value: &str) -> Result<Provider> {
         })
 }
 
-async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str) -> Result<()> {
+async fn run_prompt_streaming(
+    runner: &Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    telemetry: &TelemetrySink,
+) -> Result<()> {
     let mut stream = runner
         .run(
             cfg.user_id.clone(),
@@ -2416,7 +2856,7 @@ async fn run_prompt_streaming(runner: &Runner, cfg: &RuntimeConfig, prompt: &str
             continue;
         }
 
-        emit_tool_lifecycle_events(&event);
+        emit_tool_lifecycle_events(&event, telemetry);
 
         let delta = tracker.ingest_parts(
             &event.author,
@@ -2468,6 +2908,7 @@ async fn run_prompt_streaming_with_retrieval(
     cfg: &RuntimeConfig,
     prompt: &str,
     retrieval: &dyn RetrievalService,
+    telemetry: &TelemetrySink,
 ) -> Result<()> {
     let policy = RetrievalPolicy {
         max_chunks: cfg.retrieval_max_chunks,
@@ -2475,7 +2916,7 @@ async fn run_prompt_streaming_with_retrieval(
         min_score: cfg.retrieval_min_score,
     };
     let enriched = augment_prompt_with_retrieval(retrieval, prompt, policy)?;
-    run_prompt_streaming(runner, cfg, &enriched).await
+    run_prompt_streaming(runner, cfg, &enriched, telemetry).await
 }
 
 fn event_text(event: &Event) -> String {
@@ -2509,7 +2950,7 @@ fn extract_tool_failure_message(response: &Value) -> Option<String> {
     None
 }
 
-fn emit_tool_lifecycle_events(event: &Event) {
+fn emit_tool_lifecycle_events(event: &Event, telemetry: &TelemetrySink) {
     let Some(content) = event.content() else {
         return;
     };
@@ -2522,6 +2963,13 @@ fn emit_tool_lifecycle_events(event: &Event) {
                     author = %event.author,
                     lifecycle = "requested",
                     "Tool call requested"
+                );
+                telemetry.emit(
+                    "tool.requested",
+                    json!({
+                        "tool": name,
+                        "author": event.author
+                    }),
                 );
             }
             Part::FunctionResponse {
@@ -2537,12 +2985,27 @@ fn emit_tool_lifecycle_events(event: &Event) {
                         error = %error_message,
                         "Tool execution failed"
                     );
+                    telemetry.emit(
+                        "tool.failed",
+                        json!({
+                            "tool": function_response.name,
+                            "author": event.author,
+                            "error": error_message
+                        }),
+                    );
                 } else {
                     tracing::info!(
                         tool = %function_response.name,
                         author = %event.author,
                         lifecycle = "succeeded",
                         "Tool execution completed"
+                    );
+                    telemetry.emit(
+                        "tool.succeeded",
+                        json!({
+                            "tool": function_response.name,
+                            "author": event.author
+                        }),
                     );
                 }
             }
@@ -2733,6 +3196,10 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.tool_timeout_secs,
         cfg.tool_retry_attempts,
         cfg.tool_retry_delay_ms
+    );
+    println!(
+        "Telemetry: enabled={} path={}",
+        cfg.telemetry_enabled, cfg.telemetry_path
     );
     println!(
         "MCP servers: configured={}, enabled={}",
@@ -3022,8 +3489,14 @@ mod tests {
             tool_timeout_secs: 45,
             tool_retry_attempts: 2,
             tool_retry_delay_ms: 500,
+            telemetry_enabled: false,
+            telemetry_path: ".zavora/test-telemetry.jsonl".to_string(),
             mcp_servers: Vec::new(),
         }
+    }
+
+    fn test_telemetry(cfg: &RuntimeConfig) -> TelemetrySink {
+        TelemetrySink::new(cfg, "test".to_string())
     }
 
     fn mock_model(text: &str) -> Arc<dyn Llm> {
@@ -3089,6 +3562,8 @@ mod tests {
             tool_timeout_secs: None,
             tool_retry_attempts: None,
             tool_retry_delay_ms: None,
+            telemetry_enabled: None,
+            telemetry_path: None,
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -3130,6 +3605,7 @@ mod tests {
     #[tokio::test]
     async fn single_workflow_returns_deterministic_mock_output() {
         let cfg = base_cfg();
+        let telemetry = test_telemetry(&cfg);
         let runner = build_runner(
             build_single_agent(mock_model("single response")).expect("agent should build"),
             &cfg,
@@ -3137,7 +3613,7 @@ mod tests {
         .await
         .expect("runner should build");
 
-        let out = run_prompt(&runner, &cfg, "hello")
+        let out = run_prompt(&runner, &cfg, "hello", &telemetry)
             .await
             .expect("prompt should run");
         assert_eq!(out, "single response");
@@ -3156,6 +3632,7 @@ mod tests {
         for mode in modes {
             let mut cfg = base_cfg();
             cfg.session_id = format!("session-{mode:?}");
+            let telemetry = test_telemetry(&cfg);
             let runner = build_runner(
                 build_workflow_agent(
                     mode,
@@ -3171,7 +3648,7 @@ mod tests {
             .await
             .expect("runner should build");
 
-            let out = run_prompt(&runner, &cfg, "build a plan")
+            let out = run_prompt(&runner, &cfg, "build a plan", &telemetry)
                 .await
                 .expect("prompt should run");
             assert_eq!(out, "workflow response");
@@ -3188,6 +3665,7 @@ mod tests {
         cfg.session_backend = SessionBackend::Sqlite;
         cfg.session_db_url = db_url.clone();
         cfg.session_id = "persisted-session".to_string();
+        let telemetry = test_telemetry(&cfg);
 
         let runner_one = build_runner(
             build_single_agent(mock_model("first answer")).expect("agent should build"),
@@ -3196,7 +3674,7 @@ mod tests {
         .await
         .expect("runner should build");
 
-        let _ = run_prompt(&runner_one, &cfg, "first prompt")
+        let _ = run_prompt(&runner_one, &cfg, "first prompt", &telemetry)
             .await
             .expect("first prompt should run");
 
@@ -3207,7 +3685,7 @@ mod tests {
         .await
         .expect("second runner should build");
 
-        let _ = run_prompt(&runner_two, &cfg, "second prompt")
+        let _ = run_prompt(&runner_two, &cfg, "second prompt", &telemetry)
             .await
             .expect("second prompt should run");
 
@@ -3386,6 +3864,8 @@ retrieval_min_score = 2
         assert_eq!(cfg.tool_timeout_secs, 45);
         assert_eq!(cfg.tool_retry_attempts, 2);
         assert_eq!(cfg.tool_retry_delay_ms, 500);
+        assert!(cfg.telemetry_enabled);
+        assert_eq!(cfg.telemetry_path, ".zavora/telemetry/events.jsonl");
     }
 
     #[test]
@@ -3441,8 +3921,93 @@ enabled = false
         assert_eq!(cfg.tool_timeout_secs, 90);
         assert_eq!(cfg.tool_retry_attempts, 4);
         assert_eq!(cfg.tool_retry_delay_ms, 750);
+        assert!(cfg.telemetry_enabled);
+        assert_eq!(cfg.telemetry_path, ".zavora/telemetry/events.jsonl");
         assert_eq!(cfg.mcp_servers[1].name, "disabled-tooling");
         assert_eq!(cfg.mcp_servers[1].enabled, Some(false));
+    }
+
+    #[test]
+    fn runtime_config_telemetry_cli_overrides_profile_values() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.dev]
+telemetry_enabled = true
+telemetry_path = ".zavora/telemetry/dev.jsonl"
+"#,
+        )
+        .expect("config should write");
+
+        let mut cli = test_cli(path.to_string_lossy().as_ref(), "dev");
+        cli.telemetry_enabled = Some(false);
+        cli.telemetry_path = Some(".zavora/telemetry/override.jsonl".to_string());
+
+        let profiles = load_profiles(&cli.config_path).expect("profiles should load");
+        let cfg = resolve_runtime_config(&cli, &profiles).expect("runtime config should resolve");
+
+        assert!(!cfg.telemetry_enabled);
+        assert_eq!(cfg.telemetry_path, ".zavora/telemetry/override.jsonl");
+    }
+
+    #[test]
+    fn telemetry_summary_counts_command_and_tool_events() {
+        let lines = vec![
+            json!({
+                "ts_unix_ms": 1000,
+                "event": "command.started",
+                "run_id": "run-a",
+                "command": "ask"
+            })
+            .to_string(),
+            json!({
+                "ts_unix_ms": 1100,
+                "event": "tool.requested",
+                "run_id": "run-a",
+                "command": "ask",
+                "tool": "release_template"
+            })
+            .to_string(),
+            json!({
+                "ts_unix_ms": 1200,
+                "event": "tool.succeeded",
+                "run_id": "run-a",
+                "command": "ask",
+                "tool": "release_template"
+            })
+            .to_string(),
+            json!({
+                "ts_unix_ms": 1300,
+                "event": "command.completed",
+                "run_id": "run-a",
+                "command": "ask"
+            })
+            .to_string(),
+            json!({
+                "ts_unix_ms": 1400,
+                "event": "command.failed",
+                "run_id": "run-b",
+                "command": "workflow.parallel"
+            })
+            .to_string(),
+            "invalid-json-line".to_string(),
+        ];
+
+        let summary = summarize_telemetry_lines(lines, 100);
+        assert_eq!(summary.total_lines, 6);
+        assert_eq!(summary.parsed_events, 5);
+        assert_eq!(summary.parse_errors, 1);
+        assert_eq!(summary.unique_runs.len(), 2);
+        assert_eq!(summary.command_completed, 1);
+        assert_eq!(summary.command_failed, 1);
+        assert_eq!(summary.tool_requested, 1);
+        assert_eq!(summary.tool_succeeded, 1);
+        assert_eq!(summary.tool_failed, 0);
+        assert_eq!(summary.command_counts.get("ask"), Some(&4));
+        assert_eq!(summary.command_counts.get("workflow.parallel"), Some(&1));
+        assert_eq!(summary.last_event_ts_unix_ms, Some(1400));
     }
 
     #[test]
@@ -3880,6 +4445,7 @@ provider = "not-a-provider"
     #[tokio::test]
     async fn shared_memory_session_service_preserves_history_across_runner_rebuilds() {
         let cfg = base_cfg();
+        let telemetry = test_telemetry(&cfg);
         let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
 
         let runner_one = build_runner_with_session_service(
@@ -3890,7 +4456,7 @@ provider = "not-a-provider"
         )
         .await
         .expect("runner should build");
-        run_prompt(&runner_one, &cfg, "first prompt")
+        run_prompt(&runner_one, &cfg, "first prompt", &telemetry)
             .await
             .expect("first prompt should run");
 
@@ -3902,7 +4468,7 @@ provider = "not-a-provider"
         )
         .await
         .expect("second runner should build");
-        run_prompt(&runner_two, &cfg, "second prompt")
+        run_prompt(&runner_two, &cfg, "second prompt", &telemetry)
             .await
             .expect("second prompt should run");
 
@@ -3934,12 +4500,14 @@ provider = "not-a-provider"
             mcp_tool_names: BTreeSet::new(),
         };
         let tool_confirmation = ToolConfirmationSettings::default();
+        let telemetry = test_telemetry(&cfg);
 
         let (_runner, provider, model_name) = build_single_runner_for_chat(
             &cfg,
             session_service.clone(),
             &runtime_tools,
             &tool_confirmation,
+            &telemetry,
         )
         .await
         .expect("chat runner should build for ollama");
