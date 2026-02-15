@@ -31,6 +31,8 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
 crossterm = "0.28"
 rustyline = "15"
+similar = "2.7"
+syntect = "5.2"
 winnow = "0.7"
 
 [dev-dependencies]

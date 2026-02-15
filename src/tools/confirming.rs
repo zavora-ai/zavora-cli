@@ -9,6 +9,40 @@ use crate::theme::{self, BOLD, CYAN, DIM, GREEN, RESET};
 
 const RED: &str = "\x1b[31m";
 
+// Diff background colors (truecolor, matching Q CLI's base16-ocean.dark)
+const BG_DELETE: &str = "\x1b[48;2;36;25;28m";
+const BG_INSERT: &str = "\x1b[48;2;24;38;30m";
+const BG_GUTTER_DELETE: &str = "\x1b[48;2;79;40;40m";
+const BG_GUTTER_INSERT: &str = "\x1b[48;2;40;67;43m";
+const CLEAR_LINE: &str = "\x1b[K";
+
+use std::sync::LazyLock;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::as_24_bit_terminal_escaped;
+
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+/// Syntax-highlight a single line of code. Returns the line with ANSI escapes, or the plain line on failure.
+fn highlight_line(line: &str, highlighter: &mut Option<HighlightLines<'_>>) -> String {
+    if let Some(h) = highlighter.as_mut() {
+        if let Ok(ranges) = h.highlight_line(line, &SYNTAX_SET) {
+            return as_24_bit_terminal_escaped(&ranges, false);
+        }
+    }
+    line.to_string()
+}
+
+/// Try to create a syntax highlighter for the given file path.
+fn make_highlighter(path: &str) -> Option<HighlightLines<'static>> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    let syntax = SYNTAX_SET.find_syntax_by_extension(ext)?;
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    Some(HighlightLines::new(syntax, theme))
+}
+
 /// Display tool result after execution.
 fn display_result(tool_name: &str, result: &Value) {
     match tool_name {
@@ -84,53 +118,86 @@ impl ConfirmingTool {
     }
 }
 
-/// Format a file diff for the confirmation dialog.
+/// Format a file diff for the confirmation dialog with syntax highlighting.
 fn format_fs_write_diff(args: &Value) -> String {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("create");
 
     let mut out = format!("{BOLD}{CYAN}{path}{RESET}\n");
+    let mut hl = make_highlighter(path);
 
     match mode {
         "create" | "overwrite" => {
-            if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
-                // Show existing file content as removals for overwrite
-                if mode == "overwrite" {
-                    if let Ok(existing) = std::fs::read_to_string(path) {
-                        for line in existing.lines() {
-                            out.push_str(&format!("{RED}- {line}{RESET}\n"));
-                        }
-                    }
-                }
-                for line in content.lines() {
-                    out.push_str(&format!("{GREEN}+ {line}{RESET}\n"));
-                }
-            }
+            let new_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let old_content = if mode == "overwrite" {
+                std::fs::read_to_string(path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            out.push_str(&render_diff(&old_content, new_content, &mut hl));
         }
         "append" => {
-            if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
-                out.push_str(&format!("{DIM}... existing content ...{RESET}\n"));
-                for line in content.lines() {
-                    out.push_str(&format!("{GREEN}+ {line}{RESET}\n"));
-                }
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!("{DIM}  ... existing content ...{RESET}\n"));
+            for line in content.lines() {
+                let hl_line = highlight_line(line, &mut hl);
+                out.push_str(&format!("{BG_GUTTER_INSERT} + {RESET}{BG_INSERT} {hl_line}{RESET}{CLEAR_LINE}\n"));
             }
         }
         "patch" => {
             if let Some(patch) = args.get("patch") {
                 let find = patch.get("find").and_then(|v| v.as_str()).unwrap_or("");
                 let replace = patch.get("replace").and_then(|v| v.as_str()).unwrap_or("");
-                for line in find.lines() {
-                    out.push_str(&format!("{RED}- {line}{RESET}\n"));
-                }
-                for line in replace.lines() {
-                    out.push_str(&format!("{GREEN}+ {line}{RESET}\n"));
-                }
+                out.push_str(&render_diff(find, replace, &mut hl));
             }
         }
         _ => {
-            // Fallback: show raw args
             let pretty = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
             out.push_str(&format!("{DIM}{pretty}{RESET}\n"));
+        }
+    }
+
+    out
+}
+
+/// Render a unified diff between old and new text with syntax highlighting and line numbers.
+fn render_diff(old: &str, new: &str, hl: &mut Option<HighlightLines<'_>>) -> String {
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+
+    // Compute max line number width for gutter alignment
+    let max_line = old.lines().count().max(new.lines().count()) + 1;
+    let width = max_line.to_string().len().max(1);
+
+    let mut old_line = 1usize;
+    let mut new_line = 1usize;
+
+    for change in diff.iter_all_changes() {
+        let text = change.value().trim_end_matches('\n');
+        let hl_text = highlight_line(text, hl);
+
+        match change.tag() {
+            ChangeTag::Delete => {
+                out.push_str(&format!(
+                    "{BG_GUTTER_DELETE} - {old_line:>width$}    {RESET}{BG_DELETE} {hl_text}{RESET}{CLEAR_LINE}\n"
+                ));
+                old_line += 1;
+            }
+            ChangeTag::Insert => {
+                out.push_str(&format!(
+                    "{BG_GUTTER_INSERT} +    {new_line:>width$} {RESET}{BG_INSERT} {hl_text}{RESET}{CLEAR_LINE}\n"
+                ));
+                new_line += 1;
+            }
+            ChangeTag::Equal => {
+                out.push_str(&format!(
+                    "{DIM}   {old_line:>width$}, {new_line:>width$} {RESET} {hl_text}{RESET}{CLEAR_LINE}\n"
+                ));
+                old_line += 1;
+                new_line += 1;
+            }
         }
     }
 
