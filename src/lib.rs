@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod error;
 pub mod telemetry;
 pub mod guardrail;

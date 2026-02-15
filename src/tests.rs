@@ -2324,3 +2324,107 @@ fn test_select_mcp_servers_by_name_not_found() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
+
+// ---------------------------------------------------------------------------
+// Context usage and token counting tests
+// ---------------------------------------------------------------------------
+
+use crate::context::*;
+
+#[test]
+fn test_estimate_tokens() {
+    assert_eq!(estimate_tokens(0), 0);
+    assert_eq!(estimate_tokens(40), 10);   // 40/4 = 10, rounded to 10
+    assert_eq!(estimate_tokens(100), 30);  // 100/4 = 25, (25+5)/10*10 = 30
+    assert_eq!(estimate_tokens(400), 100); // 400/4 = 100
+}
+
+#[test]
+fn test_tokens_to_chars() {
+    assert_eq!(tokens_to_chars(100), 400);
+    assert_eq!(tokens_to_chars(0), 0);
+}
+
+#[test]
+fn test_context_usage_normal() {
+    let usage = ContextUsage {
+        user_chars: 1000,
+        assistant_chars: 2000,
+        tool_chars: 500,
+        system_chars: 500,
+        context_window_tokens: 128_000,
+    };
+    assert_eq!(usage.total_chars(), 4000);
+    assert_eq!(usage.budget_level(), BudgetLevel::Normal);
+    assert!(usage.utilization() < WARN_THRESHOLD);
+    let indicator = usage.prompt_indicator();
+    assert!(!indicator.contains("⚠"));
+    assert!(!indicator.contains("🔴"));
+}
+
+#[test]
+fn test_context_usage_warning() {
+    // 80% of 1000 tokens = 800 tokens = 3200 chars
+    let usage = ContextUsage {
+        user_chars: 1600,
+        assistant_chars: 1600,
+        tool_chars: 0,
+        system_chars: 0,
+        context_window_tokens: 1000,
+    };
+    // 3200 chars / 4 = 800 tokens, 800/1000 = 80%
+    assert_eq!(usage.budget_level(), BudgetLevel::Warning);
+    assert!(usage.prompt_indicator().contains("⚠"));
+}
+
+#[test]
+fn test_context_usage_critical() {
+    // 95% of 1000 tokens = 950 tokens = 3800 chars
+    let usage = ContextUsage {
+        user_chars: 1900,
+        assistant_chars: 1900,
+        tool_chars: 0,
+        system_chars: 0,
+        context_window_tokens: 1000,
+    };
+    assert_eq!(usage.budget_level(), BudgetLevel::Critical);
+    assert!(usage.prompt_indicator().contains("🔴"));
+}
+
+#[test]
+fn test_context_usage_format() {
+    let usage = ContextUsage {
+        user_chars: 4000,
+        assistant_chars: 8000,
+        tool_chars: 2000,
+        system_chars: 1000,
+        context_window_tokens: 128_000,
+    };
+    let output = usage.format_usage();
+    assert!(output.contains("Context usage:"));
+    assert!(output.contains("User:"));
+    assert!(output.contains("Assistant:"));
+    assert!(output.contains("Tools:"));
+    assert!(output.contains("Remaining:"));
+}
+
+#[test]
+fn test_default_context_window() {
+    assert_eq!(default_context_window("gemini"), 1_000_000);
+    assert_eq!(default_context_window("anthropic"), 200_000);
+    assert_eq!(default_context_window("openai"), 128_000);
+    assert_eq!(default_context_window("unknown"), 128_000);
+}
+
+#[test]
+fn test_context_usage_zero_window() {
+    let usage = ContextUsage {
+        user_chars: 100,
+        assistant_chars: 0,
+        tool_chars: 0,
+        system_chars: 0,
+        context_window_tokens: 0,
+    };
+    assert_eq!(usage.utilization(), 0.0);
+    assert_eq!(usage.budget_level(), BudgetLevel::Normal);
+}
