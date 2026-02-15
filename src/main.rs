@@ -223,6 +223,9 @@ struct Cli {
     #[arg(long, env = "ZAVORA_SESSION_DB_URL")]
     session_db_url: Option<String>,
 
+    #[arg(long, env = "ZAVORA_SHOW_SENSITIVE_CONFIG", default_value_t = false)]
+    show_sensitive_config: bool,
+
     #[arg(long, env = "ZAVORA_RETRIEVAL_BACKEND", value_enum)]
     retrieval_backend: Option<RetrievalBackend>,
 
@@ -353,6 +356,7 @@ struct RuntimeConfig {
     session_id: String,
     session_backend: SessionBackend,
     session_db_url: String,
+    show_sensitive_config: bool,
     retrieval_backend: RetrievalBackend,
     retrieval_doc_path: Option<String>,
     retrieval_max_chunks: usize,
@@ -496,9 +500,76 @@ fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
     ErrorCategory::Internal
 }
 
-fn format_cli_error(err: &anyhow::Error) -> String {
+fn format_cli_error(err: &anyhow::Error, show_sensitive_config: bool) -> String {
     let category = categorize_error(err);
-    format!("[{}] {}\nHint: {}", category.code(), err, category.hint())
+    let rendered_error = render_error_message(err, show_sensitive_config);
+    format!(
+        "[{}] {}\nHint: {}",
+        category.code(),
+        rendered_error,
+        category.hint()
+    )
+}
+
+fn render_error_message(err: &anyhow::Error, show_sensitive_config: bool) -> String {
+    if show_sensitive_config {
+        err.to_string()
+    } else {
+        redact_sensitive_text(&err.to_string())
+    }
+}
+
+fn redact_sensitive_text(text: &str) -> String {
+    redact_sqlite_urls(text)
+}
+
+fn redact_sqlite_urls(text: &str) -> String {
+    const SQLITE_PREFIX: &str = "sqlite:";
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(offset) = text[cursor..].find(SQLITE_PREFIX) {
+        let start = cursor + offset;
+        out.push_str(&text[cursor..start]);
+
+        let remainder = &text[start..];
+        let end = remainder
+            .find(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                    )
+            })
+            .unwrap_or(remainder.len());
+        let token = &remainder[..end];
+        out.push_str(&redact_sqlite_url_value(token));
+        cursor = start + end;
+    }
+
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn redact_sqlite_url_value(value: &str) -> String {
+    if value.starts_with("sqlite://") {
+        "sqlite://[REDACTED]".to_string()
+    } else if value.starts_with("sqlite:") {
+        "sqlite:[REDACTED]".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn display_session_db_url(cfg: &RuntimeConfig) -> String {
+    if cfg.show_sensitive_config {
+        cfg.session_db_url.clone()
+    } else {
+        format!(
+            "{} (set --show-sensitive-config to reveal)",
+            redact_sqlite_url_value(&cfg.session_db_url)
+        )
+    }
 }
 
 fn command_label(command: &Commands) -> String {
@@ -1568,9 +1639,14 @@ fn run_a2a_smoke(telemetry: &TelemetrySink) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let show_sensitive_config = cli.show_sensitive_config;
     if let Err(err) = run_cli(cli).await {
-        eprintln!("{}", format_cli_error(&err));
-        tracing::error!(category = %categorize_error(&err).code(), error = %err, "command failed");
+        eprintln!("{}", format_cli_error(&err, show_sensitive_config));
+        tracing::error!(
+            category = %categorize_error(&err).code(),
+            error = %render_error_message(&err, show_sensitive_config),
+            "command failed"
+        );
         std::process::exit(1);
     }
 
@@ -1848,7 +1924,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             json!({
                 "duration_ms": duration_ms,
                 "status": "error",
-                "error": err.to_string()
+                "error": render_error_message(err, cfg.show_sensitive_config)
             }),
         ),
     }
@@ -1968,6 +2044,7 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .clone()
             .or(profile.session_db_url)
             .unwrap_or_else(|| "sqlite://.zavora/sessions.db".to_string()),
+        show_sensitive_config: cli.show_sensitive_config,
         retrieval_backend: cli
             .retrieval_backend
             .or(profile.retrieval_backend)
@@ -2070,7 +2147,7 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("User: {}", cfg.user_id);
     println!("Session ID: {}", cfg.session_id);
     println!("Session backend: {:?}", cfg.session_backend);
-    println!("Session DB URL: {}", cfg.session_db_url);
+    println!("Session DB URL: {}", display_session_db_url(cfg));
     println!("Retrieval backend: {:?}", cfg.retrieval_backend);
     println!(
         "Retrieval doc path: {}",
@@ -3331,7 +3408,7 @@ async fn open_sqlite_session_service(db_url: &str) -> Result<DatabaseSessionServ
     ensure_parent_dir_for_sqlite_url(db_url)?;
     let service = DatabaseSessionService::new(db_url)
         .await
-        .with_context(|| format!("failed to open sqlite session database at {db_url}"))?;
+        .context("failed to open sqlite session database")?;
     service
         .migrate()
         .await
@@ -3725,7 +3802,7 @@ async fn run_chat(
                     );
                 }
                 Err(err) => {
-                    eprintln!("{}", format_cli_error(&err));
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
                     println!(
                         "Provider remains {:?} (model={}).",
                         resolved_provider, model_name
@@ -3775,7 +3852,7 @@ async fn run_chat(
                     );
                 }
                 Err(err) => {
-                    eprintln!("{}", format_cli_error(&err));
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
                     println!(
                         "Model remains '{}' on provider {:?}.",
                         model_name, resolved_provider
@@ -3789,7 +3866,7 @@ async fn run_chat(
             match apply_guardrail(&cfg, telemetry, "input", cfg.guardrail_input_mode, input) {
                 Ok(text) => text,
                 Err(err) => {
-                    eprintln!("{}", format_cli_error(&err));
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
                     continue;
                 }
             };
@@ -3812,7 +3889,7 @@ async fn run_chat(
             ) {
                 Ok(text) => text,
                 Err(err) => {
-                    eprintln!("{}", format_cli_error(&err));
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
                     continue;
                 }
             };
@@ -3835,7 +3912,7 @@ async fn run_chat(
                     &answer,
                 )
             {
-                eprintln!("{}", format_cli_error(&err));
+                eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
             }
         }
     }
@@ -4245,7 +4322,10 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
 
     if matches!(cfg.session_backend, SessionBackend::Sqlite) {
         let _service = open_sqlite_session_service(&cfg.session_db_url).await?;
-        println!("SQLite session DB check: ok ({})", cfg.session_db_url);
+        println!(
+            "SQLite session DB check: ok ({})",
+            display_session_db_url(cfg)
+        );
     }
 
     Ok(())
@@ -4260,7 +4340,7 @@ async fn run_migrate(cfg: &RuntimeConfig) -> Result<()> {
             let _service = open_sqlite_session_service(&cfg.session_db_url).await?;
             println!(
                 "SQLite migrations applied successfully: {}",
-                cfg.session_db_url
+                display_session_db_url(cfg)
             );
         }
     }
@@ -4511,6 +4591,7 @@ mod tests {
             session_id: "test-session".to_string(),
             session_backend: SessionBackend::Memory,
             session_db_url: "sqlite://.zavora/test.db".to_string(),
+            show_sensitive_config: false,
             retrieval_backend: RetrievalBackend::Disabled,
             retrieval_doc_path: None,
             retrieval_max_chunks: 3,
@@ -4588,6 +4669,7 @@ mod tests {
             session_id: None,
             session_backend: None,
             session_db_url: None,
+            show_sensitive_config: false,
             retrieval_backend: None,
             retrieval_doc_path: None,
             retrieval_max_chunks: None,
@@ -4891,6 +4973,7 @@ retrieval_min_score = 2
         assert_eq!(cfg.provider, Provider::Openai);
         assert_eq!(cfg.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(cfg.session_backend, SessionBackend::Sqlite);
+        assert!(!cfg.show_sensitive_config);
         assert_eq!(cfg.app_name, "zavora-dev");
         assert_eq!(cfg.user_id, "dev-user");
         assert_eq!(cfg.session_id, "dev-session");
@@ -5037,6 +5120,16 @@ guardrail_redact_replacement = "***"
         assert_eq!(cfg.guardrail_output_mode, GuardrailMode::Redact);
         assert_eq!(cfg.guardrail_terms, vec!["secret", "token", "password"]);
         assert_eq!(cfg.guardrail_redact_replacement, "[MASKED]");
+    }
+
+    #[test]
+    fn runtime_config_honors_show_sensitive_config_flag() {
+        let mut cli = test_cli(".zavora/config.toml", "default");
+        cli.show_sensitive_config = true;
+        let profiles = ProfilesFile::default();
+
+        let cfg = resolve_runtime_config(&cli, &profiles).expect("runtime config should resolve");
+        assert!(cfg.show_sensitive_config);
     }
 
     #[test]
@@ -5647,11 +5740,33 @@ provider = "not-a-provider"
             .expect_err("missing session should error");
 
         assert_eq!(categorize_error(&err), ErrorCategory::Session);
-        let rendered = format_cli_error(&err);
+        let rendered = format_cli_error(&err, cfg.show_sensitive_config);
         assert!(
             rendered.contains("[SESSION]"),
             "expected session category marker in error output"
         );
+    }
+
+    #[test]
+    fn redact_sensitive_text_masks_sqlite_urls() {
+        let raw = "open failed at sqlite://.zavora/sessions.db; retry sqlite://tmp/test.db";
+        let rendered = redact_sensitive_text(raw);
+
+        assert!(!rendered.contains(".zavora/sessions.db"));
+        assert!(!rendered.contains("tmp/test.db"));
+        assert_eq!(
+            rendered,
+            "open failed at sqlite://[REDACTED]; retry sqlite://[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn format_cli_error_redacts_sqlite_urls_by_default() {
+        let err = anyhow::anyhow!("failed to open sqlite://.zavora/sessions.db");
+        let rendered = format_cli_error(&err, false);
+
+        assert!(rendered.contains("sqlite://[REDACTED]"));
+        assert!(!rendered.contains(".zavora/sessions.db"));
     }
 
     #[tokio::test]

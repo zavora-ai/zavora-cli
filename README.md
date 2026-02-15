@@ -167,6 +167,11 @@ cargo run -- profiles list
 cargo run -- --profile ops profiles show
 ```
 
+Sensitive runtime config handling:
+- `profiles show`, `doctor`, and `migrate` redact session DB URLs by default.
+- CLI errors and `command.failed` telemetry events redact sqlite URLs by default.
+- Use `--show-sensitive-config` (or `ZAVORA_SHOW_SENSITIVE_CONFIG=true`) only for local debugging when full values are required.
+
 ## MCP Toolset Manager
 
 Configure MCP servers per profile and use CLI discovery commands:

@@ -8,6 +8,7 @@ This document captures the GA hardening controls for secret handling, dependency
 - `.env.example` intentionally contains empty provider credential placeholders.
 - Guardrail policies can be configured to block/redact sensitive terms at input/output boundaries.
 - Telemetry events should avoid raw sensitive payload capture; use summarized outcomes where possible.
+- Session database URLs are redacted in CLI output/logging/failed-command telemetry by default; use `--show-sensitive-config` only for controlled local diagnostics.
 
 ## Dependency Posture
 
