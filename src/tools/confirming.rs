@@ -270,6 +270,20 @@ impl Tool for ConfirmingTool {
             return self.execute_and_display(ctx, approved_args).await;
         }
 
+        // Auto-approve read-only shell commands (git status, ls, grep, etc.)
+        if self.inner.name() == "execute_bash" {
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                if crate::tools::execute_bash::is_read_only_command(cmd) {
+                    theme::resume_spinner();
+                    let mut approved_args = args;
+                    if let Some(obj) = approved_args.as_object_mut() {
+                        obj.insert("approved".to_string(), Value::Bool(true));
+                    }
+                    return self.execute_and_display(ctx, approved_args).await;
+                }
+            }
+        }
+
         eprintln!(
             "{DIM}Allow this action? Use '{GREEN}t{DIM}' to trust this tool for the session. [{GREEN}y{DIM}/{GREEN}n{DIM}/{GREEN}t{DIM}]:{RESET}"
         );
