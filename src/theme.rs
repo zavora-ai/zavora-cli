@@ -87,12 +87,104 @@ pub fn build_prompt(
 
 /// Print the chat startup banner.
 pub fn print_startup_banner(provider: &str, model: &str) {
+    let version = env!("CARGO_PKG_VERSION");
     println!();
-    println!("  {BOLD_CYAN}zavora-cli{RESET} {DIM}v{}{RESET}", env!("CARGO_PKG_VERSION"));
-    println!("  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}");
+    println!("  {BOLD_CYAN}zavora-cli{RESET} {DIM}v{version}{RESET}  {DIM}·{RESET}  {GREEN}{provider}{RESET} {DIM}/{RESET} {GREEN}{model}{RESET}");
     println!();
-    println!("  Type a message to chat, {CYAN}/help{RESET} for commands, {CYAN}/exit{RESET} to quit.");
+
+    // Rotating tips
+    let tips = [
+        format!("Use {CYAN}/compact{RESET} to summarize history and free context space"),
+        format!("Use {CYAN}/checkpoint save <label>{RESET} to snapshot your session"),
+        format!("Use {CYAN}/tangent start{RESET} to branch into exploratory work without losing context"),
+        format!("Use {CYAN}/usage{RESET} to see a real-time token breakdown by author"),
+        format!("Use {CYAN}/delegate <task>{RESET} to run a sub-agent in an isolated session"),
+        format!("Use {CYAN}/model{RESET} to open the interactive model picker"),
+        format!("Use {CYAN}/todos list{RESET} to see task lists the agent has created"),
+        format!("Commands can be abbreviated — type {CYAN}/ch{RESET} and press enter to see matches"),
+    ];
+    let idx = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as usize)
+        .unwrap_or(0)
+        % tips.len();
+
+    draw_tip_box("💡 Tip", &tips[idx]);
+
+    println!(
+        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
+    );
+    println!("  {DIM}{}━{RESET}", "━".repeat(68));
     println!();
+}
+
+/// Draw a bordered tip box.
+fn draw_tip_box(title: &str, content: &str) {
+    let width: usize = 70;
+    let inner = width - 4;
+
+    // Top border with title
+    let title_plain_len = title.chars().filter(|c| c.is_ascii_graphic() || *c == ' ' || !c.is_ascii()).count();
+    let side = (width.saturating_sub(title_plain_len + 4)) / 2;
+    let right = width.saturating_sub(side + title_plain_len + 4);
+    println!("  {DIM}╭{}─ {RESET}{title}{DIM} ─{}╮{RESET}", "─".repeat(side), "─".repeat(right));
+
+    // Wrap content into lines
+    let words: Vec<&str> = content.split_whitespace().collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut visible_len = 0;
+
+    for word in &words {
+        // Strip ANSI to measure visible length
+        let word_vis: String = strip_ansi(word);
+        let wlen = word_vis.len();
+        let test_len = if line.is_empty() { wlen } else { visible_len + 1 + wlen };
+
+        if test_len <= inner {
+            if !line.is_empty() {
+                line.push(' ');
+                visible_len += 1;
+            }
+            line.push_str(word);
+            visible_len += wlen;
+        } else {
+            lines.push(line);
+            line = word.to_string();
+            visible_len = wlen;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+
+    for l in &lines {
+        let vis_len = strip_ansi(l).len();
+        let pad = inner.saturating_sub(vis_len);
+        println!("  {DIM}│{RESET} {l}{}{DIM}│{RESET}", " ".repeat(pad + 1));
+    }
+
+    // Bottom border
+    println!("  {DIM}╰{}╯{RESET}", "─".repeat(width - 2));
+    println!();
+}
+
+/// Strip ANSI escape sequences for visible length calculation.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_escape = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
