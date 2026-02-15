@@ -2,7 +2,10 @@
 ///
 /// Provides prompt visuals with mode indicators, fuzzy slash command matching,
 /// ANSI color helpers, and first-run onboarding help.
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::checkpoint::CheckpointStore;
 use crate::context::{BudgetLevel, ContextUsage};
@@ -267,4 +270,61 @@ pub fn format_command_palette() -> String {
         out.push_str(&format!("  {CYAN}/{name:<12}{RESET} {DIM}{desc}{RESET}\n"));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Spinner
+// ---------------------------------------------------------------------------
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// A terminal spinner that runs on a background thread.
+pub struct Spinner {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    /// Start a spinner with the given message (e.g. "Thinking...").
+    pub fn start(message: &str) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let msg = message.to_string();
+
+        let handle = std::thread::spawn(move || {
+            let mut i = 0;
+            while !stop_clone.load(Ordering::Relaxed) {
+                let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
+                eprint!("\r{DIM}{frame} {msg}{RESET}");
+                let _ = io::stderr().flush();
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                i += 1;
+            }
+            // Clear the spinner line
+            eprint!("\r\x1b[2K");
+            let _ = io::stderr().flush();
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop the spinner and clear the line.
+    pub fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }

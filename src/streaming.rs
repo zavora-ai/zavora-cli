@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::config::RuntimeConfig;
 use crate::retrieval::{RetrievalPolicy, RetrievalService, augment_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
+use crate::theme::Spinner;
 
 pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
 
@@ -316,6 +317,7 @@ pub async fn run_prompt_streaming(
     let mut tracker = AuthorTextTracker::default();
     let mut emitted_text_by_author: HashMap<String, String> = HashMap::new();
     let mut printed_any_output = false;
+    let mut spinner = Some(Spinner::start("Thinking..."));
 
     while let Some(event_result) = stream.next().await {
         let event = event_result.context("runner returned event error")?;
@@ -334,6 +336,9 @@ pub async fn run_prompt_streaming(
             event.is_final_response(),
         );
         if !delta.is_empty() {
+            if let Some(s) = spinner.take() {
+                s.stop();
+            }
             print!("{delta}");
             io::stdout().flush().context("failed to flush stdout")?;
             emitted_text_by_author
@@ -343,6 +348,9 @@ pub async fn run_prompt_streaming(
             printed_any_output = true;
         }
     }
+
+    // Ensure spinner is stopped if stream ended without output
+    drop(spinner);
 
     if printed_any_output {
         if let (Some(final_text), Some(final_author)) = (
