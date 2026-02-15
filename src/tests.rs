@@ -2391,10 +2391,20 @@ fn test_context_usage_format() {
 
 #[test]
 fn test_default_context_window() {
-    assert_eq!(default_context_window("gemini"), 2_000_000);
-    assert_eq!(default_context_window("anthropic"), 200_000);
+    assert_eq!(default_context_window("gemini"), 1_048_576);
+    assert_eq!(default_context_window("anthropic"), 1_000_000);
     assert_eq!(default_context_window("openai"), 1_000_000);
+    assert_eq!(default_context_window("deepseek"), 128_000);
+    assert_eq!(default_context_window("groq"), 131_072);
     assert_eq!(default_context_window("unknown"), 128_000);
+
+    // Model-specific overrides
+    assert_eq!(model_context_window("gpt-5-mini", "openai"), 400_000);
+    assert_eq!(model_context_window("gpt-4.1", "openai"), 1_000_000);
+    assert_eq!(model_context_window("o3-mini", "openai"), 200_000);
+    assert_eq!(model_context_window("claude-sonnet-4-20250514", "anthropic"), 1_000_000);
+    assert_eq!(model_context_window("deepseek-chat", "deepseek"), 128_000);
+    assert_eq!(model_context_window("llama-4-scout-17b-16e-instruct", "groq"), 131_072);
 }
 
 #[test]

@@ -183,12 +183,12 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
             },
             ModelPickerOption {
                 id: "gpt-5.3-codex",
-                context_window: "256k",
+                context_window: "400k",
                 description: "agentic coding, most capable",
             },
             ModelPickerOption {
                 id: "gpt-5-mini",
-                context_window: "128k",
+                context_window: "400k",
                 description: "fast low-latency",
             },
             ModelPickerOption {
@@ -200,7 +200,7 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
         Provider::Anthropic => vec![
             ModelPickerOption {
                 id: "claude-sonnet-4-20250514",
-                context_window: "200k",
+                context_window: "1M",
                 description: "balanced default",
             },
             ModelPickerOption {
@@ -217,24 +217,24 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
         Provider::Deepseek => vec![
             ModelPickerOption {
                 id: "deepseek-chat",
-                context_window: "64k",
+                context_window: "128k",
                 description: "general conversation default",
             },
             ModelPickerOption {
                 id: "deepseek-reasoner",
-                context_window: "64k",
+                context_window: "128k",
                 description: "reasoning-focused",
             },
         ],
         Provider::Groq => vec![
             ModelPickerOption {
                 id: "llama-3.3-70b-versatile",
-                context_window: "128k",
+                context_window: "131k",
                 description: "balanced default",
             },
             ModelPickerOption {
                 id: "llama-4-scout-17b-16e-instruct",
-                context_window: "512k",
+                context_window: "131k",
                 description: "Llama 4, fast MoE",
             },
             ModelPickerOption {
@@ -867,7 +867,7 @@ pub async fn run_chat(
         let context_usage = match snapshot_session_events(&session_service, &cfg).await {
             Ok(events) => {
                 let provider_str = format!("{:?}", resolved_provider).to_ascii_lowercase();
-                Some(compute_context_usage(&events, &provider_str))
+                Some(compute_context_usage(&events, &provider_str, &model_name))
             }
             Err(_) => None,
         };

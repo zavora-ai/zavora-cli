@@ -26,14 +26,39 @@ pub const fn tokens_to_chars(tokens: usize) -> usize {
 
 /// Default context window sizes per provider (tokens).
 pub fn default_context_window(provider: &str) -> usize {
+    // Provider-level fallback; prefer model_context_window() when model name is available.
     match provider {
-        "gemini" => 2_000_000,
-        "anthropic" => 200_000,
+        "gemini" => 1_048_576,
+        "anthropic" => 1_000_000,
         "openai" => 1_000_000,
-        "deepseek" => 64_000,
-        "groq" => 128_000,
+        "deepseek" => 128_000,
+        "groq" => 131_072,
         "ollama" => 128_000,
         _ => 128_000,
+    }
+}
+
+/// Context window for a specific model. Falls back to provider default.
+pub fn model_context_window(model: &str, provider: &str) -> usize {
+    match model {
+        // OpenAI
+        "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => 1_000_000,
+        m if m.starts_with("gpt-5") => 400_000,
+        "o3-mini" | "o3" | "o4-mini" => 200_000,
+        // Anthropic
+        "claude-opus-4-6" => 1_000_000,
+        m if m.starts_with("claude-sonnet-4") => 1_000_000,
+        m if m.starts_with("claude-3-5-haiku") => 200_000,
+        // Gemini
+        m if m.contains("gemini-2.5") => 1_048_576,
+        m if m.contains("gemini-3") => 1_048_576,
+        // DeepSeek
+        m if m.starts_with("deepseek") => 128_000,
+        // Groq-hosted models
+        "llama-3.3-70b-versatile" => 131_072,
+        "llama-4-scout-17b-16e-instruct" => 131_072,
+        "deepseek-r1-distill-llama-70b" => 128_000,
+        _ => default_context_window(provider),
     }
 }
 
@@ -166,7 +191,7 @@ pub enum BudgetLevel {
 use adk_rust::Event;
 
 /// Build a `ContextUsage` snapshot from session events and provider name.
-pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
+pub fn compute_context_usage(events: &[Event], provider: &str, model: &str) -> ContextUsage {
     let mut user_chars = 0usize;
     let mut assistant_chars = 0usize;
     let mut tool_chars = 0usize;
@@ -212,7 +237,7 @@ pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
         assistant_chars,
         tool_chars,
         system_chars,
-        context_window_tokens: default_context_window(provider),
+        context_window_tokens: model_context_window(model, provider),
         api_total_tokens,
         event_count: events.len(),
     }
