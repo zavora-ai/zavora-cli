@@ -65,7 +65,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         &resolved_agents,
         selected_agent_name.as_deref(),
     )?;
-    let command = command_label(&cli.command);
+    let command = command_label(&cli.command.as_ref().unwrap_or(&Commands::Chat));
     let telemetry = TelemetrySink::new(&cfg, command.clone());
     let started_at = Instant::now();
     telemetry.emit(
@@ -82,10 +82,11 @@ async fn run_cli(cli: Cli) -> Result<()> {
 
     let retrieval_service = if matches!(
         cli.command,
-        Commands::Ask { .. }
-            | Commands::Chat
-            | Commands::Workflow { .. }
-            | Commands::ReleasePlan { .. }
+        Some(Commands::Ask { .. })
+            | Some(Commands::Chat)
+            | Some(Commands::Workflow { .. })
+            | Some(Commands::ReleasePlan { .. })
+            | None
     ) {
         let service = build_retrieval_service(&cfg)?;
         tracing::info!(
@@ -100,7 +101,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         None
     };
 
-    let execution: Result<()> = match cli.command {
+    let execution: Result<()> = match cli.command.unwrap_or(Commands::Chat) {
         Commands::Ask { prompt } => {
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");

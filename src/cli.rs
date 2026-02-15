@@ -275,7 +275,7 @@ pub struct Cli {
     pub log_filter: String,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]

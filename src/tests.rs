@@ -175,7 +175,7 @@ use crate::tool_policy::*;
             guardrail_term: Vec::new(),
             guardrail_redact_replacement: None,
             log_filter: "warn".to_string(),
-            command: Commands::Doctor,
+            command: Some(Commands::Doctor),
         }
     }
 
