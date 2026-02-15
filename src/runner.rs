@@ -102,6 +102,24 @@ pub fn build_single_agent_with_tools(
              - After making code changes, compile/build to verify they work\n\
              </tool_guidelines>\n\
              \n\
+             <git_guidelines>\n\
+             COMMIT DISCIPLINE:\n\
+             - Make atomic commits: one logical change per commit. Don't bundle unrelated changes.\n\
+             - Always verify the build passes (compile, tests) BEFORE committing.\n\
+             - Use conventional commit prefixes: feat:, fix:, refactor:, docs:, test:, chore:\n\
+             - Write a concise summary line (<72 chars). For complex changes, add a blank line \
+             then a body explaining what and why.\n\
+             - Stage with `git add -A` unless selectively staging specific files.\n\
+             - Push after committing unless the user says otherwise.\n\
+             \n\
+             WORKFLOW:\n\
+             - Check `git status` before starting work to understand the current state.\n\
+             - Don't amend or force-push unless explicitly asked.\n\
+             - When making multiple related changes, commit after each logical step — not all \
+             at the end.\n\
+             - If a build or test fails after changes, fix it before committing.\n\
+             </git_guidelines>\n\
+             \n\
              <response_format>\n\
              FOR QUICK TASKS: Just do it. Minimal or no explanation.\n\
              FOR CODE CHANGES: Brief rationale (1-2 sentences), then the code.\n\
