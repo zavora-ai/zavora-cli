@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use adk_rust::prelude::*;
 use adk_rust::ReadonlyContext;
@@ -90,6 +90,84 @@ pub fn resolve_mcp_auth(server: &McpServerConfig) -> Result<Option<McpAuth>> {
     }
 
     Ok(Some(McpAuth::bearer(token)))
+}
+
+// ---------------------------------------------------------------------------
+// MCP server diagnostics
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum McpServerState {
+    Reachable { tool_count: usize, latency_ms: u64 },
+    AuthFailure { hint: String },
+    Timeout { timeout_secs: u64 },
+    Unreachable { error: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerDiagnostic {
+    pub name: String,
+    pub endpoint: String,
+    pub state: McpServerState,
+}
+
+/// Check auth readiness without connecting. Returns a hint if auth is misconfigured.
+pub fn check_auth_hint(server: &McpServerConfig) -> Option<String> {
+    let Some(env_key) = server.auth_bearer_env.as_deref() else {
+        return None;
+    };
+    match std::env::var(env_key) {
+        Ok(val) if val.trim().is_empty() => {
+            Some(format!("env '{}' is set but empty", env_key))
+        }
+        Err(_) => {
+            Some(format!("env '{}' is not set — set it or remove auth_bearer_env", env_key))
+        }
+        Ok(_) => None,
+    }
+}
+
+/// Diagnose a single MCP server: check auth, attempt discovery, measure latency.
+pub async fn diagnose_mcp_server(
+    server: &McpServerConfig,
+    retry_attempts: u32,
+    retry_delay_ms: u64,
+) -> McpServerDiagnostic {
+    // Pre-flight auth check
+    if let Some(hint) = check_auth_hint(server) {
+        return McpServerDiagnostic {
+            name: server.name.clone(),
+            endpoint: server.endpoint.clone(),
+            state: McpServerState::AuthFailure { hint },
+        };
+    }
+
+    let start = Instant::now();
+    match discover_mcp_tools_for_server(server, retry_attempts, retry_delay_ms).await {
+        Ok(tools) => McpServerDiagnostic {
+            name: server.name.clone(),
+            endpoint: server.endpoint.clone(),
+            state: McpServerState::Reachable {
+                tool_count: tools.len(),
+                latency_ms: start.elapsed().as_millis() as u64,
+            },
+        },
+        Err(err) => {
+            let error_str = err.to_string();
+            let state = if error_str.contains("timed out") || error_str.contains("timeout") {
+                McpServerState::Timeout {
+                    timeout_secs: server.timeout_secs.unwrap_or(15),
+                }
+            } else {
+                McpServerState::Unreachable { error: error_str }
+            };
+            McpServerDiagnostic {
+                name: server.name.clone(),
+                endpoint: server.endpoint.clone(),
+                state,
+            }
+        }
+    }
 }
 
 pub async fn discover_mcp_tools_for_server(
@@ -201,13 +279,26 @@ pub async fn run_mcp_list(cfg: &RuntimeConfig) -> Result<()> {
         } else {
             server.tool_allowlist.join(",")
         };
+        let auth_hint = check_auth_hint(&server);
+        let auth_status = match &auth_hint {
+            Some(hint) => format!(" ⚠ {}", hint),
+            None if server.auth_bearer_env.is_some() => " ✓".to_string(),
+            None => String::new(),
+        };
+        let aliases = if server.tool_aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" aliases={}", server.tool_aliases.len())
+        };
         println!(
-            "- {} endpoint={} timeout={}s auth_env={} allowlist={}",
+            "- {} endpoint={} timeout={}s auth_env={}{} allowlist={}{}",
             server.name,
             server.endpoint,
             server.timeout_secs.unwrap_or(15),
             auth,
-            allowlist
+            auth_status,
+            allowlist,
+            aliases,
         );
     }
 
@@ -222,29 +313,39 @@ pub async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) 
     }
 
     let mut failures = 0usize;
-    for server in servers {
-        match discover_mcp_tools_for_server(
-            &server,
-            cfg.tool_retry_attempts,
-            cfg.tool_retry_delay_ms,
-        )
-        .await
-        {
-            Ok(tools) => {
+    for server in &servers {
+        let diag = diagnose_mcp_server(server, cfg.tool_retry_attempts, cfg.tool_retry_delay_ms).await;
+        match &diag.state {
+            McpServerState::Reachable { tool_count, latency_ms } => {
                 println!(
-                    "MCP server '{}' reachable. Discovered {} tool(s):",
-                    server.name,
-                    tools.len()
+                    "✓ '{}' reachable ({} tool(s), {}ms)",
+                    diag.name, tool_count, latency_ms
                 );
-                for tool in tools {
-                    println!("- {}", tool.name());
+                // Re-discover to print tool names
+                if let Ok(tools) = discover_mcp_tools_for_server(
+                    server, cfg.tool_retry_attempts, cfg.tool_retry_delay_ms,
+                ).await {
+                    for tool in tools {
+                        println!("  - {}", tool.name());
+                    }
                 }
             }
-            Err(err) => {
+            McpServerState::AuthFailure { hint } => {
+                failures += 1;
+                eprintln!("✗ '{}' auth failure: {}", diag.name, hint);
+            }
+            McpServerState::Timeout { timeout_secs } => {
                 failures += 1;
                 eprintln!(
-                    "[TOOLING] MCP discovery failed for '{}' ({}): {}",
-                    server.name, server.endpoint, err
+                    "✗ '{}' timed out after {}s (endpoint: {})",
+                    diag.name, timeout_secs, diag.endpoint
+                );
+            }
+            McpServerState::Unreachable { error } => {
+                failures += 1;
+                eprintln!(
+                    "✗ '{}' unreachable ({}): {}",
+                    diag.name, diag.endpoint, error
                 );
             }
         }
@@ -252,8 +353,9 @@ pub async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) 
 
     if failures > 0 {
         return Err(anyhow::anyhow!(
-            "MCP discovery completed with {} failure(s). Check endpoint/auth and retry.",
-            failures
+            "MCP discovery completed with {} failure(s) out of {} server(s).",
+            failures,
+            servers.len()
         ));
     }
 
