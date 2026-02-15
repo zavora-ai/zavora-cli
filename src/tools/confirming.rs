@@ -9,6 +9,41 @@ use crate::theme::{self, BOLD, CYAN, DIM, GREEN, RESET};
 
 const RED: &str = "\x1b[31m";
 
+/// Display tool result after execution.
+fn display_result(tool_name: &str, result: &Value) {
+    match tool_name {
+        "execute_bash" => {
+            let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !stdout.is_empty() {
+                eprint!("{stdout}");
+                if !stdout.ends_with('\n') { eprintln!(); }
+            }
+            if !stderr.is_empty() {
+                eprint!("{RED}{stderr}{RESET}");
+                if !stderr.ends_with('\n') { eprintln!(); }
+            }
+            if status == "error" {
+                if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                    eprintln!("{RED}{err}{RESET}");
+                }
+            }
+        }
+        "fs_write" => {
+            let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if result.get("error").is_some() {
+                if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                    eprintln!("{RED}{err}{RESET}");
+                }
+            } else if !path.is_empty() {
+                eprintln!("{DIM}  ✓ wrote {path}{RESET}");
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Set of tool names trusted for the session (skip future prompts).
 static TRUSTED_TOOLS: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -39,6 +74,13 @@ impl ConfirmingTool {
     /// Wrap a tool in display-only mode: shows what it's doing but auto-approves.
     pub fn wrap_display_only(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
         Arc::new(Self { inner: tool, display_only: true })
+    }
+
+    /// Execute inner tool and display the result.
+    async fn execute_and_display(&self, ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
+        let result = self.inner.execute(ctx, args).await?;
+        display_result(self.inner.name(), &result);
+        Ok(result)
     }
 }
 
@@ -158,7 +200,7 @@ impl Tool for ConfirmingTool {
             if let Some(obj) = approved_args.as_object_mut() {
                 obj.insert("approved".to_string(), Value::Bool(true));
             }
-            return self.inner.execute(ctx, approved_args).await;
+            return self.execute_and_display(ctx, approved_args).await;
         }
 
         eprintln!(
@@ -184,14 +226,14 @@ impl Tool for ConfirmingTool {
                 if let Some(obj) = approved_args.as_object_mut() {
                     obj.insert("approved".to_string(), Value::Bool(true));
                 }
-                self.inner.execute(ctx, approved_args).await
+                self.execute_and_display(ctx, approved_args).await
             }
             "y" | "yes" => {
                 let mut approved_args = args;
                 if let Some(obj) = approved_args.as_object_mut() {
                     obj.insert("approved".to_string(), Value::Bool(true));
                 }
-                self.inner.execute(ctx, approved_args).await
+                self.execute_and_display(ctx, approved_args).await
             }
             _ => {
                 eprintln!("  {DIM}Tool denied.{RESET}");
