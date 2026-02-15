@@ -3704,7 +3704,7 @@ enum ChatCommand {
     Mcp,
     Usage,
     Provider(String),
-    Model(String),
+    Model(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3756,11 +3756,9 @@ fn parse_chat_command(input: &str) -> ParsedChatCommand {
         }
         "model" => {
             if arg.is_empty() {
-                ParsedChatCommand::MissingArgument {
-                    usage: "/model <model-id>",
-                }
+                ParsedChatCommand::Command(ChatCommand::Model(None))
             } else {
-                ParsedChatCommand::Command(ChatCommand::Model(arg.to_string()))
+                ParsedChatCommand::Command(ChatCommand::Model(Some(arg.to_string())))
             }
         }
         other => ParsedChatCommand::UnknownCommand(format!("/{other}")),
@@ -3772,7 +3770,7 @@ fn print_chat_help() {
     println!("- /help: show command quick reference");
     println!("- /status: show active profile/provider/model/session");
     println!("- /provider <name>: switch provider and rebuild runtime");
-    println!("- /model <id>: switch model within current provider");
+    println!("- /model [id]: pick a model interactively or switch directly by id");
     println!("- /tools: show active built-in/MCP tools and confirmation policy");
     println!("- /mcp: show MCP server and tool summary");
     println!("- /usage: show usage examples");
@@ -3783,11 +3781,169 @@ fn print_chat_usage() {
     println!("Usage examples:");
     println!("- Type plain text to send a prompt to the agent.");
     println!("- /provider openai");
+    println!("- /model");
     println!("- /model gpt-4o-mini");
     println!("- /tools");
     println!("- /mcp");
     println!("- /status");
     println!("- /exit");
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModelPickerOption {
+    id: &'static str,
+    context_window: &'static str,
+    description: &'static str,
+}
+
+fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
+    match provider {
+        Provider::Gemini => vec![
+            ModelPickerOption {
+                id: "gemini-2.5-flash",
+                context_window: "1M",
+                description: "fast balanced default",
+            },
+            ModelPickerOption {
+                id: "gemini-2.5-pro",
+                context_window: "1M",
+                description: "higher reasoning depth",
+            },
+        ],
+        Provider::Openai => vec![
+            ModelPickerOption {
+                id: "gpt-4o-mini",
+                context_window: "128k",
+                description: "low-latency default",
+            },
+            ModelPickerOption {
+                id: "gpt-4.1",
+                context_window: "1M",
+                description: "higher quality general reasoning",
+            },
+            ModelPickerOption {
+                id: "o3-mini",
+                context_window: "200k",
+                description: "reasoning-focused",
+            },
+        ],
+        Provider::Anthropic => vec![
+            ModelPickerOption {
+                id: "claude-sonnet-4-20250514",
+                context_window: "200k",
+                description: "balanced default",
+            },
+            ModelPickerOption {
+                id: "claude-3-5-haiku-latest",
+                context_window: "200k",
+                description: "fast lower-latency option",
+            },
+        ],
+        Provider::Deepseek => vec![
+            ModelPickerOption {
+                id: "deepseek-chat",
+                context_window: "64k",
+                description: "general conversation default",
+            },
+            ModelPickerOption {
+                id: "deepseek-reasoner",
+                context_window: "64k",
+                description: "reasoning-focused",
+            },
+        ],
+        Provider::Groq => vec![
+            ModelPickerOption {
+                id: "llama-3.3-70b-versatile",
+                context_window: "128k",
+                description: "balanced default",
+            },
+            ModelPickerOption {
+                id: "mixtral-8x7b-32768",
+                context_window: "32k",
+                description: "fast throughput option",
+            },
+        ],
+        Provider::Ollama => vec![
+            ModelPickerOption {
+                id: "llama3.2",
+                context_window: "local-configured",
+                description: "default local model",
+            },
+            ModelPickerOption {
+                id: "qwen2.5-coder",
+                context_window: "local-configured",
+                description: "coding-optimized local model",
+            },
+        ],
+        Provider::Auto => Vec::new(),
+    }
+}
+
+fn resolve_model_picker_selection(
+    options: &[ModelPickerOption],
+    selection: &str,
+) -> Result<Option<String>> {
+    if options.is_empty() {
+        return Ok(None);
+    }
+
+    let trimmed = selection.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("cancel") {
+        return Ok(None);
+    }
+
+    if let Ok(index) = trimmed.parse::<usize>() {
+        if index == 0 || index > options.len() {
+            return Err(anyhow::anyhow!(
+                "invalid selection '{}'; expected 1-{}",
+                trimmed,
+                options.len()
+            ));
+        }
+        return Ok(Some(options[index - 1].id.to_string()));
+    }
+
+    if let Some(option) = options
+        .iter()
+        .find(|option| option.id.eq_ignore_ascii_case(trimmed))
+    {
+        return Ok(Some(option.id.to_string()));
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+fn prompt_model_picker(provider: Provider, current_model: &str) -> Result<Option<String>> {
+    let options = model_picker_options(provider);
+    if options.is_empty() {
+        println!(
+            "Model picker catalog unavailable for provider {:?}. Use /model <model-id>.",
+            provider
+        );
+        return Ok(None);
+    }
+
+    println!(
+        "Model picker: provider={:?} active_model={}",
+        provider, current_model
+    );
+    for (idx, option) in options.iter().enumerate() {
+        println!(
+            "{}. {} (ctx={}, {})",
+            idx + 1,
+            option.id,
+            option.context_window,
+            option.description
+        );
+    }
+    print!("Select model number or id (Enter to cancel): ");
+    io::stdout().flush().context("failed to flush stdout")?;
+
+    let mut selection = String::new();
+    io::stdin()
+        .read_line(&mut selection)
+        .context("failed to read model picker input")?;
+    resolve_model_picker_selection(&options, &selection)
 }
 
 fn print_chat_tools(
@@ -3989,8 +4145,20 @@ async fn dispatch_chat_command(
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Model(next_model) => {
+            let chosen_model = match next_model {
+                Some(value) => Some(value),
+                None => prompt_model_picker(*resolved_provider, model_name)?,
+            };
+            let Some(chosen_model) = chosen_model else {
+                println!(
+                    "Model unchanged ('{}' on provider {:?}).",
+                    model_name, resolved_provider
+                );
+                return Ok(ChatCommandAction::Continue);
+            };
+
             let mut switched_cfg = cfg.clone();
-            switched_cfg.model = Some(next_model.to_string());
+            switched_cfg.model = Some(chosen_model);
 
             match build_single_runner_for_chat(
                 &switched_cfg,
@@ -4070,7 +4238,7 @@ async fn run_chat(
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
     println!("Interactive mode started. Type /help for commands or /exit to quit.");
-    println!("Quick start: /provider <name>, /model <id>, /tools, /mcp, /usage.");
+    println!("Quick start: /provider <name>, /model (picker), /tools, /mcp, /usage.");
     if buffered_output_required(cfg.guardrail_output_mode) {
         println!(
             "Guardrail output mode {:?} active: chat will buffer model responses before printing.",
@@ -5802,7 +5970,11 @@ provider = "not-a-provider"
         );
         assert_eq!(
             parse_chat_command("/model gpt-4o-mini"),
-            ParsedChatCommand::Command(ChatCommand::Model("gpt-4o-mini".to_string()))
+            ParsedChatCommand::Command(ChatCommand::Model(Some("gpt-4o-mini".to_string())))
+        );
+        assert_eq!(
+            parse_chat_command("/model"),
+            ParsedChatCommand::Command(ChatCommand::Model(None))
         );
     }
 
@@ -5814,12 +5986,25 @@ provider = "not-a-provider"
                 usage: "/provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>"
             }
         );
+    }
+
+    #[test]
+    fn model_picker_selection_falls_back_when_catalog_unavailable() {
+        let options = model_picker_options(Provider::Auto);
+        assert!(options.is_empty());
         assert_eq!(
-            parse_chat_command("/model"),
-            ParsedChatCommand::MissingArgument {
-                usage: "/model <model-id>"
-            }
+            resolve_model_picker_selection(&options, "1").expect("fallback should not fail"),
+            None
         );
+    }
+
+    #[test]
+    fn model_picker_selection_accepts_numeric_index() {
+        let options = model_picker_options(Provider::Openai);
+        let picked = resolve_model_picker_selection(&options, "2")
+            .expect("selection should parse")
+            .expect("selection should choose a model");
+        assert_eq!(picked, "gpt-4.1");
     }
 
     #[test]
