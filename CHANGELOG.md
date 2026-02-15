@@ -6,6 +6,16 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-02-15
+
+### Fixed
+
+- Context usage now computed from real session events (was always None)
+- `/delegate` now runs isolated sub-agent prompt (was placeholder message)
+- StubTool moved from production code to test module
+- Checkpoint store persisted to `.zavora/checkpoints.json` across CLI restarts
+- Added `todo_list` agent tool so the model can create/update todos during execution
+
 ## [1.1.0] — 2026-02-15
 
 Phase 2: Q CLI Parity + UX (Sprints 9–11)
