@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod telemetry;
 pub mod guardrail;
+pub mod hooks;
 pub mod eval;
 pub mod retrieval;
 pub mod tools;
