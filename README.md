@@ -267,6 +267,19 @@ require_confirm_tool = ["fs_read"]
 approve_tool = [] # deny until explicitly approved
 ```
 
+## Coding File Write Tool (`fs_write`)
+
+`fs_write` is a built-in mutation tool for controlled file updates.
+
+- Supports `create`, `overwrite`, `append`, and `patch` modes
+- `patch` mode applies minimal-diff replacement via `{ find, replace, replace_all }`
+- Uses the same workspace path policy as `fs_read` (outside-root and blocked path denial)
+- Requires explicit tool confirmation by default (`fs_write` is auto-added to required confirmations)
+
+Example payloads used by the agent:
+- Create: `{ "path": "docs/new.md", "mode": "create", "content": "..." }`
+- Patch: `{ "path": "README.md", "mode": "patch", "patch": { "find": "old", "replace": "new" } }`
+
 ## Telemetry Baseline and Reporting
 
 Structured telemetry is enabled by default and written as JSONL.
