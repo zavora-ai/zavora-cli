@@ -89,7 +89,14 @@ pub fn build_prompt(
 pub fn print_startup_banner(provider: &str, model: &str) {
     let version = env!("CARGO_PKG_VERSION");
     println!();
-    println!("  {BOLD_CYAN}zavora-cli{RESET} {DIM}v{version}{RESET}  {DIM}·{RESET}  {GREEN}{provider}{RESET} {DIM}/{RESET} {GREEN}{model}{RESET}");
+    println!("{BOLD_CYAN}  ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗  █████╗{RESET}");
+    println!("{BOLD_CYAN}  ╚══███╔╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗██╔══██╗{RESET}");
+    println!("{BOLD_CYAN}    ███╔╝ ███████║██║   ██║██║   ██║██████╔╝███████║{RESET}");
+    println!("{BOLD_CYAN}   ███╔╝  ██╔══██║╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██║{RESET}");
+    println!("{BOLD_CYAN}  ███████╗██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║██║  ██║{RESET}");
+    println!("{BOLD_CYAN}  ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝{RESET}");
+    println!("  {DIM}Your AI agent, in the terminal.{RESET}  {DIM}v{version}{RESET}");
+    println!("  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}");
     println!();
 
     // Rotating tips
