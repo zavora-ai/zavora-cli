@@ -92,6 +92,22 @@ enum ProfileCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum AgentCommands {
+    #[command(about = "List available agents from local/global catalogs")]
+    List,
+    #[command(about = "Show resolved agent configuration")]
+    Show {
+        #[arg(long)]
+        name: Option<String>,
+    },
+    #[command(about = "Select active agent for this workspace")]
+    Select {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum McpCommands {
     #[command(about = "List MCP servers configured for the active profile")]
     List,
@@ -178,6 +194,9 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli workflow sequential \"Plan a v0.2.0 rollout\"\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
+  zavora-cli agents list\n\
+  zavora-cli agents show --name coder\n\
+  zavora-cli agents select --name reviewer\n\
   zavora-cli mcp list\n\
   zavora-cli mcp discover --server ops-tools\n\
   zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
@@ -188,6 +207,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli eval run --benchmark-iterations 200 --fail-under 0.90\n\
 \n\
 Switching behavior:\n\
+  - Use --agent <name> to select a named agent profile for this invocation.\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
   - In chat, use /help for command discovery and /provider, /model, /tools, /mcp, /usage, /status.";
 
@@ -201,6 +221,9 @@ struct Cli {
 
     #[arg(long, env = "ZAVORA_MODEL")]
     model: Option<String>,
+
+    #[arg(long, env = "ZAVORA_AGENT")]
+    agent: Option<String>,
 
     #[arg(long, env = "ZAVORA_PROFILE", default_value = "default")]
     profile: String,
@@ -318,6 +341,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
+    #[command(about = "Manage agent catalogs and active agent selection")]
+    Agents {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
     #[command(about = "Manage MCP toolset registration and discovery")]
     Mcp {
         #[command(subcommand)]
@@ -349,6 +377,13 @@ enum Commands {
 struct RuntimeConfig {
     profile: String,
     config_path: String,
+    agent_name: String,
+    agent_source: AgentSource,
+    agent_description: Option<String>,
+    agent_instruction: Option<String>,
+    agent_resource_paths: Vec<String>,
+    agent_allow_tools: Vec<String>,
+    agent_deny_tools: Vec<String>,
     provider: Provider,
     model: Option<String>,
     app_name: String,
@@ -416,6 +451,66 @@ struct ProfileConfig {
     guardrail_redact_replacement: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSource {
+    Implicit,
+    Global,
+    Local,
+}
+
+impl AgentSource {
+    fn label(self) -> &'static str {
+        match self {
+            AgentSource::Implicit => "implicit",
+            AgentSource::Global => "global",
+            AgentSource::Local => "local",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentFileConfig {
+    description: Option<String>,
+    instruction: Option<String>,
+    provider: Option<Provider>,
+    model: Option<String>,
+    tool_confirmation_mode: Option<ToolConfirmationMode>,
+    #[serde(default)]
+    resource_paths: Vec<String>,
+    #[serde(default)]
+    allow_tools: Vec<String>,
+    #[serde(default)]
+    deny_tools: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentCatalogFile {
+    #[serde(default)]
+    agents: HashMap<String, AgentFileConfig>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSelectionFile {
+    agent: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAgent {
+    name: String,
+    source: AgentSource,
+    config: AgentFileConfig,
+}
+
+#[derive(Debug, Clone)]
+struct AgentPaths {
+    local_catalog: PathBuf,
+    global_catalog: Option<PathBuf>,
+    selection_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -583,6 +678,11 @@ fn command_label(command: &Commands) -> String {
         Commands::Profiles { command } => match command {
             ProfileCommands::List => "profiles.list".to_string(),
             ProfileCommands::Show => "profiles.show".to_string(),
+        },
+        Commands::Agents { command } => match command {
+            AgentCommands::List => "agents.list".to_string(),
+            AgentCommands::Show { .. } => "agents.show".to_string(),
+            AgentCommands::Select { .. } => "agents.select".to_string(),
         },
         Commands::Mcp { command } => match command {
             McpCommands::List => "mcp.list".to_string(),
@@ -1550,6 +1650,7 @@ async fn run_server(
         &runtime_tools.tools,
         tool_confirmation.policy.clone(),
         Duration::from_secs(cfg.tool_timeout_secs),
+        Some(&cfg),
     )?;
     let session_service = build_session_service(&cfg).await?;
     let warm_runner = Arc::new(
@@ -1656,7 +1757,15 @@ async fn main() -> Result<()> {
 async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(&cli.log_filter)?;
     let profiles = load_profiles(&cli.config_path)?;
-    let cfg = resolve_runtime_config(&cli, &profiles)?;
+    let agent_paths = default_agent_paths();
+    let resolved_agents = load_resolved_agents(&agent_paths)?;
+    let selected_agent_name = load_agent_selection(&agent_paths.selection_file)?;
+    let cfg = resolve_runtime_config_with_agents(
+        &cli,
+        &profiles,
+        &resolved_agents,
+        selected_agent_name.as_deref(),
+    )?;
     let command = command_label(&cli.command);
     let telemetry = TelemetrySink::new(&cfg, command.clone());
     let started_at = Instant::now();
@@ -1711,6 +1820,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 &runtime_tools.tools,
                 tool_confirmation.policy,
                 Duration::from_secs(cfg.tool_timeout_secs),
+                Some(&cfg),
             )?;
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
@@ -1775,6 +1885,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 &runtime_tools.tools,
                 tool_confirmation.policy,
                 Duration::from_secs(cfg.tool_timeout_secs),
+                Some(&cfg),
             )?;
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
@@ -1843,6 +1954,20 @@ async fn run_cli(cli: Cli) -> Result<()> {
             }
             ProfileCommands::Show => {
                 run_profiles_show(&cfg)?;
+                Ok(())
+            }
+        },
+        Commands::Agents { command } => match command {
+            AgentCommands::List => {
+                run_agents_list(&resolved_agents, &cfg.agent_name, &agent_paths)?;
+                Ok(())
+            }
+            AgentCommands::Show { name } => {
+                run_agents_show(&resolved_agents, &cfg.agent_name, name)?;
+                Ok(())
+            }
+            AgentCommands::Select { name } => {
+                run_agents_select(&resolved_agents, &agent_paths, name)?;
                 Ok(())
             }
         },
@@ -1948,6 +2073,160 @@ fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
     })
 }
 
+fn default_agent_paths() -> AgentPaths {
+    let local_catalog = PathBuf::from(".zavora/agents.toml");
+    let selection_file = PathBuf::from(".zavora/agent-selection.toml");
+    let global_catalog = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .map(|home| home.join(".zavora/agents.toml"));
+    AgentPaths {
+        local_catalog,
+        global_catalog,
+        selection_file,
+    }
+}
+
+fn load_agent_catalog_file(path: &Path) -> Result<AgentCatalogFile> {
+    if !path.exists() {
+        return Ok(AgentCatalogFile::default());
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read agent catalog file at '{}'", path.display()))?;
+    toml::from_str::<AgentCatalogFile>(&content).with_context(|| {
+        format!(
+            "invalid agent catalog configuration in '{}'. Check field names and provider/tool settings.",
+            path.display()
+        )
+    })
+}
+
+fn load_resolved_agents(paths: &AgentPaths) -> Result<HashMap<String, ResolvedAgent>> {
+    let mut resolved = implicit_agent_map();
+
+    if let Some(global_path) = paths.global_catalog.as_ref() {
+        let global = load_agent_catalog_file(global_path)?;
+        for (name, config) in global.agents {
+            resolved.insert(
+                name.clone(),
+                ResolvedAgent {
+                    name,
+                    source: AgentSource::Global,
+                    config,
+                },
+            );
+        }
+    }
+
+    let local = load_agent_catalog_file(&paths.local_catalog)?;
+    for (name, config) in local.agents {
+        resolved.insert(
+            name.clone(),
+            ResolvedAgent {
+                name,
+                source: AgentSource::Local,
+                config,
+            },
+        );
+    }
+
+    Ok(resolved)
+}
+
+fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
+    let mut resolved = HashMap::<String, ResolvedAgent>::new();
+    resolved.insert(
+        "default".to_string(),
+        ResolvedAgent {
+            name: "default".to_string(),
+            source: AgentSource::Implicit,
+            config: AgentFileConfig {
+                description: Some("Built-in default assistant".to_string()),
+                instruction: None,
+                provider: None,
+                model: None,
+                tool_confirmation_mode: None,
+                resource_paths: Vec::new(),
+                allow_tools: Vec::new(),
+                deny_tools: Vec::new(),
+            },
+        },
+    );
+    resolved
+}
+
+fn load_agent_selection(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read agent selection file '{}'", path.display()))?;
+    let parsed = toml::from_str::<AgentSelectionFile>(&content)
+        .with_context(|| format!("invalid agent selection config '{}'", path.display()))?;
+    Ok(parsed
+        .agent
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+fn resolve_active_agent_name(
+    cli: &Cli,
+    agents: &HashMap<String, ResolvedAgent>,
+    selected_agent: Option<&str>,
+) -> Result<String> {
+    if let Some(requested) = cli.agent.as_deref() {
+        let trimmed = requested.trim();
+        if agents.contains_key(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+        let mut names = agents.keys().cloned().collect::<Vec<String>>();
+        names.sort();
+        return Err(anyhow::anyhow!(
+            "agent '{}' not found. Available agents: {}",
+            trimmed,
+            names.join(", ")
+        ));
+    }
+
+    if let Some(selected) = selected_agent
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && agents.contains_key(selected)
+    {
+        return Ok(selected.to_string());
+    }
+
+    if agents.contains_key("default") {
+        return Ok("default".to_string());
+    }
+
+    let mut names = agents.keys().cloned().collect::<Vec<String>>();
+    names.sort();
+    names.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no agents available. Add '.zavora/agents.toml' or '~/.zavora/agents.toml'."
+        )
+    })
+}
+
+fn persist_agent_selection(path: &Path, agent_name: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create agent selection directory '{}'",
+                parent.display()
+            )
+        })?;
+    }
+    let payload = toml::to_string(&AgentSelectionFile {
+        agent: Some(agent_name.to_string()),
+    })
+    .context("failed to serialize agent selection file")?;
+    std::fs::write(path, payload)
+        .with_context(|| format!("failed to write agent selection file '{}'", path.display()))
+}
+
 fn merge_unique_names(first: &[String], second: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::<String>::new();
     let mut merged = Vec::<String>::new();
@@ -1965,7 +2244,12 @@ fn merge_unique_names(first: &[String], second: &[String]) -> Vec<String> {
     merged
 }
 
-fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeConfig> {
+fn resolve_runtime_config_with_agents(
+    cli: &Cli,
+    profiles: &ProfilesFile,
+    resolved_agents: &HashMap<String, ResolvedAgent>,
+    selected_agent_name: Option<&str>,
+) -> Result<RuntimeConfig> {
     let selected = cli.profile.trim();
     if selected.is_empty() {
         return Err(anyhow::anyhow!(
@@ -1996,10 +2280,19 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
         })?
     };
 
+    let active_agent_name = resolve_active_agent_name(cli, resolved_agents, selected_agent_name)?;
+    let active_agent = resolved_agents.get(&active_agent_name).ok_or_else(|| {
+        anyhow::anyhow!("resolved active agent '{}' is missing", active_agent_name)
+    })?;
+
     let provider = if cli.provider != Provider::Auto {
         cli.provider
     } else {
-        profile.provider.unwrap_or(Provider::Auto)
+        active_agent
+            .config
+            .provider
+            .or(profile.provider)
+            .unwrap_or(Provider::Auto)
     };
 
     let require_confirm_tool =
@@ -2018,8 +2311,19 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
     Ok(RuntimeConfig {
         profile: selected.to_string(),
         config_path: cli.config_path.clone(),
+        agent_name: active_agent.name.clone(),
+        agent_source: active_agent.source,
+        agent_description: active_agent.config.description.clone(),
+        agent_instruction: active_agent.config.instruction.clone(),
+        agent_resource_paths: active_agent.config.resource_paths.clone(),
+        agent_allow_tools: active_agent.config.allow_tools.clone(),
+        agent_deny_tools: active_agent.config.deny_tools.clone(),
         provider,
-        model: cli.model.clone().or(profile.model),
+        model: cli
+            .model
+            .clone()
+            .or(active_agent.config.model.clone())
+            .or(profile.model),
         app_name: cli
             .app_name
             .clone()
@@ -2069,6 +2373,7 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .unwrap_or(1),
         tool_confirmation_mode: cli
             .tool_confirmation_mode
+            .or(active_agent.config.tool_confirmation_mode)
             .or(profile.tool_confirmation_mode)
             .unwrap_or(ToolConfirmationMode::McpOnly),
         require_confirm_tool,
@@ -2114,6 +2419,12 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
     })
 }
 
+#[cfg(test)]
+fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeConfig> {
+    let resolved_agents = implicit_agent_map();
+    resolve_runtime_config_with_agents(cli, profiles, &resolved_agents, None)
+}
+
 fn run_profiles_list(profiles: &ProfilesFile, cfg: &RuntimeConfig) -> Result<()> {
     let mut names = profiles.profiles.keys().cloned().collect::<Vec<String>>();
     if !names.iter().any(|name| name == "default") {
@@ -2145,6 +2456,23 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     );
     println!("App: {}", cfg.app_name);
     println!("User: {}", cfg.user_id);
+    println!(
+        "Agent: {} (source={})",
+        cfg.agent_name,
+        cfg.agent_source.label()
+    );
+    println!(
+        "Agent description: {}",
+        cfg.agent_description.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "Agent resources: {}",
+        if cfg.agent_resource_paths.is_empty() {
+            "<none>".to_string()
+        } else {
+            cfg.agent_resource_paths.join(", ")
+        }
+    );
     println!("Session ID: {}", cfg.session_id);
     println!("Session backend: {:?}", cfg.session_backend);
     println!("Session DB URL: {}", display_session_db_url(cfg));
@@ -2188,6 +2516,132 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
         cfg.guardrail_redact_replacement
     );
     println!("MCP servers: {}", cfg.mcp_servers.len());
+    Ok(())
+}
+
+fn run_agents_list(
+    agents: &HashMap<String, ResolvedAgent>,
+    active_agent: &str,
+    paths: &AgentPaths,
+) -> Result<()> {
+    let mut names = agents.keys().cloned().collect::<Vec<String>>();
+    names.sort();
+
+    println!("Available agents (active='{}'):", active_agent);
+    for name in names {
+        let marker = if name == active_agent { "*" } else { " " };
+        let source = agents
+            .get(&name)
+            .map(|agent| agent.source.label())
+            .unwrap_or("unknown");
+        println!("{marker} {name} ({source})");
+    }
+    println!("Local catalog: {}", paths.local_catalog.display());
+    if let Some(global) = paths.global_catalog.as_ref() {
+        println!("Global catalog: {}", global.display());
+    } else {
+        println!("Global catalog: <HOME not set>");
+    }
+    println!("Selection file: {}", paths.selection_file.display());
+    Ok(())
+}
+
+fn run_agents_show(
+    agents: &HashMap<String, ResolvedAgent>,
+    active_agent: &str,
+    requested_name: Option<String>,
+) -> Result<()> {
+    let name = requested_name.unwrap_or_else(|| active_agent.to_string());
+    let agent = agents.get(&name).ok_or_else(|| {
+        let mut names = agents.keys().cloned().collect::<Vec<String>>();
+        names.sort();
+        anyhow::anyhow!(
+            "agent '{}' not found. Available agents: {}",
+            name,
+            names.join(", ")
+        )
+    })?;
+
+    println!("Agent: {} (source={})", agent.name, agent.source.label());
+    println!(
+        "Description: {}",
+        agent.config.description.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "Instruction: {}",
+        agent.config.instruction.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "Provider override: {}",
+        agent
+            .config
+            .provider
+            .map(|p| format!("{:?}", p))
+            .unwrap_or_else(|| "<none>".to_string())
+    );
+    println!(
+        "Model override: {}",
+        agent.config.model.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "Tool confirmation mode override: {}",
+        agent
+            .config
+            .tool_confirmation_mode
+            .map(|mode| format!("{:?}", mode))
+            .unwrap_or_else(|| "<none>".to_string())
+    );
+    println!(
+        "Allow tools: {}",
+        if agent.config.allow_tools.is_empty() {
+            "<none>".to_string()
+        } else {
+            agent.config.allow_tools.join(", ")
+        }
+    );
+    println!(
+        "Deny tools: {}",
+        if agent.config.deny_tools.is_empty() {
+            "<none>".to_string()
+        } else {
+            agent.config.deny_tools.join(", ")
+        }
+    );
+    println!(
+        "Resource paths: {}",
+        if agent.config.resource_paths.is_empty() {
+            "<none>".to_string()
+        } else {
+            agent.config.resource_paths.join(", ")
+        }
+    );
+    Ok(())
+}
+
+fn run_agents_select(
+    agents: &HashMap<String, ResolvedAgent>,
+    paths: &AgentPaths,
+    name: String,
+) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("agent name cannot be empty"));
+    }
+    if !agents.contains_key(trimmed) {
+        let mut names = agents.keys().cloned().collect::<Vec<String>>();
+        names.sort();
+        return Err(anyhow::anyhow!(
+            "agent '{}' not found. Available agents: {}",
+            trimmed,
+            names.join(", ")
+        ));
+    }
+    persist_agent_selection(&paths.selection_file, trimmed)?;
+    println!(
+        "Selected agent '{}' (selection file: {}).",
+        trimmed,
+        paths.selection_file.display()
+    );
     Ok(())
 }
 
@@ -4193,6 +4647,7 @@ fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
         &tools,
         ToolConfirmationPolicy::Never,
         Duration::from_secs(45),
+        None,
     )
 }
 
@@ -4201,13 +4656,42 @@ fn build_single_agent_with_tools(
     tools: &[Arc<dyn Tool>],
     tool_confirmation_policy: ToolConfirmationPolicy,
     tool_timeout: Duration,
+    runtime_cfg: Option<&RuntimeConfig>,
 ) -> Result<Arc<dyn Agent>> {
+    let instruction = if let Some(cfg) = runtime_cfg {
+        let mut sections = vec![
+            "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
+             planning work always prefer release-oriented increments."
+                .to_string(),
+        ];
+        if let Some(agent_instruction) = cfg
+            .agent_instruction
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("Agent-specific instruction:\n{agent_instruction}"));
+        }
+        if !cfg.agent_resource_paths.is_empty() {
+            sections.push(format!(
+                "Agent resource hints:\n{}",
+                cfg.agent_resource_paths
+                    .iter()
+                    .map(|path| format!("- {}", path))
+                    .collect::<Vec<String>>()
+                    .join("\n")
+            ));
+        }
+        sections.join("\n\n")
+    } else {
+        "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
+         planning work always prefer release-oriented increments."
+            .to_string()
+    };
+
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
-        .instruction(
-            "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
-             planning work always prefer release-oriented increments.",
-        )
+        .instruction(instruction)
         .model(model)
         .tool_confirmation_policy(tool_confirmation_policy)
         .tool_timeout(tool_timeout);
@@ -4337,16 +4821,43 @@ async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
     let built_in_count = tools.len();
     let mut mcp_tools = discover_mcp_tools(cfg).await;
     let mcp_count = mcp_tools.len();
-    let mcp_tool_names = mcp_tools
+    let discovered_mcp_tool_names = mcp_tools
         .iter()
         .map(|tool| tool.name().to_string())
         .collect::<BTreeSet<String>>();
     tools.append(&mut mcp_tools);
 
+    if !cfg.agent_allow_tools.is_empty() {
+        let allow = cfg
+            .agent_allow_tools
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<&str>>();
+        tools.retain(|tool| allow.contains(tool.name()));
+    }
+    if !cfg.agent_deny_tools.is_empty() {
+        let deny = cfg
+            .agent_deny_tools
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<&str>>();
+        tools.retain(|tool| !deny.contains(tool.name()));
+    }
+
+    let mcp_tool_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .filter(|name| discovered_mcp_tool_names.contains(name))
+        .collect::<BTreeSet<String>>();
+
     tracing::info!(
         built_in_tools = built_in_count,
         mcp_tools = mcp_count,
         total_tools = tools.len(),
+        agent_allow_tools = cfg.agent_allow_tools.len(),
+        agent_deny_tools = cfg.agent_deny_tools.len(),
         "Resolved runtime toolset"
     );
 
@@ -4363,11 +4874,16 @@ fn build_workflow_agent(
     tools: &[Arc<dyn Tool>],
     tool_confirmation_policy: ToolConfirmationPolicy,
     tool_timeout: Duration,
+    runtime_cfg: Option<&RuntimeConfig>,
 ) -> Result<Arc<dyn Agent>> {
     match mode {
-        WorkflowMode::Single => {
-            build_single_agent_with_tools(model, tools, tool_confirmation_policy, tool_timeout)
-        }
+        WorkflowMode::Single => build_single_agent_with_tools(
+            model,
+            tools,
+            tool_confirmation_policy,
+            tool_timeout,
+            runtime_cfg,
+        ),
         WorkflowMode::Sequential => build_sequential_agent(model),
         WorkflowMode::Parallel => build_parallel_agent(model),
         WorkflowMode::Loop => build_loop_agent(model, max_iterations),
@@ -4841,6 +5357,7 @@ async fn build_single_runner_for_chat(
         &runtime_tools.tools,
         tool_confirmation.policy.clone(),
         Duration::from_secs(cfg.tool_timeout_secs),
+        Some(cfg),
     )?;
     let runner = build_runner_with_session_service(
         agent,
@@ -6171,6 +6688,13 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.session_backend, cfg.session_id, cfg.app_name, cfg.user_id
     );
     println!(
+        "Agent: {} (source={}) model_override={} resources={}",
+        cfg.agent_name,
+        cfg.agent_source.label(),
+        cfg.model.as_deref().unwrap_or("<provider-default>"),
+        cfg.agent_resource_paths.len()
+    );
+    println!(
         "Retrieval: backend={:?}, doc_path={}, max_chunks={}, max_chars={}, min_score={}",
         cfg.retrieval_backend,
         cfg.retrieval_doc_path
@@ -6473,6 +6997,13 @@ mod tests {
         RuntimeConfig {
             profile: "default".to_string(),
             config_path: ".zavora/config.toml".to_string(),
+            agent_name: "default".to_string(),
+            agent_source: AgentSource::Implicit,
+            agent_description: Some("Built-in default assistant".to_string()),
+            agent_instruction: None,
+            agent_resource_paths: Vec::new(),
+            agent_allow_tools: Vec::new(),
+            agent_deny_tools: Vec::new(),
             provider: Provider::Auto,
             model: None,
             app_name: "test-app".to_string(),
@@ -6551,6 +7082,7 @@ mod tests {
         Cli {
             provider: Provider::Auto,
             model: None,
+            agent: None,
             profile: profile.to_string(),
             config_path: config_path.to_string(),
             app_name: None,
@@ -6665,6 +7197,7 @@ mod tests {
                     &build_builtin_tools(),
                     ToolConfirmationPolicy::Never,
                     Duration::from_secs(45),
+                    None,
                 )
                 .expect("workflow should build"),
                 &cfg,
@@ -7219,6 +7752,127 @@ retrieval_min_score = 2
             "default guardrail terms should include baseline sensitive markers"
         );
         assert_eq!(cfg.guardrail_redact_replacement, "[REDACTED]");
+    }
+
+    #[test]
+    fn agent_catalog_local_overrides_global_with_deterministic_precedence() {
+        let dir = tempdir().expect("temp directory should create");
+        let global = dir.path().join("global-agents.toml");
+        let local = dir.path().join("local-agents.toml");
+        std::fs::write(
+            &global,
+            r#"
+[agents.default]
+instruction = "global-default"
+
+[agents.coder]
+model = "gpt-4o-mini"
+"#,
+        )
+        .expect("global agent catalog should write");
+        std::fs::write(
+            &local,
+            r#"
+[agents.default]
+instruction = "local-default"
+
+[agents.reviewer]
+model = "gpt-4.1"
+"#,
+        )
+        .expect("local agent catalog should write");
+
+        let paths = AgentPaths {
+            local_catalog: local,
+            global_catalog: Some(global),
+            selection_file: dir.path().join("selection.toml"),
+        };
+        let resolved = load_resolved_agents(&paths).expect("agents should load");
+
+        assert_eq!(
+            resolved
+                .get("default")
+                .and_then(|agent| agent.config.instruction.as_deref()),
+            Some("local-default")
+        );
+        assert_eq!(
+            resolved.get("default").map(|agent| agent.source),
+            Some(AgentSource::Local)
+        );
+        assert_eq!(
+            resolved
+                .get("coder")
+                .and_then(|agent| agent.config.model.as_deref()),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(
+            resolved.get("coder").map(|agent| agent.source),
+            Some(AgentSource::Global)
+        );
+        assert_eq!(
+            resolved
+                .get("reviewer")
+                .and_then(|agent| agent.config.model.as_deref()),
+            Some("gpt-4.1")
+        );
+    }
+
+    #[test]
+    fn runtime_config_applies_agent_overrides_for_model_prompt_and_tools() {
+        let cli = test_cli(".zavora/config.toml", "default");
+        let profiles = ProfilesFile::default();
+        let mut agents = implicit_agent_map();
+        agents.insert(
+            "coder".to_string(),
+            ResolvedAgent {
+                name: "coder".to_string(),
+                source: AgentSource::Local,
+                config: AgentFileConfig {
+                    description: Some("Coding optimized agent".to_string()),
+                    instruction: Some("Always propose minimal diffs.".to_string()),
+                    provider: Some(Provider::Openai),
+                    model: Some("gpt-4.1".to_string()),
+                    tool_confirmation_mode: Some(ToolConfirmationMode::Always),
+                    resource_paths: vec!["docs/CONTRIBUTING.md".to_string()],
+                    allow_tools: vec!["fs_read".to_string(), "fs_write".to_string()],
+                    deny_tools: vec!["execute_bash".to_string()],
+                },
+            },
+        );
+
+        let cfg = resolve_runtime_config_with_agents(&cli, &profiles, &agents, Some("coder"))
+            .expect("runtime config should resolve");
+        assert_eq!(cfg.agent_name, "coder");
+        assert_eq!(cfg.agent_source, AgentSource::Local);
+        assert_eq!(cfg.provider, Provider::Openai);
+        assert_eq!(cfg.model.as_deref(), Some("gpt-4.1"));
+        assert_eq!(cfg.tool_confirmation_mode, ToolConfirmationMode::Always);
+        assert_eq!(
+            cfg.agent_instruction.as_deref(),
+            Some("Always propose minimal diffs.")
+        );
+        assert_eq!(cfg.agent_resource_paths, vec!["docs/CONTRIBUTING.md"]);
+        assert_eq!(cfg.agent_allow_tools, vec!["fs_read", "fs_write"]);
+        assert_eq!(cfg.agent_deny_tools, vec!["execute_bash"]);
+    }
+
+    #[test]
+    fn resolve_active_agent_falls_back_to_default_when_selection_missing() {
+        let cli = test_cli(".zavora/config.toml", "default");
+        let agents = implicit_agent_map();
+        let selected = resolve_active_agent_name(&cli, &agents, Some("missing-agent"))
+            .expect("missing persisted selection should fall back");
+        assert_eq!(selected, "default");
+    }
+
+    #[test]
+    fn resolve_active_agent_reports_missing_explicit_agent() {
+        let mut cli = test_cli(".zavora/config.toml", "default");
+        cli.agent = Some("missing-agent".to_string());
+        let agents = implicit_agent_map();
+        let err = resolve_active_agent_name(&cli, &agents, None)
+            .expect_err("explicit missing agent should fail");
+        assert!(err.to_string().contains("agent 'missing-agent' not found"));
     }
 
     #[test]

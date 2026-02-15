@@ -167,6 +167,46 @@ cargo run -- profiles list
 cargo run -- --profile ops profiles show
 ```
 
+## Agent Catalogs
+
+Agent behavior can be configured separately from profiles using agent catalogs.
+
+Catalog precedence:
+- implicit `default` agent (built in)
+- global catalog `~/.zavora/agents.toml`
+- local catalog `.zavora/agents.toml` (wins over global on name collisions)
+
+Active agent precedence:
+- `--agent <name>` (one-shot override)
+- persisted selection in `.zavora/agent-selection.toml`
+- fallback to `default`
+
+Example catalog:
+
+```toml
+[agents.default]
+description = "Default engineering assistant"
+instruction = "Be concise and deterministic."
+
+[agents.coder]
+description = "Code-focused assistant"
+provider = "openai"
+model = "gpt-4o-mini"
+tool_confirmation_mode = "always"
+resource_paths = ["docs/architecture.md", "docs/roadmap.md"]
+allow_tools = ["fs_read", "fs_write", "execute_bash", "github_ops.*"]
+deny_tools = ["execute_bash.rm_*"]
+```
+
+Inspect and select agents:
+
+```bash
+cargo run -- agents list
+cargo run -- agents show --name coder
+cargo run -- agents select --name coder
+cargo run -- --agent reviewer ask "Review this patch"
+```
+
 Sensitive runtime config handling:
 - `profiles show`, `doctor`, and `migrate` redact session DB URLs by default.
 - CLI errors and `command.failed` telemetry events redact sqlite URLs by default.
