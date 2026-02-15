@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::config::RuntimeConfig;
 use crate::retrieval::{RetrievalPolicy, RetrievalService, augment_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
-use crate::theme::Spinner;
+use crate::theme::{MarkdownRenderer, Spinner};
 
 pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
 
@@ -318,6 +318,7 @@ pub async fn run_prompt_streaming(
     let mut emitted_text_by_author: HashMap<String, String> = HashMap::new();
     let mut printed_any_output = false;
     let mut spinner = Some(Spinner::start("Thinking..."));
+    let mut md = MarkdownRenderer::new();
 
     while let Some(event_result) = stream.next().await {
         let event = event_result.context("runner returned event error")?;
@@ -339,7 +340,11 @@ pub async fn run_prompt_streaming(
             if let Some(s) = spinner.take() {
                 s.stop();
             }
-            print!("{delta}");
+            let rendered = md.push(&delta);
+            if !rendered.is_empty() {
+                print!("{rendered}");
+                io::stdout().flush().context("failed to flush stdout")?;
+            }
             io::stdout().flush().context("failed to flush stdout")?;
             emitted_text_by_author
                 .entry(event.author.clone())
@@ -351,6 +356,13 @@ pub async fn run_prompt_streaming(
 
     // Ensure spinner is stopped if stream ended without output
     drop(spinner);
+
+    // Flush any remaining partial line from the markdown renderer
+    let remaining = md.flush();
+    if !remaining.is_empty() {
+        print!("{remaining}");
+        io::stdout().flush().context("failed to flush stdout")?;
+    }
 
     if printed_any_output {
         if let (Some(final_text), Some(final_author)) = (

@@ -328,3 +328,170 @@ impl Drop for Spinner {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Streaming markdown renderer
+// ---------------------------------------------------------------------------
+
+/// Streaming-aware markdown renderer that buffers partial lines and renders
+/// complete lines with ANSI formatting as they arrive.
+pub struct MarkdownRenderer {
+    buf: String,
+    in_codeblock: bool,
+}
+
+impl MarkdownRenderer {
+    pub fn new() -> Self {
+        Self {
+            buf: String::new(),
+            in_codeblock: false,
+        }
+    }
+
+    /// Push a streaming delta. Returns rendered text ready to print.
+    pub fn push(&mut self, delta: &str) -> String {
+        self.buf.push_str(delta);
+        let mut output = String::new();
+
+        // Render all complete lines, keep the remainder
+        while let Some(pos) = self.buf.find('\n') {
+            let line = self.buf[..pos].to_string();
+            self.buf = self.buf[pos + 1..].to_string();
+            output.push_str(&self.render_line(&line));
+            output.push('\n');
+        }
+
+        output
+    }
+
+    /// Flush any remaining partial line.
+    pub fn flush(&mut self) -> String {
+        if self.buf.is_empty() {
+            return String::new();
+        }
+        let line = std::mem::take(&mut self.buf);
+        self.render_line(&line)
+    }
+
+    fn render_line(&mut self, line: &str) -> String {
+        let trimmed = line.trim();
+
+        // Code block toggle
+        if trimmed.starts_with("```") {
+            if self.in_codeblock {
+                self.in_codeblock = false;
+                return format!("{RESET}");
+            } else {
+                self.in_codeblock = true;
+                let lang = trimmed.trim_start_matches('`').trim();
+                if lang.is_empty() {
+                    return format!("{GREEN}");
+                } else {
+                    return format!("{BOLD}{lang}{RESET}\n{GREEN}");
+                }
+            }
+        }
+
+        // Inside code block — pass through in green (already set)
+        if self.in_codeblock {
+            return line.to_string();
+        }
+
+        // Horizontal rule
+        if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
+            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c == ' ')
+            && trimmed.len() >= 3
+        {
+            return format!("{DIM}{}━{RESET}", "━".repeat(68));
+        }
+
+        // Heading
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            return format!("{BOLD}{}{RESET}", render_inline(rest));
+        }
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            return format!("{BOLD}{}{RESET}", render_inline(rest));
+        }
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return format!("{BOLD}{}{RESET}", render_inline(rest));
+        }
+
+        // Bullet list
+        if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            let indent = line.len() - line.trim_start().len();
+            return format!("{}• {}", " ".repeat(indent), render_inline(rest));
+        }
+
+        // Blockquote
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            return format!("{DIM}│{RESET} {}", render_inline(rest));
+        }
+
+        // Regular line with inline formatting
+        render_inline(line)
+    }
+}
+
+/// Render inline markdown: **bold**, `code`, *italic*
+fn render_inline(text: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // **bold**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = find_closing(&chars, i + 2, &['*', '*']) {
+                out.push_str(BOLD);
+                out.extend(&chars[i + 2..end]);
+                out.push_str(RESET);
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // `code`
+        if chars[i] == '`' {
+            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '`') {
+                let end = i + 1 + end;
+                out.push_str(GREEN);
+                out.extend(&chars[i + 1..end]);
+                out.push_str(RESET);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // *italic* (single star, not double)
+        if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '*') {
+                let end = i + 1 + end;
+                out.push_str("\x1b[3m"); // italic
+                out.extend(&chars[i + 1..end]);
+                out.push_str(RESET);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Find closing delimiter (e.g. `**`) starting from position.
+fn find_closing(chars: &[char], start: usize, delim: &[char]) -> Option<usize> {
+    let dlen = delim.len();
+    if start + dlen > chars.len() {
+        return None;
+    }
+    for i in start..chars.len() - dlen + 1 {
+        if chars[i..i + dlen] == *delim {
+            return Some(i);
+        }
+    }
+    None
+}

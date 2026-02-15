@@ -902,7 +902,11 @@ pub async fn run_chat(
                     continue;
                 }
             };
-            println!("{answer}");
+            let mut md = crate::theme::MarkdownRenderer::new();
+            let rendered = md.push(&answer);
+            let flushed = md.flush();
+            print!("{rendered}{flushed}");
+            println!();
         } else {
             let answer = run_prompt_streaming_with_retrieval(
                 &runner,
