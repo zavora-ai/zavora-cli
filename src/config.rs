@@ -106,6 +106,8 @@ impl AgentSource {
     }
 }
 
+use crate::hooks::HookConfig;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentFileConfig {
@@ -120,6 +122,8 @@ pub struct AgentFileConfig {
     pub allow_tools: Vec<String>,
     #[serde(default)]
     pub deny_tools: Vec<String>,
+    #[serde(default)]
+    pub hooks: HashMap<String, Vec<HookConfig>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -256,6 +260,7 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
                 resource_paths: Vec::new(),
                 allow_tools: Vec::new(),
                 deny_tools: Vec::new(),
+                hooks: HashMap::new(),
             },
         },
     );
