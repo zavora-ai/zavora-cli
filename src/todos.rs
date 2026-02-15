@@ -178,12 +178,13 @@ pub fn format_todos_summary(workspace: &Path) -> Result<String> {
 // Delegate (experimental)
 // ---------------------------------------------------------------------------
 
-/// A delegate request to run an isolated sub-agent task.
-#[derive(Debug, Clone)]
-pub struct DelegateRequest {
-    pub task: String,
-    pub session_id: String,
-}
+use adk_session::SessionService;
+use std::sync::Arc;
+
+use crate::config::RuntimeConfig;
+use crate::runner::{ResolvedRuntimeTools, ToolConfirmationSettings, build_single_runner_for_chat};
+use crate::streaming::run_prompt;
+use crate::telemetry::TelemetrySink;
 
 /// Result of a delegate run.
 #[derive(Debug, Clone)]
@@ -202,5 +203,57 @@ impl DelegateResult {
             "[{status}] Delegate '{}' (session: {})\n{}",
             self.task, self.session_id, self.output
         )
+    }
+}
+
+/// Run a delegate task in an isolated session.
+pub async fn run_delegate(
+    task: &str,
+    cfg: &RuntimeConfig,
+    session_service: Arc<dyn SessionService>,
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
+) -> DelegateResult {
+    let delegate_session_id = format!("delegate-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis());
+
+    // Build an isolated config with a separate session
+    let mut delegate_cfg = cfg.clone();
+    delegate_cfg.session_id = delegate_session_id.clone();
+
+    match build_single_runner_for_chat(
+        &delegate_cfg,
+        session_service,
+        runtime_tools,
+        tool_confirmation,
+        telemetry,
+    )
+    .await
+    {
+        Ok((runner, _, _)) => {
+            match run_prompt(&runner, &delegate_cfg, task, telemetry).await {
+                Ok(output) => DelegateResult {
+                    task: task.to_string(),
+                    session_id: delegate_session_id,
+                    output,
+                    success: true,
+                },
+                Err(e) => DelegateResult {
+                    task: task.to_string(),
+                    session_id: delegate_session_id,
+                    output: format!("Error: {e}"),
+                    success: false,
+                },
+            }
+        }
+        Err(e) => DelegateResult {
+            task: task.to_string(),
+            session_id: delegate_session_id,
+            output: format!("Failed to build delegate runner: {e}"),
+            success: false,
+        },
     }
 }

@@ -8,6 +8,8 @@
 use adk_rust::Event;
 use adk_session::SessionService;
 use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::RuntimeConfig;
@@ -18,7 +20,7 @@ use crate::session::ensure_session_exists;
 // ---------------------------------------------------------------------------
 
 /// A saved snapshot of conversation events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub tag: usize,
     pub label: String,
@@ -26,8 +28,8 @@ pub struct Checkpoint {
     pub events: Vec<Event>,
 }
 
-/// In-memory store of conversation checkpoints.
-#[derive(Debug, Default)]
+/// Persistent store of conversation checkpoints.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CheckpointStore {
     checkpoints: Vec<Checkpoint>,
     next_tag: usize,
@@ -109,6 +111,32 @@ impl CheckpointStore {
             result.extend_from_slice(&current_events[tail_start..]);
         }
         Some(result)
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistence
+    // -----------------------------------------------------------------------
+
+    /// Save the checkpoint store to disk.
+    pub fn save_to_disk(&self, workspace: &Path) -> Result<()> {
+        let dir = workspace.join(".zavora");
+        std::fs::create_dir_all(&dir).context("failed to create .zavora directory")?;
+        let path = dir.join("checkpoints.json");
+        let json = serde_json::to_string_pretty(self).context("failed to serialize checkpoints")?;
+        std::fs::write(&path, json).context("failed to write checkpoints file")?;
+        Ok(())
+    }
+
+    /// Load the checkpoint store from disk, or return a new empty store.
+    pub fn load_from_disk(workspace: &Path) -> Self {
+        let path = workspace.join(".zavora").join("checkpoints.json");
+        if !path.exists() {
+            return Self::default();
+        }
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
     }
 }
 

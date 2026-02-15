@@ -24,7 +24,7 @@ use crate::checkpoint::{
     CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
 };
 use crate::compact::{CompactStrategy, compact_session};
-use crate::context::ContextUsage;
+use crate::context::{ContextUsage, compute_context_usage};
 use crate::tool_policy::matches_wildcard;
 use crate::todos;
 use crate::theme::{build_prompt, suggest_command, is_first_run, print_onboarding};
@@ -611,8 +611,17 @@ pub async fn dispatch_chat_command(
                 println!("Usage: /delegate <task description>");
                 println!("(experimental) Runs an isolated sub-agent prompt.");
             } else {
-                println!("[experimental] Delegate is not yet wired to a sub-agent runner.");
-                println!("Task queued: {}", task.trim());
+                println!("[experimental] Running delegate task...");
+                let result = todos::run_delegate(
+                    task.trim(),
+                    cfg,
+                    session_service.clone(),
+                    runtime_tools,
+                    tool_confirmation,
+                    telemetry,
+                )
+                .await;
+                print!("{}", result.format_display());
             }
             Ok(ChatCommandAction::Continue)
         }
@@ -777,7 +786,6 @@ pub async fn run_chat(
     }
     let stdin = io::stdin();
     let mut line = String::new();
-    let mut checkpoint_store = CheckpointStore::new();
 
     // First-run onboarding
     let workspace = std::env::current_dir().unwrap_or_default();
@@ -785,8 +793,18 @@ pub async fn run_chat(
         print_onboarding();
     }
 
+    let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
+
     loop {
-        let prompt = build_prompt(&checkpoint_store, None);
+        // Compute context usage from live session data
+        let context_usage = match snapshot_session_events(&session_service, &cfg).await {
+            Ok(events) => {
+                let provider_str = format!("{:?}", resolved_provider).to_ascii_lowercase();
+                Some(compute_context_usage(&events, &provider_str))
+            }
+            Err(_) => None,
+        };
+        let prompt = build_prompt(&checkpoint_store, context_usage.as_ref());
         print!("{prompt}");
         io::stdout().flush().context("failed to flush stdout")?;
         line.clear();
@@ -827,10 +845,12 @@ pub async fn run_chat(
                     &runtime_tools,
                     &tool_confirmation,
                     telemetry,
-                    None, // context usage computed on demand in future
+                    context_usage.as_ref(),
                     &mut checkpoint_store,
                 )
                 .await?;
+                // Persist checkpoint store after any command that may mutate it
+                let _ = checkpoint_store.save_to_disk(&workspace);
                 if matches!(action, ChatCommandAction::Exit) {
                     break;
                 }

@@ -122,3 +122,69 @@ pub enum BudgetLevel {
     Warning,
     Critical,
 }
+
+// ---------------------------------------------------------------------------
+// Compute from session events
+// ---------------------------------------------------------------------------
+
+use adk_rust::Event;
+
+/// Build a `ContextUsage` snapshot from session events and provider name.
+pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
+    let mut user_chars = 0usize;
+    let mut assistant_chars = 0usize;
+    let mut tool_chars = 0usize;
+    let mut system_chars = 0usize;
+
+    for event in events {
+        let text_len = event
+            .llm_response
+            .content
+            .as_ref()
+            .map(|c| {
+                c.parts
+                    .iter()
+                    .map(|p| match p {
+                        adk_rust::Part::Text { text } => text.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+
+        match event.author.as_str() {
+            "user" => user_chars += text_len,
+            "system" => system_chars += text_len,
+            _ => {
+                // Check if this event has tool-related content (function calls/responses)
+                let has_tool_parts = event
+                    .llm_response
+                    .content
+                    .as_ref()
+                    .map(|c| {
+                        c.parts.iter().any(|p| {
+                            matches!(
+                                p,
+                                adk_rust::Part::FunctionCall { .. }
+                                    | adk_rust::Part::FunctionResponse { .. }
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+                if has_tool_parts {
+                    tool_chars += text_len;
+                } else {
+                    assistant_chars += text_len;
+                }
+            }
+        }
+    }
+
+    ContextUsage {
+        user_chars,
+        assistant_chars,
+        tool_chars,
+        system_chars,
+        context_window_tokens: default_context_window(provider),
+    }
+}
