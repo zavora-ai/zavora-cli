@@ -280,6 +280,24 @@ Example payloads used by the agent:
 - Create: `{ "path": "docs/new.md", "mode": "create", "content": "..." }`
 - Patch: `{ "path": "README.md", "mode": "patch", "patch": { "find": "old", "replace": "new" } }`
 
+## Shell Execution Tool (`execute_bash`)
+
+`execute_bash` is a built-in shell execution tool with policy controls:
+
+- Read-only commands are auto-allowed (for example `ls`, `cat`, `rg`, `git status`, `git diff`)
+- Blocked dangerous patterns are denied by default
+- Dangerous overrides require both `allow_dangerous=true` and `approved=true`
+- Non-read-only commands require `approved=true`
+- Supports per-call timeout/retry controls:
+  - `timeout_secs`
+  - `retry_attempts`
+  - `retry_delay_ms`
+  - `max_output_chars`
+
+Example payload:
+- `{ "command": "git status", "approved": false }`
+- `{ "command": "cargo test", "approved": true, "timeout_secs": 60, "retry_attempts": 2 }`
+
 ## Telemetry Baseline and Reporting
 
 Structured telemetry is enabled by default and written as JSONL.
