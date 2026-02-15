@@ -20,6 +20,7 @@ use crate::runner::{
 use crate::session::build_session_service;
 use crate::streaming::{run_prompt_with_retrieval, run_prompt_streaming_with_retrieval};
 use crate::telemetry::TelemetrySink;
+use crate::context::ContextUsage;
 use crate::tool_policy::matches_wildcard;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
@@ -429,6 +430,7 @@ pub async fn dispatch_chat_command(
     runtime_tools: &ResolvedRuntimeTools,
     tool_confirmation: &ToolConfirmationSettings,
     telemetry: &TelemetrySink,
+    context_usage: Option<&ContextUsage>,
 ) -> Result<ChatCommandAction> {
     match command {
         ChatCommand::Exit => Ok(ChatCommandAction::Exit),
@@ -444,7 +446,11 @@ pub async fn dispatch_chat_command(
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Usage => {
-            print_chat_usage();
+            if let Some(usage) = context_usage {
+                print!("{}", usage.format_usage());
+            } else {
+                print_chat_usage();
+            }
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Tools => {
@@ -645,6 +651,7 @@ pub async fn run_chat(
                     &runtime_tools,
                     &tool_confirmation,
                     telemetry,
+                    None, // context usage computed on demand in future
                 )
                 .await?;
                 if matches!(action, ChatCommandAction::Exit) {
