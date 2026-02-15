@@ -14,9 +14,9 @@
 | 2. Create feature branch | ✅ Done | `feat/project-optimisation` |
 | 3. Create docs/PROJECT_OPTIMISATION.md | ✅ Done | Full optimization plan document |
 | 4. Apply targeted code fixes | ✅ Done | Committed as `cadc73a`, 80 tests pass |
-| 5. Split main.rs into modules | ⬜ Not started | Next step |
-| 6. Verify compilation and tests | ⬜ Not started | After module split |
-| 7. Commit all changes | ⬜ Not started | Final step |
+| 5. Split main.rs into modules | ✅ Done | Committed as `dc3d249`, 26 files changed |
+| 6. Verify compilation and tests | ✅ Done | 80 tests pass, 0 warnings, clean build |
+| 7. Commit all changes | ✅ Done | All commits on `feat/project-optimisation` |
 
 ---
 
@@ -126,68 +126,70 @@ $ cargo test     → ✅ 80 passed, 0 failed, 0 ignored
 
 ---
 
-## Remaining Work
+## Completed: Module Split (Step 5)
 
-### Step 5: Module Split (NOT STARTED)
+Committed as `dc3d249`. Split the 9,032-line `src/main.rs` into 20 focused modules:
 
-This is the largest remaining task. The plan from `docs/PROJECT_OPTIMISATION.md` calls for splitting the 8,911-line `src/main.rs` into ~20 focused module files with a `src/lib.rs` declaring all modules.
-
-Target module layout:
 ```
 src/
-├── main.rs          # Entry point: main(), run_cli()
-├── lib.rs           # Module declarations and re-exports
-├── cli.rs           # Cli, Commands, subcommand enums, ValueEnum types
-├── config.rs        # RuntimeConfig, ProfilesFile, ProfileConfig, resolution
-├── error.rs         # ErrorCategory, categorize_error, format_cli_error, redaction
-├── provider.rs      # detect_provider, resolve_model, validate_model_for_provider
-├── session.rs       # Session service, CRUD commands, SQLite helpers
-├── runner.rs        # build_runner variants, resolve_runtime_tools, tool confirmation
-├── tools/
-│   ├── mod.rs       # build_builtin_tools, shared types, workspace path policy
-│   ├── fs_read.rs   # FsReadRequest, fs_read_tool_response
-│   ├── fs_write.rs  # FsWriteRequest, fs_write_tool_response
-│   ├── execute_bash.rs  # ExecuteBashRequest, policy, execute_bash_tool_response
-│   └── github_ops.rs   # GitHub CLI operations, auth preflight
-├── workflow.rs      # Workflow agents, route classifier, templates
-├── retrieval.rs     # RetrievalService trait, local/semantic backends
-├── mcp.rs           # MCP server selection, auth, tool discovery
-├── server.rs        # Axum server, handlers, runner cache, auth
-├── chat.rs          # Interactive chat, slash commands, model picker
-├── streaming.rs     # AuthorTextTracker, text dedup, stream suffix
-├── telemetry.rs     # TelemetrySink, TelemetrySummary, report
-├── guardrail.rs     # Guardrail modes, term matching, apply_guardrail
-├── eval.rs          # Eval dataset, harness, benchmark, report
-├── doctor.rs        # run_doctor, run_migrate
-├── profiles.rs      # run_profiles_list, run_profiles_show
-└── agents.rs        # Agent catalog, selection, list/show/select
+├── main.rs              (359 lines)  Entry point + command dispatch
+├── lib.rs               (22 lines)   Module declarations
+├── cli.rs               (395 lines)  CLI types, command enums, ValueEnum types
+├── config.rs            (546 lines)  RuntimeConfig, ProfilesFile, resolution
+├── error.rs             (132 lines)  ErrorCategory, format_cli_error, redaction
+├── telemetry.rs         (229 lines)  TelemetrySink, TelemetrySummary, report
+├── guardrail.rs         (167 lines)  Guardrail modes, term matching, apply
+├── eval.rs              (316 lines)  Eval dataset, harness, benchmark, report
+├── retrieval.rs         (258 lines)  RetrievalService trait, backends, augment
+├── provider.rs          (149 lines)  detect_provider, resolve_model, validate
+├── streaming.rs         (391 lines)  AuthorTextTracker, text dedup, run_prompt
+├── mcp.rs               (258 lines)  MCP discovery, server selection
+├── session.rs           (345 lines)  Session CRUD, SQLite helpers
+├── runner.rs            (314 lines)  build_runner variants, tool confirmation
+├── workflow.rs          (446 lines)  Workflow agents, route classifier, templates
+├── server.rs            (453 lines)  Axum server, handlers, cache, auth
+├── chat.rs              (678 lines)  Interactive chat, slash commands, model picker
+├── doctor.rs            (112 lines)  run_doctor, run_migrate
+├── profiles.rs          (97 lines)   run_profiles_list, run_profiles_show
+├── agents.rs            (131 lines)  Agent catalog list/show/select
+├── tools/mod.rs         (82 lines)   build_builtin_tools, tool registration
+├── tools/fs_read.rs     (360 lines)  FsReadRequest, workspace policy
+├── tools/fs_write.rs    (410 lines)  FsWriteRequest, patch mode
+├── tools/execute_bash.rs(358 lines)  ExecuteBashRequest, policy
+├── tools/github_ops.rs  (323 lines)  GitHub CLI operations
+└── tests.rs             (1954 lines) All 80 tests
 ```
 
-Key considerations for the split:
-- Most types need `pub(crate)` visibility
-- `RuntimeConfig`, `Provider`, `SessionBackend`, `GuardrailMode`, `ToolConfirmationMode`, `RetrievalBackend`, `WorkflowMode` are used across many modules — they live in `cli.rs` and `config.rs`
-- `TelemetrySink` is passed to nearly every command — lives in `telemetry.rs`
-- Workspace path policy (`enforce_workspace_path_policy`, `fs_read_workspace_root`) is shared between `fs_read` and `fs_write` — lives in `tools/mod.rs`
-- Tests should move to their respective modules as `#[cfg(test)] mod tests { ... }`
-- The `#[cfg(test)] fn resolve_runtime_config()` helper is used by many config tests — stays in `config.rs`
+Total: 9,285 lines across 26 files.
 
-### Step 6: Verify compilation and tests
-After module split, run `cargo check`, `cargo test`, `cargo clippy`.
+## Verification (Step 6)
 
-### Step 7: Commit
-Commit the targeted fixes and module split as separate commits:
-1. `feat: apply targeted code fixes from project review` (the current uncommitted changes)
-2. `refactor: split main.rs into focused modules` (the module split)
+```
+$ cargo build    → ✅ Clean (0 errors, 0 warnings)
+$ cargo check    → ✅ Clean (0 errors, 0 warnings)
+$ cargo test     → ✅ 80 passed, 0 failed, 0 ignored
+```
 
----
+## Commit History on `feat/project-optimisation`
 
-## Files Modified (Uncommitted)
-
-| File | Change Type |
+| Commit | Message |
 |---|---|
-| `docs/PROGRESS.md` | Created (this file) |
+| `dc3d249` | refactor: split monolithic main.rs into 20 focused modules |
+| `bd6e363` | docs: add detailed implementation progress tracker |
+| `cadc73a` | feat: apply targeted code fixes from project review |
+| `da2770d` | chore: add async_trait import and tool_aliases field to McpServerConfig |
 
-## Files Modified (Committed in `cadc73a`)
+## Files Modified
+
+### Committed in `dc3d249` (module split)
+
+26 files changed, 9,252 insertions, 8,999 deletions:
+- `src/main.rs` — rewritten as thin entry point
+- 20 new module files created (see layout above)
+- `src/tools/` directory with 5 files
+- `src/tests.rs` — all 80 tests extracted
+
+### Committed in `cadc73a` (code fixes)
 
 | File | Change Type |
 |---|---|
