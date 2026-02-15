@@ -122,7 +122,7 @@ pub fn print_startup_banner(provider: &str, model: &str) {
     draw_tip_box("💡 Tip", &tips[idx]);
 
     println!(
-        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
+        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/agent{RESET} {DIM}agent mode{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
     );
     println!("  {DIM}{}━{RESET}", "━".repeat(term_width().min(120).saturating_sub(4)));
     println!();
