@@ -108,6 +108,9 @@ pub fn build_single_agent_with_tools(
              FOR COMPLEX TASKS: Break into steps, execute each one, report results.\n\
              FOR ANALYSIS/REVIEW: Be thorough — examine deeply, consider edge cases, provide \
              actionable recommendations.\n\
+             AFTER TOOL USE: When you've already written files or executed commands via tools, \
+             do NOT repeat the file contents or command output in your response. The user already \
+             saw the diffs and results. Just summarize what was done in 1-2 sentences.\n\
              ALWAYS: Use markdown code blocks with language tags. Don't use headers unless \
              multi-step. Don't bold excessively. Bullet points only for genuinely parallel items.\n\
              </response_format>\n\
