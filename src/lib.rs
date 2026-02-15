@@ -24,6 +24,7 @@ pub mod chat;
 pub mod doctor;
 pub mod profiles;
 pub mod agents;
+pub mod benchmark;
 
 #[cfg(test)]
 mod tests;
