@@ -189,7 +189,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
-  - In chat, use /provider <name>, /model <id>, and /status for in-session switching.";
+  - In chat, use /help for command discovery and /provider, /model, /tools, /mcp, /usage, /status.";
 
 #[derive(Debug, Parser)]
 #[command(name = "zavora-cli")]
@@ -3695,6 +3695,350 @@ async fn run_prompt_with_retrieval(
     run_prompt(runner, cfg, &enriched, telemetry).await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatCommand {
+    Exit,
+    Status,
+    Help,
+    Tools,
+    Mcp,
+    Usage,
+    Provider(String),
+    Model(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedChatCommand {
+    NotACommand,
+    Command(ChatCommand),
+    MissingArgument { usage: &'static str },
+    UnknownCommand(String),
+}
+
+fn parse_chat_command(input: &str) -> ParsedChatCommand {
+    let trimmed = input.trim();
+
+    if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("/exit") {
+        return ParsedChatCommand::Command(ChatCommand::Exit);
+    }
+
+    if !trimmed.starts_with('/') {
+        return ParsedChatCommand::NotACommand;
+    }
+
+    let slashless = trimmed.trim_start_matches('/');
+    if slashless.is_empty() {
+        return ParsedChatCommand::UnknownCommand("/".to_string());
+    }
+
+    let mut parts = slashless.splitn(2, char::is_whitespace);
+    let command = parts
+        .next()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let arg = parts.next().map(str::trim).unwrap_or_default();
+
+    match command.as_str() {
+        "exit" => ParsedChatCommand::Command(ChatCommand::Exit),
+        "status" => ParsedChatCommand::Command(ChatCommand::Status),
+        "help" => ParsedChatCommand::Command(ChatCommand::Help),
+        "tools" => ParsedChatCommand::Command(ChatCommand::Tools),
+        "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
+        "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
+        "provider" => {
+            if arg.is_empty() {
+                ParsedChatCommand::MissingArgument {
+                    usage: "/provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>",
+                }
+            } else {
+                ParsedChatCommand::Command(ChatCommand::Provider(arg.to_string()))
+            }
+        }
+        "model" => {
+            if arg.is_empty() {
+                ParsedChatCommand::MissingArgument {
+                    usage: "/model <model-id>",
+                }
+            } else {
+                ParsedChatCommand::Command(ChatCommand::Model(arg.to_string()))
+            }
+        }
+        other => ParsedChatCommand::UnknownCommand(format!("/{other}")),
+    }
+}
+
+fn print_chat_help() {
+    println!("Chat commands:");
+    println!("- /help: show command quick reference");
+    println!("- /status: show active profile/provider/model/session");
+    println!("- /provider <name>: switch provider and rebuild runtime");
+    println!("- /model <id>: switch model within current provider");
+    println!("- /tools: show active built-in/MCP tools and confirmation policy");
+    println!("- /mcp: show MCP server and tool summary");
+    println!("- /usage: show usage examples");
+    println!("- /exit: end interactive chat");
+}
+
+fn print_chat_usage() {
+    println!("Usage examples:");
+    println!("- Type plain text to send a prompt to the agent.");
+    println!("- /provider openai");
+    println!("- /model gpt-4o-mini");
+    println!("- /tools");
+    println!("- /mcp");
+    println!("- /status");
+    println!("- /exit");
+}
+
+fn print_chat_tools(
+    cfg: &RuntimeConfig,
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
+) {
+    let mut built_in_tools = Vec::<String>::new();
+    let mut mcp_tools = Vec::<String>::new();
+
+    for tool in &runtime_tools.tools {
+        let name = tool.name().to_string();
+        if runtime_tools.mcp_tool_names.contains(&name) {
+            mcp_tools.push(name);
+        } else {
+            built_in_tools.push(name);
+        }
+    }
+
+    built_in_tools.sort();
+    built_in_tools.dedup();
+    mcp_tools.sort();
+    mcp_tools.dedup();
+
+    let required_count = tool_confirmation
+        .run_config
+        .tool_confirmation_decisions
+        .len();
+    let approved_count = tool_confirmation
+        .run_config
+        .tool_confirmation_decisions
+        .values()
+        .filter(|decision| matches!(decision, ToolConfirmationDecision::Approve))
+        .count();
+
+    println!(
+        "Tools: total={} built_in={} mcp={}",
+        runtime_tools.tools.len(),
+        built_in_tools.len(),
+        mcp_tools.len()
+    );
+    println!("Tool confirmation mode: {:?}", cfg.tool_confirmation_mode);
+    println!(
+        "Confirmation decisions: required={} approved={} denied={}",
+        required_count,
+        approved_count,
+        required_count.saturating_sub(approved_count)
+    );
+    println!(
+        "Built-in tools: {}",
+        if built_in_tools.is_empty() {
+            "<none>".to_string()
+        } else {
+            built_in_tools.join(", ")
+        }
+    );
+    println!(
+        "MCP tools: {}",
+        if mcp_tools.is_empty() {
+            "<none>".to_string()
+        } else {
+            mcp_tools.join(", ")
+        }
+    );
+}
+
+fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools) {
+    let enabled_servers = cfg
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled.unwrap_or(true))
+        .count();
+    let mut server_names = cfg
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled.unwrap_or(true))
+        .map(|server| server.name.clone())
+        .collect::<Vec<String>>();
+    server_names.sort();
+
+    println!(
+        "MCP: configured_servers={} enabled_servers={} discovered_tools={}",
+        cfg.mcp_servers.len(),
+        enabled_servers,
+        runtime_tools.mcp_tool_names.len()
+    );
+    println!(
+        "Enabled MCP servers: {}",
+        if server_names.is_empty() {
+            "<none>".to_string()
+        } else {
+            server_names.join(", ")
+        }
+    );
+    println!(
+        "Discovered MCP tools: {}",
+        if runtime_tools.mcp_tool_names.is_empty() {
+            "<none>".to_string()
+        } else {
+            runtime_tools
+                .mcp_tool_names
+                .iter()
+                .cloned()
+                .collect::<Vec<String>>()
+                .join(", ")
+        }
+    );
+}
+
+enum ChatCommandAction {
+    Continue,
+    Exit,
+}
+
+async fn dispatch_chat_command(
+    command: ChatCommand,
+    cfg: &mut RuntimeConfig,
+    runner: &mut Runner,
+    resolved_provider: &mut Provider,
+    model_name: &mut String,
+    session_service: &Arc<dyn SessionService>,
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
+) -> Result<ChatCommandAction> {
+    match command {
+        ChatCommand::Exit => Ok(ChatCommandAction::Exit),
+        ChatCommand::Status => {
+            println!(
+                "profile={} provider={:?} model={} session_id={}",
+                cfg.profile, resolved_provider, model_name, cfg.session_id
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Help => {
+            print_chat_help();
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Usage => {
+            print_chat_usage();
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Tools => {
+            print_chat_tools(cfg, runtime_tools, tool_confirmation);
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Mcp => {
+            print_chat_mcp(cfg, runtime_tools);
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Provider(provider_name) => {
+            let new_provider = parse_provider_name(&provider_name)?;
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.provider = new_provider;
+            switched_cfg.model = None;
+
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                runtime_tools,
+                tool_confirmation,
+                telemetry,
+            )
+            .await
+            {
+                Ok((new_runner, new_resolved_provider, new_model_name)) => {
+                    *runner = new_runner;
+                    *resolved_provider = new_resolved_provider;
+                    *model_name = new_model_name;
+                    telemetry.emit(
+                        "chat.provider_switched",
+                        json!({
+                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                            "model": model_name.clone()
+                        }),
+                    );
+                    switched_cfg.provider = *resolved_provider;
+                    switched_cfg.model = Some(model_name.clone());
+                    *cfg = switched_cfg;
+                    tracing::info!(
+                        provider = ?resolved_provider,
+                        model = %model_name,
+                        "Switched model provider"
+                    );
+                    println!(
+                        "Switched provider to {:?} (model={}). Session continuity preserved.",
+                        resolved_provider, model_name
+                    );
+                }
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
+                    println!(
+                        "Provider remains {:?} (model={}).",
+                        resolved_provider, model_name
+                    );
+                }
+            }
+
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Model(next_model) => {
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.model = Some(next_model.to_string());
+
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                runtime_tools,
+                tool_confirmation,
+                telemetry,
+            )
+            .await
+            {
+                Ok((new_runner, new_resolved_provider, new_model_name)) => {
+                    *runner = new_runner;
+                    *resolved_provider = new_resolved_provider;
+                    *model_name = new_model_name;
+                    telemetry.emit(
+                        "chat.model_switched",
+                        json!({
+                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                            "model": model_name.clone()
+                        }),
+                    );
+                    switched_cfg.provider = *resolved_provider;
+                    switched_cfg.model = Some(model_name.clone());
+                    *cfg = switched_cfg;
+                    tracing::info!(
+                        provider = ?resolved_provider,
+                        model = %model_name,
+                        "Switched model"
+                    );
+                    println!(
+                        "Switched model to '{}' on provider {:?}. Session continuity preserved.",
+                        model_name, resolved_provider
+                    );
+                }
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
+                    println!(
+                        "Model remains '{}' on provider {:?}.",
+                        model_name, resolved_provider
+                    );
+                }
+            }
+
+            Ok(ChatCommandAction::Continue)
+        }
+    }
+}
+
 async fn run_chat(
     mut cfg: RuntimeConfig,
     retrieval_service: Arc<dyn RetrievalService>,
@@ -3725,9 +4069,8 @@ async fn run_chat(
     );
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-    println!(
-        "Interactive mode started. Type /exit to quit. Use /provider <name> or /model <id> to switch runtime."
-    );
+    println!("Interactive mode started. Type /help for commands or /exit to quit.");
+    println!("Quick start: /provider <name>, /model <id>, /tools, /mcp, /usage.");
     if buffered_output_required(cfg.guardrail_output_mode) {
         println!(
             "Guardrail output mode {:?} active: chat will buffer model responses before printing.",
@@ -3752,114 +4095,34 @@ async fn run_chat(
             continue;
         }
 
-        if input.eq_ignore_ascii_case("/status") {
-            println!(
-                "profile={} provider={:?} model={} session_id={}",
-                cfg.profile, resolved_provider, model_name, cfg.session_id
-            );
-            continue;
-        }
-
-        if let Some(rest) = input.strip_prefix("/provider") {
-            let provider_name = rest.trim();
-            if provider_name.is_empty() {
-                println!("Usage: /provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>");
+        match parse_chat_command(input) {
+            ParsedChatCommand::NotACommand => {}
+            ParsedChatCommand::MissingArgument { usage } => {
+                println!("Usage: {usage}");
                 continue;
             }
-
-            let new_provider = parse_provider_name(provider_name)?;
-            let mut switched_cfg = cfg.clone();
-            switched_cfg.provider = new_provider;
-            switched_cfg.model = None;
-
-            match build_single_runner_for_chat(
-                &switched_cfg,
-                session_service.clone(),
-                &runtime_tools,
-                &tool_confirmation,
-                telemetry,
-            )
-            .await
-            {
-                Ok((new_runner, new_resolved_provider, new_model_name)) => {
-                    runner = new_runner;
-                    resolved_provider = new_resolved_provider;
-                    model_name = new_model_name;
-                    telemetry.emit(
-                        "chat.provider_switched",
-                        json!({
-                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
-                            "model": model_name.clone()
-                        }),
-                    );
-                    switched_cfg.provider = new_resolved_provider;
-                    switched_cfg.model = Some(model_name.clone());
-                    cfg = switched_cfg;
-                    tracing::info!(provider = ?resolved_provider, model = %model_name, "Switched model provider");
-                    println!(
-                        "Switched provider to {:?} (model={}). Session continuity preserved.",
-                        resolved_provider, model_name
-                    );
-                }
-                Err(err) => {
-                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
-                    println!(
-                        "Provider remains {:?} (model={}).",
-                        resolved_provider, model_name
-                    );
-                }
-            }
-            continue;
-        }
-
-        if let Some(rest) = input.strip_prefix("/model") {
-            let next_model = rest.trim();
-            if next_model.is_empty() {
-                println!("Usage: /model <model-id>");
+            ParsedChatCommand::UnknownCommand(command) => {
+                println!("Unknown command '{command}'. Use /help.");
                 continue;
             }
-
-            let mut switched_cfg = cfg.clone();
-            switched_cfg.model = Some(next_model.to_string());
-
-            match build_single_runner_for_chat(
-                &switched_cfg,
-                session_service.clone(),
-                &runtime_tools,
-                &tool_confirmation,
-                telemetry,
-            )
-            .await
-            {
-                Ok((new_runner, new_resolved_provider, new_model_name)) => {
-                    runner = new_runner;
-                    resolved_provider = new_resolved_provider;
-                    model_name = new_model_name;
-                    telemetry.emit(
-                        "chat.model_switched",
-                        json!({
-                            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
-                            "model": model_name.clone()
-                        }),
-                    );
-                    switched_cfg.provider = new_resolved_provider;
-                    switched_cfg.model = Some(model_name.clone());
-                    cfg = switched_cfg;
-                    tracing::info!(provider = ?resolved_provider, model = %model_name, "Switched model");
-                    println!(
-                        "Switched model to '{}' on provider {:?}. Session continuity preserved.",
-                        model_name, resolved_provider
-                    );
+            ParsedChatCommand::Command(command) => {
+                let action = dispatch_chat_command(
+                    command,
+                    &mut cfg,
+                    &mut runner,
+                    &mut resolved_provider,
+                    &mut model_name,
+                    &session_service,
+                    &runtime_tools,
+                    &tool_confirmation,
+                    telemetry,
+                )
+                .await?;
+                if matches!(action, ChatCommandAction::Exit) {
+                    break;
                 }
-                Err(err) => {
-                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
-                    println!(
-                        "Model remains '{}' on provider {:?}.",
-                        model_name, resolved_provider
-                    );
-                }
+                continue;
             }
-            continue;
         }
 
         let guarded_input =
@@ -5516,6 +5779,58 @@ provider = "not-a-provider"
             err.to_string().contains(
                 "Supported values: auto, gemini, openai, anthropic, deepseek, groq, ollama"
             )
+        );
+    }
+
+    #[test]
+    fn chat_command_parser_recognizes_built_in_commands() {
+        assert_eq!(
+            parse_chat_command("/help"),
+            ParsedChatCommand::Command(ChatCommand::Help)
+        );
+        assert_eq!(
+            parse_chat_command("/TOOLS"),
+            ParsedChatCommand::Command(ChatCommand::Tools)
+        );
+        assert_eq!(
+            parse_chat_command("exit"),
+            ParsedChatCommand::Command(ChatCommand::Exit)
+        );
+        assert_eq!(
+            parse_chat_command("/provider openai"),
+            ParsedChatCommand::Command(ChatCommand::Provider("openai".to_string()))
+        );
+        assert_eq!(
+            parse_chat_command("/model gpt-4o-mini"),
+            ParsedChatCommand::Command(ChatCommand::Model("gpt-4o-mini".to_string()))
+        );
+    }
+
+    #[test]
+    fn chat_command_parser_reports_missing_arguments() {
+        assert_eq!(
+            parse_chat_command("/provider"),
+            ParsedChatCommand::MissingArgument {
+                usage: "/provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>"
+            }
+        );
+        assert_eq!(
+            parse_chat_command("/model"),
+            ParsedChatCommand::MissingArgument {
+                usage: "/model <model-id>"
+            }
+        );
+    }
+
+    #[test]
+    fn chat_command_parser_handles_unknown_and_non_command_inputs() {
+        assert_eq!(
+            parse_chat_command("/does-not-exist"),
+            ParsedChatCommand::UnknownCommand("/does-not-exist".to_string())
+        );
+        assert_eq!(
+            parse_chat_command("write a short story"),
+            ParsedChatCommand::NotACommand
         );
     }
 
