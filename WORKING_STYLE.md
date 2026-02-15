@@ -31,6 +31,11 @@ This document defines how Zavora CLI work is executed from Sprint 7 onward.
 - Add tests for behavior changes and policy logic.
 - Avoid exposing sensitive config values in user-facing output by default.
 - Prefer explicit feature toggles for experimental behavior.
+- Add doc comments for all public types and functions.
+- Reuse existing patterns from ADK-Rust and reference implementations before inventing new ones.
+- Keep token/context budget awareness in design — prefer char-based heuristics over external tokenizer dependencies.
+- Experimental features must be gated and clearly labeled in user-facing output.
+- Prefer simple state machines over complex orchestration for conversation features (tangent, checkpoint).
 
 ## Definition Of Done (Issue)
 
@@ -67,3 +72,10 @@ Additional checks when relevant:
 - State assumptions explicitly.
 - Use concrete dates and version numbers in plans/status reports.
 - If a command or automation behaves unexpectedly, report it and correct it before continuing.
+
+## Reference Projects
+
+When implementing new features, consult these reference projects for proven patterns:
+
+- **ADK-Rust** (`~/Developer/projects/adk-rust`): Core agent/tool/session abstractions. Use its traits and patterns directly.
+- **Amazon Q Developer CLI** (`~/Developer/reference/amazon-q-developer-cli`): Chat UX, hooks, checkpoints, tangent mode, todos, context management, token counting. Adapt patterns to zavora-cli's architecture without copying verbatim.
