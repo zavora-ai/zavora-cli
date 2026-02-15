@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod session;
 pub mod runner;
 pub mod tool_policy;
+pub mod todos;
 pub mod workflow;
 pub mod server;
 pub mod chat;

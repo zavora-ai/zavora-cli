@@ -26,6 +26,7 @@ use crate::checkpoint::{
 use crate::compact::{CompactStrategy, compact_session};
 use crate::context::ContextUsage;
 use crate::tool_policy::matches_wildcard;
+use crate::todos;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -35,8 +36,10 @@ pub enum ChatCommand {
     Mcp,
     Usage,
     Compact,
-    Checkpoint(String),  // subcommand + args: "save [label]", "list", "restore <tag>"
-    Tangent(String),     // "" (toggle), "tail"
+    Checkpoint(String),
+    Tangent(String),
+    Todos(String),
+    Delegate(String),
     Provider(String),
     Model(Option<String>),
 }
@@ -82,6 +85,8 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
         "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
         "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
+        "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
+        "delegate" => ParsedChatCommand::Command(ChatCommand::Delegate(arg.to_string())),
         "provider" => {
             if arg.is_empty() {
                 ParsedChatCommand::MissingArgument {
@@ -114,6 +119,8 @@ pub fn print_chat_help() {
     println!("- /compact: summarize conversation to free context space");
     println!("- /checkpoint save|list|restore: manage conversation snapshots");
     println!("- /tangent: enter/exit exploratory branch (tail: keep last exchange)");
+    println!("- /todos: view/delete/clear-finished task lists");
+    println!("- /delegate <task>: (experimental) run isolated sub-agent task");
     println!("- /exit: end interactive chat");
 }
 
@@ -556,6 +563,55 @@ pub async fn dispatch_chat_command(
                         }
                     }
                 }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Todos(sub) => {
+            let workspace = std::env::current_dir().unwrap_or_default();
+            let parts: Vec<&str> = sub.split_whitespace().collect();
+            match parts.first().map(|s| *s) {
+                Some("view") => {
+                    if let Some(id) = parts.get(1) {
+                        match todos::load_todo(&workspace, id) {
+                            Ok(todo) => print!("{}", todo.format_display()),
+                            Err(e) => eprintln!("Failed to load todo: {e}"),
+                        }
+                    } else {
+                        println!("Usage: /todos view <id>");
+                    }
+                }
+                Some("delete") => {
+                    if let Some(id) = parts.get(1) {
+                        match todos::delete_todo(&workspace, id) {
+                            Ok(()) => println!("Deleted todo '{id}'."),
+                            Err(e) => eprintln!("Failed to delete: {e}"),
+                        }
+                    } else {
+                        println!("Usage: /todos delete <id>");
+                    }
+                }
+                Some("clear-finished") => {
+                    match todos::clear_finished_todos(&workspace) {
+                        Ok(n) => println!("Cleared {n} finished todo list(s)."),
+                        Err(e) => eprintln!("Failed to clear: {e}"),
+                    }
+                }
+                _ => {
+                    match todos::format_todos_summary(&workspace) {
+                        Ok(summary) => print!("{summary}"),
+                        Err(e) => eprintln!("Failed to list todos: {e}"),
+                    }
+                }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Delegate(task) => {
+            if task.trim().is_empty() {
+                println!("Usage: /delegate <task description>");
+                println!("(experimental) Runs an isolated sub-agent prompt.");
+            } else {
+                println!("[experimental] Delegate is not yet wired to a sub-agent runner.");
+                println!("Task queued: {}", task.trim());
             }
             Ok(ChatCommandAction::Continue)
         }
