@@ -1,0 +1,79 @@
+{
+  "name": "retrieval-quality-baseline",
+  "version": "v1",
+  "description": "Deterministic retrieval quality checks for core planning, reliability, and tooling intents.",
+  "cases": [
+    {
+      "id": "release-plan",
+      "query": "release milestone acceptance criteria rollout",
+      "chunks": [
+        "Release plan template: milestones, acceptance criteria, rollout strategy, and rollback checklist.",
+        "Village history and tourism notes.",
+        "Unrelated shopping list."
+      ],
+      "required_terms": ["milestones", "acceptance", "rollout"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    },
+    {
+      "id": "risk-mitigation",
+      "query": "incident risk mitigation fallback",
+      "chunks": [
+        "Risk register guidance: mitigation actions, fallback owners, and incident response readiness.",
+        "Color palette ideas for branding.",
+        "Travel itinerary details."
+      ],
+      "required_terms": ["risk", "mitigation", "fallback"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    },
+    {
+      "id": "mcp-reliability",
+      "query": "mcp timeout retry policy",
+      "chunks": [
+        "MCP reliability policy includes timeout tuning, retry attempts, and backoff delay configuration.",
+        "Baking recipe notes.",
+        "Office seating chart."
+      ],
+      "required_terms": ["mcp", "timeout", "retry"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    },
+    {
+      "id": "telemetry-observability",
+      "query": "telemetry run_id command failed tool failed",
+      "chunks": [
+        "Telemetry schema captures run_id, command status, and tool failed events for observability.",
+        "Camping checklist details.",
+        "Coffee roast notes."
+      ],
+      "required_terms": ["run_id", "command", "failed"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    },
+    {
+      "id": "retrieval-budget",
+      "query": "retrieval max chunks max chars min score",
+      "chunks": [
+        "Retrieval policy controls max chunks, max chars budget, and minimum score threshold for prompt context.",
+        "Movie review snippets.",
+        "Holiday greetings."
+      ],
+      "required_terms": ["chunks", "chars", "score"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    },
+    {
+      "id": "provider-switching",
+      "query": "provider model switching session continuity",
+      "chunks": [
+        "Runtime switching keeps session continuity while changing provider and model configuration.",
+        "Board game strategy tips.",
+        "Gardening reminders."
+      ],
+      "required_terms": ["provider", "model", "session"],
+      "max_chunks": 2,
+      "min_term_matches": 3
+    }
+  ]
+}

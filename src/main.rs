@@ -21,7 +21,7 @@ use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::level_filters::LevelFilter;
 
@@ -130,6 +130,21 @@ enum TelemetryCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum EvalCommands {
+    #[command(about = "Run eval dataset and emit quality/benchmark report")]
+    Run {
+        #[arg(long)]
+        dataset: Option<String>,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        benchmark_iterations: usize,
+        #[arg(long, default_value_t = 0.80)]
+        fail_under: f64,
+    },
+}
+
 const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli ask \"Design a Rust CLI with release-based milestones\"\n\
   zavora-cli --provider openai --model gpt-4o-mini chat\n\
@@ -140,6 +155,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli mcp discover --server ops-tools\n\
   zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
   zavora-cli telemetry report --limit 2000\n\
+  zavora-cli eval run --benchmark-iterations 200 --fail-under 0.90\n\
 \n\
 Switching behavior:\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
@@ -271,6 +287,11 @@ enum Commands {
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommands,
+    },
+    #[command(about = "Evaluation harness and benchmark suite")]
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommands,
     },
 }
 
@@ -448,6 +469,9 @@ fn command_label(command: &Commands) -> String {
         },
         Commands::Telemetry { command } => match command {
             TelemetryCommands::Report { .. } => "telemetry.report".to_string(),
+        },
+        Commands::Eval { command } => match command {
+            EvalCommands::Run { .. } => "eval.run".to_string(),
         },
     }
 }
@@ -676,6 +700,313 @@ fn unix_ms_now() -> u128 {
         .as_millis()
 }
 
+const DEFAULT_EVAL_DATASET_PATH: &str = "evals/datasets/retrieval-baseline.v1.json";
+const DEFAULT_EVAL_OUTPUT_PATH: &str = ".zavora/evals/latest.json";
+
+#[derive(Debug, Deserialize)]
+struct EvalDataset {
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: String,
+    cases: Vec<EvalCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalCase {
+    id: String,
+    query: String,
+    chunks: Vec<String>,
+    #[serde(default)]
+    required_terms: Vec<String>,
+    #[serde(default = "default_eval_max_chunks")]
+    max_chunks: usize,
+    min_term_matches: Option<usize>,
+}
+
+fn default_eval_max_chunks() -> usize {
+    3
+}
+
+#[derive(Debug, Serialize)]
+struct EvalCaseReport {
+    id: String,
+    passed: bool,
+    required_terms: usize,
+    matched_terms: usize,
+    retrieved_chunks: usize,
+    top_score: usize,
+    avg_latency_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct EvalRunReport {
+    generated_at_unix_ms: u128,
+    dataset_name: String,
+    dataset_version: String,
+    dataset_description: String,
+    benchmark_iterations: usize,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    pass_rate: f64,
+    fail_under: f64,
+    passed_threshold: bool,
+    avg_latency_ms: f64,
+    p95_latency_ms: f64,
+    throughput_qps: f64,
+    case_reports: Vec<EvalCaseReport>,
+}
+
+fn load_eval_dataset(path: &str) -> Result<EvalDataset> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read eval dataset at '{}'", path))?;
+    let dataset = serde_json::from_str::<EvalDataset>(&content)
+        .with_context(|| format!("invalid eval dataset json at '{}'", path))?;
+    if dataset.cases.is_empty() {
+        return Err(anyhow::anyhow!(
+            "eval dataset '{}' has no cases; add at least one case",
+            path
+        ));
+    }
+    Ok(dataset)
+}
+
+fn normalize_eval_terms(raw_terms: &[String], query: &str) -> Vec<String> {
+    let mut terms = if raw_terms.is_empty() {
+        query_terms(query)
+    } else {
+        raw_terms
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<String>>()
+    };
+
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn percentile(values: &[f64], pct: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let pct = pct.clamp(0.0, 100.0);
+    let rank = ((pct / 100.0) * ((values.len() - 1) as f64)).round() as usize;
+    values[rank.min(values.len() - 1)]
+}
+
+fn round_metric(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn run_eval_harness(
+    dataset: &EvalDataset,
+    benchmark_iterations: usize,
+    fail_under: f64,
+) -> Result<EvalRunReport> {
+    let iterations = benchmark_iterations.max(1);
+    let suite_start = Instant::now();
+    let mut passed_cases = 0usize;
+    let mut latency_ms = Vec::<f64>::new();
+    let mut case_reports = Vec::<EvalCaseReport>::new();
+
+    for case in &dataset.cases {
+        if case.id.trim().is_empty() {
+            return Err(anyhow::anyhow!("eval dataset contains case with empty id"));
+        }
+        if case.query.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "eval case '{}' has empty query; each case must include query",
+                case.id
+            ));
+        }
+        if case.chunks.is_empty() {
+            return Err(anyhow::anyhow!(
+                "eval case '{}' has no chunks; each case must include retrieval corpus chunks",
+                case.id
+            ));
+        }
+
+        let retrieval = LocalFileRetrievalService {
+            chunks: case
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(idx, chunk)| RetrievedChunk {
+                    source: format!("eval:{}#{}", case.id, idx + 1),
+                    text: chunk.clone(),
+                    score: 0,
+                })
+                .collect::<Vec<RetrievedChunk>>(),
+        };
+
+        let case_start = Instant::now();
+        let mut retrieved = Vec::<RetrievedChunk>::new();
+        for _ in 0..iterations {
+            retrieved = retrieval.retrieve(&case.query, case.max_chunks.max(1))?;
+        }
+        let case_elapsed = case_start.elapsed();
+        let case_avg_latency_ms = (case_elapsed.as_secs_f64() * 1000.0) / (iterations as f64);
+        latency_ms.push(case_avg_latency_ms);
+
+        let terms = normalize_eval_terms(&case.required_terms, &case.query);
+        if terms.is_empty() {
+            return Err(anyhow::anyhow!(
+                "eval case '{}' produced no required terms; add required_terms or a richer query",
+                case.id
+            ));
+        }
+
+        let joined = retrieved
+            .iter()
+            .map(|chunk| chunk.text.to_ascii_lowercase())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let matched_terms = terms
+            .iter()
+            .filter(|term| joined.contains(term.as_str()))
+            .count();
+        let required_terms = terms.len();
+        let min_term_matches = case
+            .min_term_matches
+            .unwrap_or(required_terms)
+            .clamp(1, required_terms);
+        let passed = matched_terms >= min_term_matches;
+        if passed {
+            passed_cases += 1;
+        }
+
+        case_reports.push(EvalCaseReport {
+            id: case.id.clone(),
+            passed,
+            required_terms,
+            matched_terms,
+            retrieved_chunks: retrieved.len(),
+            top_score: retrieved
+                .first()
+                .map(|chunk| chunk.score)
+                .unwrap_or_default(),
+            avg_latency_ms: round_metric(case_avg_latency_ms),
+        });
+    }
+
+    let total_cases = dataset.cases.len();
+    let failed_cases = total_cases.saturating_sub(passed_cases);
+    let pass_rate = if total_cases == 0 {
+        0.0
+    } else {
+        passed_cases as f64 / total_cases as f64
+    };
+
+    let mut sorted_latencies = latency_ms.clone();
+    sorted_latencies.sort_by(|a, b| a.total_cmp(b));
+    let avg_latency_ms = if latency_ms.is_empty() {
+        0.0
+    } else {
+        latency_ms.iter().sum::<f64>() / latency_ms.len() as f64
+    };
+    let p95_latency_ms = percentile(&sorted_latencies, 95.0);
+
+    let suite_elapsed_secs = suite_start.elapsed().as_secs_f64();
+    let throughput_qps = if suite_elapsed_secs <= 0.0 {
+        0.0
+    } else {
+        (total_cases as f64 * iterations as f64) / suite_elapsed_secs
+    };
+
+    let passed_threshold = pass_rate >= fail_under.clamp(0.0, 1.0);
+    Ok(EvalRunReport {
+        generated_at_unix_ms: unix_ms_now(),
+        dataset_name: dataset.name.clone(),
+        dataset_version: dataset.version.clone(),
+        dataset_description: dataset.description.clone(),
+        benchmark_iterations: iterations,
+        total_cases,
+        passed_cases,
+        failed_cases,
+        pass_rate: round_metric(pass_rate),
+        fail_under: round_metric(fail_under.clamp(0.0, 1.0)),
+        passed_threshold,
+        avg_latency_ms: round_metric(avg_latency_ms),
+        p95_latency_ms: round_metric(p95_latency_ms),
+        throughput_qps: round_metric(throughput_qps),
+        case_reports,
+    })
+}
+
+fn write_eval_report(path: &str, report: &EvalRunReport) -> Result<()> {
+    let path_buf = PathBuf::from(path);
+    if let Some(parent) = path_buf.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create eval report directory '{}'",
+                parent.display()
+            )
+        })?;
+    }
+
+    let payload =
+        serde_json::to_string_pretty(report).context("failed to serialize eval report to json")?;
+    std::fs::write(&path_buf, payload)
+        .with_context(|| format!("failed to write eval report to '{}'", path_buf.display()))
+}
+
+fn run_eval(
+    dataset_path: Option<String>,
+    output_path: Option<String>,
+    benchmark_iterations: usize,
+    fail_under: f64,
+    telemetry: &TelemetrySink,
+) -> Result<()> {
+    let dataset_path = dataset_path.unwrap_or_else(|| DEFAULT_EVAL_DATASET_PATH.to_string());
+    let output_path = output_path.unwrap_or_else(|| DEFAULT_EVAL_OUTPUT_PATH.to_string());
+    let dataset = load_eval_dataset(&dataset_path)?;
+    let report = run_eval_harness(&dataset, benchmark_iterations, fail_under)?;
+
+    write_eval_report(&output_path, &report)?;
+    telemetry.emit(
+        "eval.completed",
+        json!({
+            "dataset": report.dataset_name,
+            "dataset_version": report.dataset_version,
+            "total_cases": report.total_cases,
+            "pass_rate": report.pass_rate,
+            "passed_threshold": report.passed_threshold,
+            "output_path": output_path
+        }),
+    );
+
+    println!(
+        "Eval completed: dataset={} version={} cases={} pass_rate={:.3} threshold={:.3}",
+        report.dataset_name,
+        report.dataset_version,
+        report.total_cases,
+        report.pass_rate,
+        report.fail_under
+    );
+    println!(
+        "Benchmark: avg_latency_ms={:.3} p95_latency_ms={:.3} throughput_qps={:.3}",
+        report.avg_latency_ms, report.p95_latency_ms, report.throughput_qps
+    );
+    println!("Report written to {}", output_path);
+
+    if !report.passed_threshold {
+        return Err(anyhow::anyhow!(
+            "eval pass rate {:.3} is below threshold {:.3}",
+            report.pass_rate,
+            report.fail_under
+        ));
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -887,6 +1218,23 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Telemetry { command } => match command {
             TelemetryCommands::Report { path, limit } => {
                 run_telemetry_report(&cfg, path, limit)?;
+                Ok(())
+            }
+        },
+        Commands::Eval { command } => match command {
+            EvalCommands::Run {
+                dataset,
+                output,
+                benchmark_iterations,
+                fail_under,
+            } => {
+                run_eval(
+                    dataset,
+                    output,
+                    benchmark_iterations,
+                    fail_under,
+                    &telemetry,
+                )?;
                 Ok(())
             }
         },
@@ -2570,8 +2918,7 @@ fn final_stream_suffix(emitted: &str, final_text: &str) -> Option<String> {
         return None;
     }
 
-    if final_text.starts_with(emitted) {
-        let suffix = &final_text[emitted.len()..];
+    if let Some(suffix) = final_text.strip_prefix(emitted) {
         if suffix.is_empty() {
             return None;
         }
@@ -4008,6 +4355,83 @@ telemetry_path = ".zavora/telemetry/dev.jsonl"
         assert_eq!(summary.command_counts.get("ask"), Some(&4));
         assert_eq!(summary.command_counts.get("workflow.parallel"), Some(&1));
         assert_eq!(summary.last_event_ts_unix_ms, Some(1400));
+    }
+
+    fn eval_dataset_fixture() -> EvalDataset {
+        EvalDataset {
+            name: "retrieval-baseline".to_string(),
+            version: "1".to_string(),
+            description: "fixture".to_string(),
+            cases: vec![
+                EvalCase {
+                    id: "release".to_string(),
+                    query: "release rollback mitigation".to_string(),
+                    chunks: vec![
+                        "release plan includes rollback and mitigation steps".to_string(),
+                        "unrelated content".to_string(),
+                    ],
+                    required_terms: vec!["rollback".to_string(), "mitigation".to_string()],
+                    max_chunks: 2,
+                    min_term_matches: Some(2),
+                },
+                EvalCase {
+                    id: "architecture".to_string(),
+                    query: "architecture components".to_string(),
+                    chunks: vec![
+                        "component diagram and architecture decisions".to_string(),
+                        "random note".to_string(),
+                    ],
+                    required_terms: vec!["architecture".to_string(), "component".to_string()],
+                    max_chunks: 2,
+                    min_term_matches: Some(1),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn eval_harness_produces_metrics_and_threshold_result() {
+        let dataset = eval_dataset_fixture();
+        let report = run_eval_harness(&dataset, 10, 0.8).expect("eval harness should run");
+
+        assert_eq!(report.total_cases, 2);
+        assert_eq!(report.passed_cases, 2);
+        assert_eq!(report.failed_cases, 0);
+        assert_eq!(report.pass_rate, 1.0);
+        assert!(report.passed_threshold);
+        assert_eq!(report.benchmark_iterations, 10);
+        assert!(report.avg_latency_ms >= 0.0);
+        assert!(report.p95_latency_ms >= 0.0);
+        assert!(report.throughput_qps >= 0.0);
+    }
+
+    #[test]
+    fn eval_harness_fails_threshold_when_case_quality_is_low() {
+        let mut dataset = eval_dataset_fixture();
+        dataset.cases[0].required_terms = vec!["missing-term".to_string()];
+        dataset.cases[0].min_term_matches = Some(1);
+
+        let report = run_eval_harness(&dataset, 5, 0.75).expect("eval harness should run");
+        assert_eq!(report.total_cases, 2);
+        assert_eq!(report.passed_cases, 1);
+        assert_eq!(report.failed_cases, 1);
+        assert_eq!(report.pass_rate, 0.5);
+        assert!(!report.passed_threshold);
+    }
+
+    #[test]
+    fn load_eval_dataset_reports_empty_case_set() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("eval.json");
+        std::fs::write(
+            &path,
+            r#"{"name":"empty","version":"1","description":"none","cases":[]}"#,
+        )
+        .expect("dataset should write");
+
+        let err =
+            load_eval_dataset(path.to_string_lossy().as_ref()).expect_err("empty dataset fails");
+        assert!(err.to_string().contains("has no cases"));
     }
 
     #[test]

@@ -1,0 +1,72 @@
+{
+  "generated_at_unix_ms": 1771129067876,
+  "dataset_name": "retrieval-quality-baseline",
+  "dataset_version": "v1",
+  "dataset_description": "Deterministic retrieval quality checks for core planning, reliability, and tooling intents.",
+  "benchmark_iterations": 200,
+  "total_cases": 6,
+  "passed_cases": 6,
+  "failed_cases": 0,
+  "pass_rate": 1.0,
+  "fail_under": 0.9,
+  "passed_threshold": true,
+  "avg_latency_ms": 0.01,
+  "p95_latency_ms": 0.012,
+  "throughput_qps": 98743.083,
+  "case_reports": [
+    {
+      "id": "release-plan",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 5,
+      "avg_latency_ms": 0.008
+    },
+    {
+      "id": "risk-mitigation",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 4,
+      "avg_latency_ms": 0.01
+    },
+    {
+      "id": "mcp-reliability",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 4,
+      "avg_latency_ms": 0.008
+    },
+    {
+      "id": "telemetry-observability",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 6,
+      "avg_latency_ms": 0.011
+    },
+    {
+      "id": "retrieval-budget",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 9,
+      "avg_latency_ms": 0.012
+    },
+    {
+      "id": "provider-switching",
+      "passed": true,
+      "required_terms": 3,
+      "matched_terms": 3,
+      "retrieved_chunks": 1,
+      "top_score": 5,
+      "avg_latency_ms": 0.009
+    }
+  ]
+}

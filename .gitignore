@@ -1,3 +1,4 @@
 /target
 .env
 .zavora/
+evals/reports/latest.json

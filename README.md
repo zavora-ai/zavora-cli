@@ -57,6 +57,10 @@ cargo run -- doctor
 ```
 
 ```bash
+cargo run -- eval run --benchmark-iterations 200 --fail-under 0.90
+```
+
+```bash
 cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db migrate
 ```
 
@@ -89,6 +93,7 @@ Use `make` targets:
 - `make check`
 - `make lint`
 - `make test`
+- `make eval`
 - `make ci`
 - `make release-check`
 
@@ -258,6 +263,27 @@ The report summarizes:
 - command completion/failure counts
 - tool lifecycle counts (`requested`, `succeeded`, `failed`)
 
+## Evaluation Harness and Benchmark Suite
+
+Run dataset-based quality evaluation and retrieval benchmark metrics:
+
+```bash
+cargo run -- \
+  eval run \
+  --dataset evals/datasets/retrieval-baseline.v1.json \
+  --output .zavora/evals/latest.json \
+  --benchmark-iterations 200 \
+  --fail-under 0.90
+```
+
+What the eval command produces:
+- pass/fail quality score per dataset case
+- aggregate pass rate
+- benchmark metrics (`avg_latency_ms`, `p95_latency_ms`, `throughput_qps`)
+- machine-readable JSON report for release artifacts
+
+Release baseline reports are tracked under `evals/reports/` and summarized in `docs/EVAL_BASELINE.md`.
+
 ## Retrieval Abstraction
 
 Retrieval is pluggable and disabled by default.
@@ -324,3 +350,4 @@ See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `doc
 See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration details.
 See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime registration flow.
 See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.
+See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.

@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test ci release-check
+.PHONY: fmt fmt-check check lint test eval ci release-check
 
 fmt:
 	cargo fmt --all
@@ -14,6 +14,9 @@ lint:
 
 test:
 	cargo test
+
+eval:
+	cargo run -- eval run --dataset evals/datasets/retrieval-baseline.v1.json --output evals/reports/latest.json --benchmark-iterations 200 --fail-under 0.90
 
 ci: fmt-check check lint test
 
