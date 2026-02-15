@@ -27,12 +27,12 @@ pub const fn tokens_to_chars(tokens: usize) -> usize {
 /// Default context window sizes per provider (tokens).
 pub fn default_context_window(provider: &str) -> usize {
     match provider {
-        "gemini" => 1_000_000,
+        "gemini" => 2_000_000,
         "anthropic" => 200_000,
-        "openai" => 128_000,
+        "openai" => 1_000_000,
         "deepseek" => 64_000,
-        "groq" => 32_000,
-        "ollama" => 8_000,
+        "groq" => 128_000,
+        "ollama" => 128_000,
         _ => 128_000,
     }
 }

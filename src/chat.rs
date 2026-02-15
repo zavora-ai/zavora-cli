@@ -139,7 +139,7 @@ pub fn print_chat_usage() {
     println!("- Type plain text to send a prompt to the agent.");
     println!("- /provider openai");
     println!("- /model");
-    println!("- /model gpt-4o-mini");
+    println!("- /model gpt-4.1");
     println!("- /tools");
     println!("- /mcp");
     println!("- /status");
@@ -162,21 +162,31 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
                 description: "fast balanced default",
             },
             ModelPickerOption {
+                id: "gemini-3-pro",
+                context_window: "2M",
+                description: "most capable, deep reasoning",
+            },
+            ModelPickerOption {
                 id: "gemini-2.5-pro",
                 context_window: "1M",
-                description: "higher reasoning depth",
+                description: "strong reasoning, stable",
             },
         ],
         Provider::Openai => vec![
             ModelPickerOption {
-                id: "gpt-4o-mini",
-                context_window: "128k",
-                description: "low-latency default",
-            },
-            ModelPickerOption {
                 id: "gpt-4.1",
                 context_window: "1M",
-                description: "higher quality general reasoning",
+                description: "balanced default",
+            },
+            ModelPickerOption {
+                id: "gpt-5.3-codex",
+                context_window: "256k",
+                description: "agentic coding, most capable",
+            },
+            ModelPickerOption {
+                id: "gpt-5-mini",
+                context_window: "128k",
+                description: "fast low-latency",
             },
             ModelPickerOption {
                 id: "o3-mini",
@@ -191,9 +201,14 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
                 description: "balanced default",
             },
             ModelPickerOption {
+                id: "claude-opus-4-6",
+                context_window: "1M",
+                description: "most capable, agentic",
+            },
+            ModelPickerOption {
                 id: "claude-3-5-haiku-latest",
                 context_window: "200k",
-                description: "fast lower-latency option",
+                description: "fast low-latency",
             },
         ],
         Provider::Deepseek => vec![
@@ -215,14 +230,19 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
                 description: "balanced default",
             },
             ModelPickerOption {
-                id: "mixtral-8x7b-32768",
-                context_window: "32k",
-                description: "fast throughput option",
+                id: "llama-4-scout-17b-16e-instruct",
+                context_window: "512k",
+                description: "Llama 4, fast MoE",
+            },
+            ModelPickerOption {
+                id: "deepseek-r1-distill-llama-70b",
+                context_window: "128k",
+                description: "reasoning-focused",
             },
         ],
         Provider::Ollama => vec![
             ModelPickerOption {
-                id: "llama3.2",
+                id: "llama4",
                 context_window: "local-configured",
                 description: "default local model",
             },
@@ -797,8 +817,7 @@ pub async fn run_chat(
         );
         println!();
     }
-    let stdin = io::stdin();
-    let mut line = String::new();
+    let mut rl = rustyline::DefaultEditor::new().context("failed to initialize readline")?;
 
     // First-run onboarding
     let workspace = std::env::current_dir().unwrap_or_default();
@@ -818,18 +837,18 @@ pub async fn run_chat(
             Err(_) => None,
         };
         let prompt = build_prompt(&checkpoint_store, context_usage.as_ref());
-        print!("{prompt}");
-        io::stdout().flush().context("failed to flush stdout")?;
-        line.clear();
-        stdin
-            .read_line(&mut line)
-            .context("failed to read input from stdin")?;
-        let input = line.trim();
-        if input.eq_ignore_ascii_case("/exit") || input.eq_ignore_ascii_case("exit") {
-            break;
-        }
+        let input = match rl.readline(&prompt) {
+            Ok(line) => line,
+            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => break,
+            Err(e) => return Err(anyhow::anyhow!("readline error: {e}")),
+        };
+        let input = input.trim();
         if input.is_empty() {
             continue;
+        }
+        rl.add_history_entry(input).ok();
+        if input.eq_ignore_ascii_case("/exit") || input.eq_ignore_ascii_case("exit") {
+            break;
         }
 
         match parse_chat_command(input) {

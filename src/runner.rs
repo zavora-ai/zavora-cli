@@ -107,95 +107,38 @@ pub fn resolve_tool_confirmation_settings(
     cfg: &RuntimeConfig,
     runtime_tools: &ResolvedRuntimeTools,
 ) -> ToolConfirmationSettings {
+    // Confirmation is now handled by ConfirmingTool wrappers applied in
+    // resolve_runtime_tools(). The ADK-level policy is always Never.
     let available_tool_names = runtime_tools
         .tools
         .iter()
         .map(|tool| tool.name().to_string())
         .collect::<BTreeSet<String>>();
 
-    let mut required_tools = BTreeSet::<String>::new();
-    match cfg.tool_confirmation_mode {
-        ToolConfirmationMode::Never => {}
-        ToolConfirmationMode::McpOnly => {
-            required_tools.extend(runtime_tools.mcp_tool_names.iter().cloned());
-        }
-        ToolConfirmationMode::Always => {
-            required_tools.extend(available_tool_names.iter().cloned());
-        }
-    }
-
-    for guarded_tool in [
-        FS_WRITE_TOOL_NAME,
-        EXECUTE_BASH_TOOL_NAME,
-        GITHUB_OPS_TOOL_NAME,
-    ] {
-        if available_tool_names.contains(guarded_tool) {
-            required_tools.insert(guarded_tool.to_string());
-        }
-    }
-
-    for tool_name in &cfg.require_confirm_tool {
-        let trimmed = tool_name.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if available_tool_names.contains(trimmed) {
-            required_tools.insert(trimmed.to_string());
-        } else {
-            tracing::warn!(
-                tool = trimmed,
-                "tool in require_confirm_tool is not present in runtime toolset; ignoring"
-            );
-        }
-    }
-
     let mut approved_tools = BTreeSet::<String>::new();
     for tool_name in &cfg.approve_tool {
         let trimmed = tool_name.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if available_tool_names.contains(trimmed) {
+        if !trimmed.is_empty() && available_tool_names.contains(trimmed) {
             approved_tools.insert(trimmed.to_string());
-        } else {
-            tracing::warn!(
-                tool = trimmed,
-                "tool in approve_tool is not present in runtime toolset; ignoring"
-            );
         }
     }
-
-    let policy = if required_tools.is_empty() {
-        ToolConfirmationPolicy::Never
-    } else {
-        ToolConfirmationPolicy::PerTool(required_tools.clone())
-    };
 
     let mut run_config = RunConfig::default();
-    for tool_name in &required_tools {
-        let decision = if approved_tools.contains(tool_name) {
-            ToolConfirmationDecision::Approve
-        } else {
-            ToolConfirmationDecision::Deny
-        };
+    for tool_name in &approved_tools {
         run_config
             .tool_confirmation_decisions
-            .insert(tool_name.clone(), decision);
+            .insert(tool_name.clone(), ToolConfirmationDecision::Approve);
     }
 
-    tracing::info!(
-        mode = ?cfg.tool_confirmation_mode,
-        available = available_tool_names.len(),
-        required = required_tools.len(),
-        approved = approved_tools.len(),
-        denied = required_tools.len().saturating_sub(approved_tools.len()),
-        "Resolved tool confirmation settings"
-    );
-
-    ToolConfirmationSettings { policy, run_config }
+    ToolConfirmationSettings {
+        policy: ToolConfirmationPolicy::Never,
+        run_config,
+    }
 }
 
 pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
+    use crate::tools::confirming::ConfirmingTool;
+
     let mut tools = build_builtin_tools();
     let built_in_count = tools.len();
     let mut mcp_tools = discover_mcp_tools(cfg).await;
@@ -207,6 +150,56 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
     tools.append(&mut mcp_tools);
 
     tools = filter_tools_by_policy(tools, &cfg.agent_allow_tools, &cfg.agent_deny_tools);
+
+    // Determine which tools need interactive confirmation
+    let approved: BTreeSet<String> = cfg.approve_tool.iter().map(|s| s.trim().to_string()).collect();
+    let mut confirm_names = BTreeSet::<String>::new();
+
+    // Guarded built-in tools always require confirmation (unless pre-approved)
+    for name in [FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
+        if !approved.contains(name) {
+            confirm_names.insert(name.to_string());
+        }
+    }
+
+    match cfg.tool_confirmation_mode {
+        ToolConfirmationMode::Always => {
+            for tool in &tools {
+                if !approved.contains(tool.name()) {
+                    confirm_names.insert(tool.name().to_string());
+                }
+            }
+        }
+        ToolConfirmationMode::McpOnly => {
+            for name in &discovered_mcp_tool_names {
+                if !approved.contains(name.as_str()) {
+                    confirm_names.insert(name.clone());
+                }
+            }
+        }
+        ToolConfirmationMode::Never => {
+            // Only guarded built-ins (already added above)
+        }
+    }
+
+    for name in &cfg.require_confirm_tool {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() && !approved.contains(trimmed) {
+            confirm_names.insert(trimmed.to_string());
+        }
+    }
+
+    // Wrap tools that need confirmation
+    tools = tools
+        .into_iter()
+        .map(|tool| {
+            if confirm_names.contains(tool.name()) {
+                ConfirmingTool::wrap(tool)
+            } else {
+                tool
+            }
+        })
+        .collect();
 
     let mcp_tool_names = tools
         .iter()

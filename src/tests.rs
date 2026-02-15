@@ -771,7 +771,7 @@ use crate::tool_policy::*;
             r#"
 [profiles.dev]
 provider = "openai"
-model = "gpt-4o-mini"
+model = "gpt-4.1"
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/dev.db"
 app_name = "zavora-dev"
@@ -792,7 +792,7 @@ retrieval_min_score = 2
 
         assert_eq!(cfg.profile, "dev");
         assert_eq!(cfg.provider, Provider::Openai);
-        assert_eq!(cfg.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(cfg.model.as_deref(), Some("gpt-4.1"));
         assert_eq!(cfg.session_backend, SessionBackend::Sqlite);
         assert!(!cfg.show_sensitive_config);
         assert_eq!(cfg.app_name, "zavora-dev");
@@ -832,7 +832,7 @@ retrieval_min_score = 2
 instruction = "global-default"
 
 [agents.coder]
-model = "gpt-4o-mini"
+model = "gpt-4.1"
 "#,
         )
         .expect("global agent catalog should write");
@@ -869,7 +869,7 @@ model = "gpt-4.1"
             resolved
                 .get("coder")
                 .and_then(|agent| agent.config.model.as_deref()),
-            Some("gpt-4o-mini")
+            Some("gpt-4.1")
         );
         assert_eq!(
             resolved.get("coder").map(|agent| agent.source),
@@ -951,7 +951,7 @@ model = "gpt-4.1"
             r#"
 [profiles.dev]
 provider = "openai"
-model = "gpt-4o-mini"
+model = "gpt-4.1"
 tool_confirmation_mode = "always"
 require_confirm_tool = ["release_template"]
 approve_tool = ["release_template"]
@@ -1306,16 +1306,10 @@ guardrail_redact_replacement = "***"
             &["search_incidents"],
         );
 
+        // ADK policy is always Never — confirmation handled by ConfirmingTool wrappers
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("search_incidents"));
+        assert!(!settings.policy.requires_confirmation("search_incidents"));
         assert!(!settings.policy.requires_confirmation("current_unix_time"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("search_incidents"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
     }
 
     #[test]
@@ -1323,15 +1317,9 @@ guardrail_redact_replacement = "***"
         let cfg = base_cfg();
         let runtime_tools = make_runtime_tools(&["current_unix_time", "fs_write"], &[]);
 
+        // ADK policy is Never — fs_write confirmation handled by ConfirmingTool wrapper
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("fs_write"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("fs_write"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
+        assert!(!settings.policy.requires_confirmation("fs_write"));
     }
 
     #[test]
@@ -1340,14 +1328,7 @@ guardrail_redact_replacement = "***"
         let runtime_tools = make_runtime_tools(&["current_unix_time", "execute_bash"], &[]);
 
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("execute_bash"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("execute_bash"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
+        assert!(!settings.policy.requires_confirmation("execute_bash"));
     }
 
     #[test]
@@ -1356,14 +1337,7 @@ guardrail_redact_replacement = "***"
         let runtime_tools = make_runtime_tools(&["current_unix_time", "github_ops"], &[]);
 
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("github_ops"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("github_ops"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
+        assert!(!settings.policy.requires_confirmation("github_ops"));
     }
 
     #[test]
@@ -1392,16 +1366,9 @@ guardrail_redact_replacement = "***"
         cfg.require_confirm_tool = vec!["release_template".to_string()];
         let runtime_tools = make_runtime_tools(&["release_template", "current_unix_time"], &[]);
 
+        // ADK policy is Never — custom required tools handled by ConfirmingTool wrapper
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("release_template"));
-        assert!(!settings.policy.requires_confirmation("current_unix_time"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("release_template"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
+        assert!(!settings.policy.requires_confirmation("release_template"));
     }
 
     #[test]
@@ -1412,14 +1379,7 @@ guardrail_redact_replacement = "***"
         let runtime_tools = make_runtime_tools(&["fs_read", "current_unix_time"], &[]);
 
         let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
-        assert!(settings.policy.requires_confirmation("fs_read"));
-        assert_eq!(
-            settings
-                .run_config
-                .tool_confirmation_decisions
-                .get("fs_read"),
-            Some(&ToolConfirmationDecision::Deny)
-        );
+        assert!(!settings.policy.requires_confirmation("fs_read"));
     }
 
     #[test]
@@ -1551,8 +1511,8 @@ provider = "not-a-provider"
             ParsedChatCommand::Command(ChatCommand::Provider("openai".to_string()))
         );
         assert_eq!(
-            parse_chat_command("/model gpt-4o-mini"),
-            ParsedChatCommand::Command(ChatCommand::Model(Some("gpt-4o-mini".to_string())))
+            parse_chat_command("/model gpt-4.1"),
+            ParsedChatCommand::Command(ChatCommand::Model(Some("gpt-4.1".to_string())))
         );
         assert_eq!(
             parse_chat_command("/model"),
@@ -1586,7 +1546,7 @@ provider = "not-a-provider"
         let picked = resolve_model_picker_selection(&options, "2")
             .expect("selection should parse")
             .expect("selection should choose a model");
-        assert_eq!(picked, "gpt-4.1");
+        assert_eq!(picked, "gpt-5.3-codex");
     }
 
     #[test]
@@ -1615,7 +1575,7 @@ provider = "not-a-provider"
 
     #[test]
     fn model_compatibility_validation_rejects_cross_provider_model_ids() {
-        assert!(validate_model_for_provider(Provider::Openai, "gpt-4o-mini").is_ok());
+        assert!(validate_model_for_provider(Provider::Openai, "gpt-4.1").is_ok());
         assert!(
             validate_model_for_provider(Provider::Anthropic, "claude-sonnet-4-20250514").is_ok()
         );
@@ -2432,9 +2392,9 @@ fn test_context_usage_format() {
 
 #[test]
 fn test_default_context_window() {
-    assert_eq!(default_context_window("gemini"), 1_000_000);
+    assert_eq!(default_context_window("gemini"), 2_000_000);
     assert_eq!(default_context_window("anthropic"), 200_000);
-    assert_eq!(default_context_window("openai"), 128_000);
+    assert_eq!(default_context_window("openai"), 1_000_000);
     assert_eq!(default_context_window("unknown"), 128_000);
 }
 

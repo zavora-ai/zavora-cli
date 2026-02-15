@@ -41,7 +41,7 @@ OLLAMA_HOST=http://localhost:11434  # optional, this is the default
 zavora-cli ask "Explain Rust ownership"
 
 # Interactive chat
-zavora-cli --provider openai --model gpt-4o-mini chat
+zavora-cli --provider openai --model gpt-4.1 chat
 
 # Workflows
 zavora-cli workflow sequential "Plan an MVP rollout"
@@ -117,7 +117,7 @@ Runtime defaults live in `.zavora/config.toml`:
 ```toml
 [profiles.default]
 provider = "openai"
-model = "gpt-4o-mini"
+model = "gpt-4.1"
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/sessions.db"
 retrieval_backend = "disabled"
@@ -143,7 +143,7 @@ Configure agent personas separately from profiles. Precedence: implicit `default
 [agents.coder]
 description = "Code-focused assistant"
 provider = "openai"
-model = "gpt-4o-mini"
+model = "gpt-4.1"
 tool_confirmation_mode = "always"
 allow_tools = ["fs_read", "fs_write", "execute_bash"]
 deny_tools = ["execute_bash.rm_*"]

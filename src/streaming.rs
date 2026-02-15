@@ -254,7 +254,13 @@ pub async fn run_prompt(
     let mut tracker = AuthorTextTracker::default();
 
     while let Some(event_result) = stream.next().await {
-        let event = event_result.context("runner returned event error")?;
+        let event = match event_result {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Runner event error: {e:#}");
+                continue;
+            }
+        };
         let text = event_text(&event);
 
         tracing::debug!(
@@ -327,7 +333,15 @@ pub async fn run_prompt_streaming(
     let mut stdout = io::stdout();
 
     while let Some(event_result) = stream.next().await {
-        let event = event_result.context("runner returned event error")?;
+        let event = match event_result {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("{}", crate::theme::DIM);
+                eprintln!("  Runner error: {e:#}");
+                eprintln!("{}", crate::theme::RESET);
+                continue;
+            }
+        };
         let text = event_text(&event);
 
         if event.author == "user" {

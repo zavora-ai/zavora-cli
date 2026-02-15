@@ -60,7 +60,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
             let model_name = cfg
                 .model
                 .clone()
-                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+                .unwrap_or_else(|| "gpt-4.1".to_string());
             validate_model_for_provider(provider, &model_name)?;
             let model = OpenAIClient::new(OpenAIConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
@@ -101,7 +101,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
         Provider::Ollama => {
             let host = std::env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
-            let model_name = cfg.model.clone().unwrap_or_else(|| "llama3.2".to_string());
+            let model_name = cfg.model.clone().unwrap_or_else(|| "llama4".to_string());
             validate_model_for_provider(provider, &model_name)?;
             let model = OllamaModel::new(OllamaConfig::with_host(host, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))

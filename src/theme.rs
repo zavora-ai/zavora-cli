@@ -278,6 +278,23 @@ pub fn format_command_palette() -> String {
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Global flag to pause the spinner (e.g. during tool confirmation prompts).
+static SPINNER_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Pause the spinner and clear its line. Call before prompting for user input.
+pub fn pause_spinner() {
+    SPINNER_PAUSED.store(true, Ordering::SeqCst);
+    // Give the spinner thread time to see the flag and clear
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    eprint!("\r\x1b[2K");
+    let _ = io::stderr().flush();
+}
+
+/// Resume the spinner after user input is complete.
+pub fn resume_spinner() {
+    SPINNER_PAUSED.store(false, Ordering::SeqCst);
+}
+
 /// A terminal spinner that runs on a background thread.
 pub struct Spinner {
     stop: Arc<AtomicBool>,
@@ -294,9 +311,11 @@ impl Spinner {
         let handle = std::thread::spawn(move || {
             let mut i = 0;
             while !stop_clone.load(Ordering::Relaxed) {
-                let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
-                eprint!("\r{DIM}{frame} {msg}{RESET}");
-                let _ = io::stderr().flush();
+                if !SPINNER_PAUSED.load(Ordering::Relaxed) {
+                    let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
+                    eprint!("\r{DIM}{frame} {msg}{RESET}");
+                    let _ = io::stderr().flush();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(80));
                 i += 1;
             }

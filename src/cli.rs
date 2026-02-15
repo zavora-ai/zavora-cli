@@ -161,7 +161,7 @@ pub enum ServerCommands {
 
 const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli ask \"Design a Rust CLI with release-based milestones\"\n\
-  zavora-cli --provider openai --model gpt-4o-mini chat\n\
+  zavora-cli --provider openai --model gpt-4.1 chat\n\
   zavora-cli workflow sequential \"Plan a v0.2.0 rollout\"\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
@@ -271,7 +271,7 @@ pub struct Cli {
     #[arg(long, env = "ZAVORA_GUARDRAIL_REDACT_REPLACEMENT")]
     pub guardrail_redact_replacement: Option<String>,
 
-    #[arg(long, env = "RUST_LOG", default_value = "warn")]
+    #[arg(long, env = "RUST_LOG", default_value = "error")]
     pub log_filter: String,
 
     #[command(subcommand)]

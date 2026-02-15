@@ -2,6 +2,7 @@ pub mod fs_read;
 pub mod fs_write;
 pub mod execute_bash;
 pub mod github_ops;
+pub mod confirming;
 
 use std::sync::Arc;
 

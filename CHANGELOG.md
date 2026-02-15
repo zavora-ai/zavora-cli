@@ -6,6 +6,32 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-02-15
+
+### Added
+
+- Streaming markdown renderer using winnow 0.7 + crossterm (replaces line-based renderer)
+  - Magenta+bold headings, green code blocks, DarkGrey blockquotes
+  - Terminal-width-aware word wrapping with column tracking
+- Interactive tool confirmation with file diff preview
+  - Shows colored diff (red removals, green additions) for fs_write
+  - Shows `$ command` for execute_bash
+  - `y` to approve, `n` to deny, `t` to trust tool for the session
+- Readline support via rustyline — arrow key history, line editing, Ctrl-C
+- 2026 model catalog: GPT-5.3-Codex, Claude Opus 4.6, Gemini 3 Pro, Llama 4
+
+### Changed
+
+- Default OpenAI model: gpt-4.1 (was gpt-4o-mini)
+- Default Ollama model: llama4 (was llama3.2)
+- Default log level: error (was warn) — no more WARN traces in normal mode
+- Context window defaults updated for 2026 models
+- Runner event errors no longer crash the session — logged and continued
+
+### Removed
+
+- Old line-based MarkdownRenderer from theme.rs
+
 ## [1.1.1] — 2026-02-15
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "zavora-cli"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust CLI AI agent built on ADK-Rust with provider-aware runtime, workflow orchestration, and tool safety controls"
@@ -30,6 +30,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
 crossterm = "0.28"
+rustyline = "15"
 winnow = "0.7"
 
 [dev-dependencies]
