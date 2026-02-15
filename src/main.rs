@@ -2714,6 +2714,7 @@ const FS_READ_DENIED_FILE_NAMES: &[&str] =
     &[".env", ".env.local", ".env.development", ".env.production"];
 const FS_WRITE_TOOL_NAME: &str = "fs_write";
 const EXECUTE_BASH_TOOL_NAME: &str = "execute_bash";
+const GITHUB_OPS_TOOL_NAME: &str = "github_ops";
 const EXECUTE_BASH_DEFAULT_TIMEOUT_SECS: u64 = 20;
 const EXECUTE_BASH_DEFAULT_RETRY_ATTEMPTS: u32 = 1;
 const EXECUTE_BASH_DEFAULT_RETRY_DELAY_MS: u64 = 250;
@@ -3795,6 +3796,326 @@ async fn execute_bash_tool_response(args: &Value) -> Value {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubOpsError {
+    code: &'static str,
+    message: String,
+}
+
+impl GitHubOpsError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubCliOutput {
+    success: bool,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn github_ops_error_payload(action: &str, err: GitHubOpsError) -> Value {
+    json!({
+        "status": "error",
+        "kind": "github_ops",
+        "action": action,
+        "code": err.code,
+        "error": err.message
+    })
+}
+
+fn github_token_present() -> bool {
+    ["GH_TOKEN", "GITHUB_TOKEN"].iter().any(|key| {
+        std::env::var(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn parse_required_string_arg(args: &Value, key: &str) -> Result<String, GitHubOpsError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GitHubOpsError::new("invalid_args", format!("'{key}' is required")))
+}
+
+fn parse_optional_string_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_optional_string_list(args: &Value, key: &str) -> Result<Vec<String>, GitHubOpsError> {
+    let Some(raw_value) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+
+    let Some(values) = raw_value.as_array() else {
+        return Err(GitHubOpsError::new(
+            "invalid_args",
+            format!("'{key}' must be an array of strings"),
+        ));
+    };
+
+    Ok(values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<String>>())
+}
+
+fn build_github_ops_command(args: &Value) -> Result<(String, Vec<String>), GitHubOpsError> {
+    let action = parse_required_string_arg(args, "action")?.to_ascii_lowercase();
+    match action.as_str() {
+        "issue_create" => {
+            let repo = parse_required_string_arg(args, "repo")?;
+            let title = parse_required_string_arg(args, "title")?;
+            let body = parse_required_string_arg(args, "body")?;
+            let labels = parse_optional_string_list(args, "labels")?;
+
+            let mut command = vec![
+                "issue".to_string(),
+                "create".to_string(),
+                "--repo".to_string(),
+                repo,
+                "--title".to_string(),
+                title,
+                "--body".to_string(),
+                body,
+            ];
+            for label in labels {
+                command.push("--label".to_string());
+                command.push(label);
+            }
+            Ok((action, command))
+        }
+        "issue_update" => {
+            let repo = parse_required_string_arg(args, "repo")?;
+            let issue_number = parse_required_string_arg(args, "issue_number")?;
+            let state = parse_optional_string_arg(args, "state")
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+            if state == "closed" {
+                return Ok((
+                    action,
+                    vec![
+                        "issue".to_string(),
+                        "close".to_string(),
+                        issue_number,
+                        "--repo".to_string(),
+                        repo,
+                    ],
+                ));
+            }
+            if state == "open" {
+                return Ok((
+                    action,
+                    vec![
+                        "issue".to_string(),
+                        "reopen".to_string(),
+                        issue_number,
+                        "--repo".to_string(),
+                        repo,
+                    ],
+                ));
+            }
+
+            let title = parse_optional_string_arg(args, "title");
+            let body = parse_optional_string_arg(args, "body");
+            let add_labels = parse_optional_string_list(args, "add_labels")?;
+            let remove_labels = parse_optional_string_list(args, "remove_labels")?;
+            if title.is_none()
+                && body.is_none()
+                && add_labels.is_empty()
+                && remove_labels.is_empty()
+            {
+                return Err(GitHubOpsError::new(
+                    "invalid_args",
+                    "issue_update requires at least one of title/body/add_labels/remove_labels/state",
+                ));
+            }
+
+            let mut command = vec![
+                "issue".to_string(),
+                "edit".to_string(),
+                issue_number,
+                "--repo".to_string(),
+                repo,
+            ];
+            if let Some(title) = title {
+                command.push("--title".to_string());
+                command.push(title);
+            }
+            if let Some(body) = body {
+                command.push("--body".to_string());
+                command.push(body);
+            }
+            for label in add_labels {
+                command.push("--add-label".to_string());
+                command.push(label);
+            }
+            for label in remove_labels {
+                command.push("--remove-label".to_string());
+                command.push(label);
+            }
+            Ok((action, command))
+        }
+        "pr_create" => {
+            let repo = parse_required_string_arg(args, "repo")?;
+            let title = parse_required_string_arg(args, "title")?;
+            let body = parse_required_string_arg(args, "body")?;
+            let head = parse_optional_string_arg(args, "head");
+            let base = parse_optional_string_arg(args, "base");
+            let draft = args.get("draft").and_then(Value::as_bool).unwrap_or(true);
+
+            let mut command = vec![
+                "pr".to_string(),
+                "create".to_string(),
+                "--repo".to_string(),
+                repo,
+                "--title".to_string(),
+                title,
+                "--body".to_string(),
+                body,
+            ];
+            if draft {
+                command.push("--draft".to_string());
+            }
+            if let Some(head) = head {
+                command.push("--head".to_string());
+                command.push(head);
+            }
+            if let Some(base) = base {
+                command.push("--base".to_string());
+                command.push(base);
+            }
+            Ok((action, command))
+        }
+        "project_item_update" => {
+            let project_id = parse_required_string_arg(args, "project_id")?;
+            let item_id = parse_required_string_arg(args, "item_id")?;
+            let field_id = parse_required_string_arg(args, "field_id")?;
+            let status_option_id = parse_required_string_arg(args, "status_option_id")?;
+            Ok((
+                action,
+                vec![
+                    "project".to_string(),
+                    "item-edit".to_string(),
+                    "--project-id".to_string(),
+                    project_id,
+                    "--id".to_string(),
+                    item_id,
+                    "--field-id".to_string(),
+                    field_id,
+                    "--single-select-option-id".to_string(),
+                    status_option_id,
+                ],
+            ))
+        }
+        _ => Err(GitHubOpsError::new(
+            "invalid_args",
+            "action must be one of: issue_create, issue_update, pr_create, project_item_update",
+        )),
+    }
+}
+
+fn run_gh_command(args: &[String]) -> Result<GitHubCliOutput, GitHubOpsError> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                GitHubOpsError::new(
+                    "gh_missing",
+                    "GitHub CLI 'gh' was not found. Install gh and retry.",
+                )
+            } else {
+                GitHubOpsError::new("io_error", format!("failed to run gh command: {err}"))
+            }
+        })?;
+
+    Ok(GitHubCliOutput {
+        success: output.status.success(),
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn github_ops_tool_response_with_runner<F>(
+    args: &Value,
+    token_present: bool,
+    mut runner: F,
+) -> Value
+where
+    F: FnMut(&[String]) -> Result<GitHubCliOutput, GitHubOpsError>,
+{
+    let (action, command) = match build_github_ops_command(args) {
+        Ok(parsed) => parsed,
+        Err(err) => return github_ops_error_payload("unknown", err),
+    };
+
+    if !token_present {
+        let auth_command = vec!["auth".to_string(), "status".to_string()];
+        let auth_ok = runner(&auth_command)
+            .map(|out| out.success)
+            .unwrap_or(false);
+        if !auth_ok {
+            return github_ops_error_payload(
+                &action,
+                GitHubOpsError::new(
+                    "auth_required",
+                    "GitHub auth not detected. Set GH_TOKEN/GITHUB_TOKEN or run `gh auth login`.",
+                ),
+            );
+        }
+    }
+
+    match runner(&command) {
+        Ok(output) => {
+            if output.success {
+                json!({
+                    "status": "ok",
+                    "kind": "github_ops",
+                    "action": action,
+                    "command": format!("gh {}", command.join(" ")),
+                    "exit_code": output.exit_code,
+                    "stdout": output.stdout,
+                    "stderr": output.stderr
+                })
+            } else {
+                json!({
+                    "status": "error",
+                    "kind": "github_ops",
+                    "action": action,
+                    "code": "github_command_failed",
+                    "error": format!("gh command exited with non-zero status: {}", output.exit_code),
+                    "command": format!("gh {}", command.join(" ")),
+                    "exit_code": output.exit_code,
+                    "stdout": output.stdout,
+                    "stderr": output.stderr
+                })
+            }
+        }
+        Err(err) => github_ops_error_payload(&action, err),
+    }
+}
+
+fn github_ops_tool_response(args: &Value) -> Value {
+    github_ops_tool_response_with_runner(args, github_token_present(), run_gh_command)
+}
+
 fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
     let current_time = FunctionTool::new(
         "current_unix_time",
@@ -3847,12 +4168,20 @@ fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         |_ctx, args| async move { Ok(execute_bash_tool_response(&args).await) },
     );
 
+    let github_ops = FunctionTool::new(
+        "github_ops",
+        "Runs GitHub workflow operations through gh CLI. \
+         Args: action=issue_create|issue_update|pr_create|project_item_update plus action-specific fields.",
+        |_ctx, args| async move { Ok(github_ops_tool_response(&args)) },
+    );
+
     vec![
         Arc::new(current_time),
         Arc::new(release_template),
         Arc::new(fs_read),
         Arc::new(fs_write),
         Arc::new(execute_bash),
+        Arc::new(github_ops),
     ]
 }
 
@@ -3932,7 +4261,11 @@ fn resolve_tool_confirmation_settings(
         }
     }
 
-    for guarded_tool in [FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME] {
+    for guarded_tool in [
+        FS_WRITE_TOOL_NAME,
+        EXECUTE_BASH_TOOL_NAME,
+        GITHUB_OPS_TOOL_NAME,
+    ] {
         if available_tool_names.contains(guarded_tool) {
             required_tools.insert(guarded_tool.to_string());
         }
@@ -6734,6 +7067,92 @@ mod tests {
     }
 
     #[test]
+    fn github_ops_issue_create_runs_expected_mocked_command() {
+        let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let payload = github_ops_tool_response_with_runner(
+            &json!({
+                "action": "issue_create",
+                "repo": "zavora-ai/zavora-cli",
+                "title": "Test issue",
+                "body": "Issue body",
+                "labels": ["bug", "sprint:8"]
+            }),
+            true,
+            |args| {
+                calls.borrow_mut().push(args.to_vec());
+                Ok(GitHubCliOutput {
+                    success: true,
+                    exit_code: 0,
+                    stdout: "https://github.com/zavora-ai/zavora-cli/issues/999".to_string(),
+                    stderr: String::new(),
+                })
+            },
+        );
+
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["action"], "issue_create");
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "issue");
+        assert_eq!(calls[0][1], "create");
+    }
+
+    #[test]
+    fn github_ops_preflight_requires_auth_without_token() {
+        let payload = github_ops_tool_response_with_runner(
+            &json!({
+                "action": "issue_create",
+                "repo": "zavora-ai/zavora-cli",
+                "title": "Needs auth",
+                "body": "body"
+            }),
+            false,
+            |_args| {
+                Ok(GitHubCliOutput {
+                    success: false,
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: "not logged in".to_string(),
+                })
+            },
+        );
+
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["code"], "auth_required");
+    }
+
+    #[test]
+    fn github_ops_project_item_update_runs_expected_mocked_command() {
+        let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let payload = github_ops_tool_response_with_runner(
+            &json!({
+                "action": "project_item_update",
+                "project_id": "PVT_kwDOBVKgdc4BPPxU",
+                "item_id": "PVTI_lADOBVKgdc4BPPxUzglepjM",
+                "field_id": "PVTSSF_lADOBVKgdc4BPPxUzg9te4w",
+                "status_option_id": "98236657"
+            }),
+            true,
+            |args| {
+                calls.borrow_mut().push(args.to_vec());
+                Ok(GitHubCliOutput {
+                    success: true,
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["action"], "project_item_update");
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "project");
+        assert_eq!(calls[0][1], "item-edit");
+    }
+
+    #[test]
     fn error_taxonomy_distinguishes_provider_session_and_tooling() {
         let provider_err = anyhow::anyhow!("OPENAI_API_KEY is required for OpenAI provider");
         let session_err = anyhow::anyhow!("failed to load session 'abc'");
@@ -7206,6 +7625,22 @@ guardrail_redact_replacement = "***"
                 .run_config
                 .tool_confirmation_decisions
                 .get("execute_bash"),
+            Some(&ToolConfirmationDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_requires_github_ops_by_default() {
+        let cfg = base_cfg();
+        let runtime_tools = make_runtime_tools(&["current_unix_time", "github_ops"], &[]);
+
+        let settings = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+        assert!(settings.policy.requires_confirmation("github_ops"));
+        assert_eq!(
+            settings
+                .run_config
+                .tool_confirmation_decisions
+                .get("github_ops"),
             Some(&ToolConfirmationDecision::Deny)
         );
     }

@@ -298,6 +298,20 @@ Example payload:
 - `{ "command": "git status", "approved": false }`
 - `{ "command": "cargo test", "approved": true, "timeout_secs": 60, "retry_attempts": 2 }`
 
+## GitHub Workflow Tool (`github_ops`)
+
+`github_ops` provides native GitHub workflow operations through `gh`:
+
+- `issue_create`
+- `issue_update`
+- `pr_create`
+- `project_item_update`
+
+Security and operability:
+- Preflight auth check enforces GitHub credentials via `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth status`
+- Clear hints are returned when auth is missing or `gh` is unavailable
+- Tool confirmation requires explicit approval by default (`github_ops` is auto-added to required decisions)
+
 ## Telemetry Baseline and Reporting
 
 Structured telemetry is enabled by default and written as JSONL.
