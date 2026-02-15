@@ -124,6 +124,10 @@ tool_retry_attempts = 2
 tool_retry_delay_ms = 500
 telemetry_enabled = true
 telemetry_path = ".zavora/telemetry/events.jsonl"
+guardrail_input_mode = "disabled"   # disabled | observe | block | redact
+guardrail_output_mode = "disabled"  # disabled | observe | block | redact
+guardrail_terms = ["password", "secret", "api key"]
+guardrail_redact_replacement = "[REDACTED]"
 
 [profiles.ops]
 provider = "anthropic"
@@ -263,6 +267,47 @@ The report summarizes:
 - command completion/failure counts
 - tool lifecycle counts (`requested`, `succeeded`, `failed`)
 
+## Guardrail Policy Framework
+
+Guardrails can be configured independently for input and output:
+
+- `disabled`: no guardrail matching
+- `observe`: allow content, emit guardrail events/logs
+- `block`: reject content with actionable error
+- `redact`: mask matched terms before continuation/output
+
+Profile controls:
+
+```toml
+[profiles.default]
+guardrail_input_mode = "observe"
+guardrail_output_mode = "redact"
+guardrail_terms = ["password", "secret", "api key", "private key"]
+guardrail_redact_replacement = "[REDACTED]"
+```
+
+CLI/env overrides:
+
+```bash
+cargo run -- \
+  --guardrail-input-mode block \
+  --guardrail-output-mode redact \
+  --guardrail-term secret \
+  --guardrail-term password \
+  --guardrail-redact-replacement "[MASKED]" \
+  ask "Summarize this content"
+```
+
+- `ZAVORA_GUARDRAIL_INPUT_MODE`
+- `ZAVORA_GUARDRAIL_OUTPUT_MODE`
+- `ZAVORA_GUARDRAIL_TERM`
+- `ZAVORA_GUARDRAIL_REDACT_REPLACEMENT`
+
+Observability:
+- guardrail outcomes emit structured telemetry events (`guardrail.input.*`, `guardrail.output.*`)
+- `profiles show` and `doctor` print active guardrail modes and term counts
+- in chat, output `block`/`redact` modes switch to buffered rendering so policies can be enforced before printing
+
 ## Evaluation Harness and Benchmark Suite
 
 Run dataset-based quality evaluation and retrieval benchmark metrics:
@@ -351,3 +396,4 @@ See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration deta
 See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime registration flow.
 See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.
 See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.
+See `docs/GUARDRAIL_POLICY.md` for guardrail modes, telemetry events, and enforcement behavior.

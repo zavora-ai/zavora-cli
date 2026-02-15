@@ -69,6 +69,15 @@ enum ToolConfirmationMode {
     Always,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum GuardrailMode {
+    Disabled,
+    Observe,
+    Block,
+    Redact,
+}
+
 #[derive(Debug, Subcommand)]
 enum ProfileCommands {
     #[command(about = "List configured profiles and highlight the active profile")]
@@ -154,6 +163,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli mcp list\n\
   zavora-cli mcp discover --server ops-tools\n\
   zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
+  zavora-cli --guardrail-input-mode observe --guardrail-output-mode redact ask \"Review this draft\"\n\
   zavora-cli telemetry report --limit 2000\n\
   zavora-cli eval run --benchmark-iterations 200 --fail-under 0.90\n\
 \n\
@@ -231,6 +241,18 @@ struct Cli {
 
     #[arg(long, env = "ZAVORA_TELEMETRY_PATH")]
     telemetry_path: Option<String>,
+
+    #[arg(long, env = "ZAVORA_GUARDRAIL_INPUT_MODE", value_enum)]
+    guardrail_input_mode: Option<GuardrailMode>,
+
+    #[arg(long, env = "ZAVORA_GUARDRAIL_OUTPUT_MODE", value_enum)]
+    guardrail_output_mode: Option<GuardrailMode>,
+
+    #[arg(long, env = "ZAVORA_GUARDRAIL_TERM")]
+    guardrail_term: Vec<String>,
+
+    #[arg(long, env = "ZAVORA_GUARDRAIL_REDACT_REPLACEMENT")]
+    guardrail_redact_replacement: Option<String>,
 
     #[arg(long, env = "RUST_LOG", default_value = "warn")]
     log_filter: String,
@@ -319,6 +341,10 @@ struct RuntimeConfig {
     tool_retry_delay_ms: u64,
     telemetry_enabled: bool,
     telemetry_path: String,
+    guardrail_input_mode: GuardrailMode,
+    guardrail_output_mode: GuardrailMode,
+    guardrail_terms: Vec<String>,
+    guardrail_redact_replacement: String,
     mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -354,6 +380,11 @@ struct ProfileConfig {
     tool_retry_delay_ms: Option<u64>,
     telemetry_enabled: Option<bool>,
     telemetry_path: Option<String>,
+    guardrail_input_mode: Option<GuardrailMode>,
+    guardrail_output_mode: Option<GuardrailMode>,
+    #[serde(default)]
+    guardrail_terms: Vec<String>,
+    guardrail_redact_replacement: Option<String>,
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
 }
@@ -702,6 +733,16 @@ fn unix_ms_now() -> u128 {
 
 const DEFAULT_EVAL_DATASET_PATH: &str = "evals/datasets/retrieval-baseline.v1.json";
 const DEFAULT_EVAL_OUTPUT_PATH: &str = ".zavora/evals/latest.json";
+const DEFAULT_GUARDRAIL_TERMS: &[&str] = &[
+    "password",
+    "secret",
+    "api key",
+    "api_key",
+    "private key",
+    "access token",
+    "ssn",
+    "social security",
+];
 
 #[derive(Debug, Deserialize)]
 struct EvalDataset {
@@ -1007,6 +1048,143 @@ fn run_eval(
     Ok(())
 }
 
+fn default_guardrail_terms() -> Vec<String> {
+    DEFAULT_GUARDRAIL_TERMS
+        .iter()
+        .map(|term| term.to_string())
+        .collect::<Vec<String>>()
+}
+
+fn guardrail_mode_label(mode: GuardrailMode) -> &'static str {
+    match mode {
+        GuardrailMode::Disabled => "disabled",
+        GuardrailMode::Observe => "observe",
+        GuardrailMode::Block => "block",
+        GuardrailMode::Redact => "redact",
+    }
+}
+
+fn contains_guardrail_terms(text: &str, terms: &[String]) -> Vec<String> {
+    let mut hits = BTreeSet::<String>::new();
+    let lower = text.to_ascii_lowercase();
+    for term in terms {
+        let normalized = term.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if lower.contains(&normalized) {
+            hits.insert(normalized);
+        }
+    }
+    hits.into_iter().collect::<Vec<String>>()
+}
+
+fn replace_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return input.to_string();
+    }
+
+    let input_lower = input.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut last_idx = 0usize;
+    let mut search_idx = 0usize;
+
+    while let Some(relative) = input_lower[search_idx..].find(&needle_lower) {
+        let start = search_idx + relative;
+        let end = start + needle.len();
+        out.push_str(&input[last_idx..start]);
+        out.push_str(replacement);
+        last_idx = end;
+        search_idx = end;
+    }
+
+    out.push_str(&input[last_idx..]);
+    out
+}
+
+fn redact_guardrail_terms(text: &str, hits: &[String], replacement: &str) -> String {
+    let mut redacted = text.to_string();
+    for hit in hits {
+        redacted = replace_case_insensitive(&redacted, hit, replacement);
+    }
+    redacted
+}
+
+fn apply_guardrail(
+    cfg: &RuntimeConfig,
+    telemetry: &TelemetrySink,
+    direction: &str,
+    mode: GuardrailMode,
+    text: &str,
+) -> Result<String> {
+    if matches!(mode, GuardrailMode::Disabled) {
+        return Ok(text.to_string());
+    }
+
+    let hits = contains_guardrail_terms(text, &cfg.guardrail_terms);
+    if hits.is_empty() {
+        return Ok(text.to_string());
+    }
+
+    let mode_label = guardrail_mode_label(mode);
+    let hit_count = hits.len();
+    let telemetry_payload = json!({
+        "direction": direction,
+        "mode": mode_label,
+        "hits": hits.clone(),
+        "hit_count": hit_count
+    });
+
+    match mode {
+        GuardrailMode::Observe => {
+            tracing::warn!(
+                direction = direction,
+                mode = mode_label,
+                hit_count = hit_count,
+                "Guardrail observed content matches"
+            );
+            telemetry.emit(
+                &format!("guardrail.{direction}.observed"),
+                telemetry_payload,
+            );
+            Ok(text.to_string())
+        }
+        GuardrailMode::Block => {
+            tracing::warn!(
+                direction = direction,
+                mode = mode_label,
+                hit_count = hit_count,
+                "Guardrail blocked content"
+            );
+            telemetry.emit(&format!("guardrail.{direction}.blocked"), telemetry_payload);
+            Err(anyhow::anyhow!(
+                "guardrail blocked {} content due to matched terms",
+                direction
+            ))
+        }
+        GuardrailMode::Redact => {
+            let redacted = redact_guardrail_terms(text, &hits, &cfg.guardrail_redact_replacement);
+            tracing::warn!(
+                direction = direction,
+                mode = mode_label,
+                hit_count = hit_count,
+                "Guardrail redacted content"
+            );
+            telemetry.emit(
+                &format!("guardrail.{direction}.redacted"),
+                telemetry_payload,
+            );
+            Ok(redacted)
+        }
+        GuardrailMode::Disabled => Ok(text.to_string()),
+    }
+}
+
+fn buffered_output_required(mode: GuardrailMode) -> bool {
+    matches!(mode, GuardrailMode::Block | GuardrailMode::Redact)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1032,7 +1210,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
             "profile": cfg.profile,
             "session_backend": format!("{:?}", cfg.session_backend),
             "retrieval_backend": format!("{:?}", cfg.retrieval_backend),
-            "telemetry_enabled": cfg.telemetry_enabled
+            "telemetry_enabled": cfg.telemetry_enabled,
+            "guardrail_input_mode": guardrail_mode_label(cfg.guardrail_input_mode),
+            "guardrail_output_mode": guardrail_mode_label(cfg.guardrail_output_mode)
         }),
     );
 
@@ -1080,11 +1260,20 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
             let prompt = prompt.join(" ");
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for ask command")?;
             let answer =
                 run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
+            let answer = apply_guardrail(
+                &cfg,
+                &telemetry,
+                "output",
+                cfg.guardrail_output_mode,
+                &answer,
+            )?;
             println!("{answer}");
             Ok(())
         }
@@ -1135,11 +1324,20 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
             let prompt = prompt.join(" ");
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for workflow command")?;
             let answer =
                 run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
+            let answer = apply_guardrail(
+                &cfg,
+                &telemetry,
+                "output",
+                cfg.guardrail_output_mode,
+                &answer,
+            )?;
             println!("{answer}");
             Ok(())
         }
@@ -1157,11 +1355,20 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let agent = build_release_planning_agent(model, releases)?;
             let runner = build_runner(agent, &cfg).await?;
             let prompt = goal.join(" ");
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for release-plan command")?;
             let answer =
                 run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
+            let answer = apply_guardrail(
+                &cfg,
+                &telemetry,
+                "output",
+                cfg.guardrail_output_mode,
+                &answer,
+            )?;
             println!("{answer}");
             Ok(())
         }
@@ -1332,6 +1539,14 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
     let require_confirm_tool =
         merge_unique_names(&profile.require_confirm_tool, &cli.require_confirm_tool);
     let approve_tool = merge_unique_names(&profile.approve_tool, &cli.approve_tool);
+    let guardrail_terms = {
+        let merged = merge_unique_names(&profile.guardrail_terms, &cli.guardrail_term);
+        if merged.is_empty() {
+            default_guardrail_terms()
+        } else {
+            merged
+        }
+    };
     let mcp_servers = profile.mcp_servers.clone();
 
     Ok(RuntimeConfig {
@@ -1414,6 +1629,20 @@ fn resolve_runtime_config(cli: &Cli, profiles: &ProfilesFile) -> Result<RuntimeC
             .clone()
             .or(profile.telemetry_path)
             .unwrap_or_else(|| ".zavora/telemetry/events.jsonl".to_string()),
+        guardrail_input_mode: cli
+            .guardrail_input_mode
+            .or(profile.guardrail_input_mode)
+            .unwrap_or(GuardrailMode::Disabled),
+        guardrail_output_mode: cli
+            .guardrail_output_mode
+            .or(profile.guardrail_output_mode)
+            .unwrap_or(GuardrailMode::Disabled),
+        guardrail_terms,
+        guardrail_redact_replacement: cli
+            .guardrail_redact_replacement
+            .clone()
+            .or(profile.guardrail_redact_replacement)
+            .unwrap_or_else(|| "[REDACTED]".to_string()),
         mcp_servers,
     })
 }
@@ -1484,6 +1713,13 @@ fn run_profiles_show(cfg: &RuntimeConfig) -> Result<()> {
     println!("Tool retry delay (ms): {}", cfg.tool_retry_delay_ms);
     println!("Telemetry enabled: {}", cfg.telemetry_enabled);
     println!("Telemetry path: {}", cfg.telemetry_path);
+    println!(
+        "Guardrails: input_mode={:?} output_mode={:?} terms={} redact_replacement={}",
+        cfg.guardrail_input_mode,
+        cfg.guardrail_output_mode,
+        cfg.guardrail_terms.len(),
+        cfg.guardrail_redact_replacement
+    );
     println!("MCP servers: {}", cfg.mcp_servers.len());
     Ok(())
 }
@@ -3025,6 +3261,12 @@ async fn run_chat(
     println!(
         "Interactive mode started. Type /exit to quit. Use /provider <name> or /model <id> to switch runtime."
     );
+    if buffered_output_required(cfg.guardrail_output_mode) {
+        println!(
+            "Guardrail output mode {:?} active: chat will buffer model responses before printing.",
+            cfg.guardrail_output_mode
+        );
+    }
     let stdin = io::stdin();
     let mut line = String::new();
 
@@ -3153,14 +3395,59 @@ async fn run_chat(
             continue;
         }
 
-        run_prompt_streaming_with_retrieval(
-            &runner,
-            &cfg,
-            input,
-            retrieval_service.as_ref(),
-            telemetry,
-        )
-        .await?;
+        let guarded_input =
+            match apply_guardrail(&cfg, telemetry, "input", cfg.guardrail_input_mode, input) {
+                Ok(text) => text,
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err));
+                    continue;
+                }
+            };
+
+        if buffered_output_required(cfg.guardrail_output_mode) {
+            let answer = run_prompt_with_retrieval(
+                &runner,
+                &cfg,
+                &guarded_input,
+                retrieval_service.as_ref(),
+                telemetry,
+            )
+            .await?;
+            let answer = match apply_guardrail(
+                &cfg,
+                telemetry,
+                "output",
+                cfg.guardrail_output_mode,
+                &answer,
+            ) {
+                Ok(text) => text,
+                Err(err) => {
+                    eprintln!("{}", format_cli_error(&err));
+                    continue;
+                }
+            };
+            println!("{answer}");
+        } else {
+            let answer = run_prompt_streaming_with_retrieval(
+                &runner,
+                &cfg,
+                &guarded_input,
+                retrieval_service.as_ref(),
+                telemetry,
+            )
+            .await?;
+            if matches!(cfg.guardrail_output_mode, GuardrailMode::Observe)
+                && let Err(err) = apply_guardrail(
+                    &cfg,
+                    telemetry,
+                    "output",
+                    cfg.guardrail_output_mode,
+                    &answer,
+                )
+            {
+                eprintln!("{}", format_cli_error(&err));
+            }
+        }
     }
 
     Ok(())
@@ -3181,7 +3468,7 @@ async fn run_prompt_streaming(
     cfg: &RuntimeConfig,
     prompt: &str,
     telemetry: &TelemetrySink,
-) -> Result<()> {
+) -> Result<String> {
     let mut stream = runner
         .run(
             cfg.user_id.clone(),
@@ -3239,7 +3526,9 @@ async fn run_prompt_streaming(
         }
 
         println!();
-        return Ok(());
+        return Ok(tracker
+            .resolve_text()
+            .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string()));
     }
 
     let fallback = tracker
@@ -3247,7 +3536,7 @@ async fn run_prompt_streaming(
         .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string());
 
     println!("{fallback}");
-    Ok(())
+    Ok(fallback)
 }
 
 async fn run_prompt_streaming_with_retrieval(
@@ -3256,7 +3545,7 @@ async fn run_prompt_streaming_with_retrieval(
     prompt: &str,
     retrieval: &dyn RetrievalService,
     telemetry: &TelemetrySink,
-) -> Result<()> {
+) -> Result<String> {
     let policy = RetrievalPolicy {
         max_chunks: cfg.retrieval_max_chunks,
         max_chars: cfg.retrieval_max_chars,
@@ -3549,6 +3838,13 @@ async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
         cfg.telemetry_enabled, cfg.telemetry_path
     );
     println!(
+        "Guardrails: input_mode={:?} output_mode={:?} terms={} redact_replacement={}",
+        cfg.guardrail_input_mode,
+        cfg.guardrail_output_mode,
+        cfg.guardrail_terms.len(),
+        cfg.guardrail_redact_replacement
+    );
+    println!(
         "MCP servers: configured={}, enabled={}",
         cfg.mcp_servers.len(),
         cfg.mcp_servers
@@ -3838,6 +4134,10 @@ mod tests {
             tool_retry_delay_ms: 500,
             telemetry_enabled: false,
             telemetry_path: ".zavora/test-telemetry.jsonl".to_string(),
+            guardrail_input_mode: GuardrailMode::Disabled,
+            guardrail_output_mode: GuardrailMode::Disabled,
+            guardrail_terms: vec!["secret".to_string(), "password".to_string()],
+            guardrail_redact_replacement: "[REDACTED]".to_string(),
             mcp_servers: Vec::new(),
         }
     }
@@ -3911,6 +4211,10 @@ mod tests {
             tool_retry_delay_ms: None,
             telemetry_enabled: None,
             telemetry_path: None,
+            guardrail_input_mode: None,
+            guardrail_output_mode: None,
+            guardrail_term: Vec::new(),
+            guardrail_redact_replacement: None,
             log_filter: "warn".to_string(),
             command: Commands::Doctor,
         }
@@ -4213,6 +4517,13 @@ retrieval_min_score = 2
         assert_eq!(cfg.tool_retry_delay_ms, 500);
         assert!(cfg.telemetry_enabled);
         assert_eq!(cfg.telemetry_path, ".zavora/telemetry/events.jsonl");
+        assert_eq!(cfg.guardrail_input_mode, GuardrailMode::Disabled);
+        assert_eq!(cfg.guardrail_output_mode, GuardrailMode::Disabled);
+        assert!(
+            cfg.guardrail_terms.iter().any(|term| term == "password"),
+            "default guardrail terms should include baseline sensitive markers"
+        );
+        assert_eq!(cfg.guardrail_redact_replacement, "[REDACTED]");
     }
 
     #[test]
@@ -4231,6 +4542,10 @@ approve_tool = ["release_template"]
 tool_timeout_secs = 90
 tool_retry_attempts = 4
 tool_retry_delay_ms = 750
+guardrail_input_mode = "observe"
+guardrail_output_mode = "redact"
+guardrail_terms = ["internal-only", "private data"]
+guardrail_redact_replacement = "***"
 
 [[profiles.dev.mcp_servers]]
 name = "atlas"
@@ -4270,6 +4585,10 @@ enabled = false
         assert_eq!(cfg.tool_retry_delay_ms, 750);
         assert!(cfg.telemetry_enabled);
         assert_eq!(cfg.telemetry_path, ".zavora/telemetry/events.jsonl");
+        assert_eq!(cfg.guardrail_input_mode, GuardrailMode::Observe);
+        assert_eq!(cfg.guardrail_output_mode, GuardrailMode::Redact);
+        assert_eq!(cfg.guardrail_terms, vec!["internal-only", "private data"]);
+        assert_eq!(cfg.guardrail_redact_replacement, "***");
         assert_eq!(cfg.mcp_servers[1].name, "disabled-tooling");
         assert_eq!(cfg.mcp_servers[1].enabled, Some(false));
     }
@@ -4297,6 +4616,37 @@ telemetry_path = ".zavora/telemetry/dev.jsonl"
 
         assert!(!cfg.telemetry_enabled);
         assert_eq!(cfg.telemetry_path, ".zavora/telemetry/override.jsonl");
+    }
+
+    #[test]
+    fn runtime_config_guardrail_cli_overrides_profile_values() {
+        let dir = tempdir().expect("temp directory should create");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.dev]
+guardrail_input_mode = "observe"
+guardrail_output_mode = "block"
+guardrail_terms = ["secret"]
+guardrail_redact_replacement = "***"
+"#,
+        )
+        .expect("config should write");
+
+        let mut cli = test_cli(path.to_string_lossy().as_ref(), "dev");
+        cli.guardrail_input_mode = Some(GuardrailMode::Block);
+        cli.guardrail_output_mode = Some(GuardrailMode::Redact);
+        cli.guardrail_term = vec!["token".to_string(), "password".to_string()];
+        cli.guardrail_redact_replacement = Some("[MASKED]".to_string());
+
+        let profiles = load_profiles(&cli.config_path).expect("profiles should load");
+        let cfg = resolve_runtime_config(&cli, &profiles).expect("runtime config should resolve");
+
+        assert_eq!(cfg.guardrail_input_mode, GuardrailMode::Block);
+        assert_eq!(cfg.guardrail_output_mode, GuardrailMode::Redact);
+        assert_eq!(cfg.guardrail_terms, vec!["secret", "token", "password"]);
+        assert_eq!(cfg.guardrail_redact_replacement, "[MASKED]");
     }
 
     #[test]
@@ -4355,6 +4705,54 @@ telemetry_path = ".zavora/telemetry/dev.jsonl"
         assert_eq!(summary.command_counts.get("ask"), Some(&4));
         assert_eq!(summary.command_counts.get("workflow.parallel"), Some(&1));
         assert_eq!(summary.last_event_ts_unix_ms, Some(1400));
+    }
+
+    #[test]
+    fn guardrail_redact_mode_masks_detected_terms() {
+        let mut cfg = base_cfg();
+        cfg.guardrail_terms = vec!["api key".to_string()];
+        cfg.guardrail_redact_replacement = "[MASKED]".to_string();
+        let telemetry = test_telemetry(&cfg);
+
+        let out = apply_guardrail(
+            &cfg,
+            &telemetry,
+            "output",
+            GuardrailMode::Redact,
+            "Share the API KEY only with admins.",
+        )
+        .expect("redact mode should return transformed text");
+
+        assert_eq!(out, "Share the [MASKED] only with admins.");
+    }
+
+    #[test]
+    fn guardrail_block_mode_rejects_matching_content() {
+        let mut cfg = base_cfg();
+        cfg.guardrail_terms = vec!["secret".to_string()];
+        let telemetry = test_telemetry(&cfg);
+
+        let err = apply_guardrail(
+            &cfg,
+            &telemetry,
+            "input",
+            GuardrailMode::Block,
+            "This contains a secret token.",
+        )
+        .expect_err("block mode should fail on term match");
+        assert!(err.to_string().contains("guardrail blocked input content"));
+    }
+
+    #[test]
+    fn guardrail_observe_mode_logs_but_does_not_modify_text() {
+        let mut cfg = base_cfg();
+        cfg.guardrail_terms = vec!["password".to_string()];
+        let telemetry = test_telemetry(&cfg);
+
+        let text = "password rotation should happen every 90 days";
+        let out = apply_guardrail(&cfg, &telemetry, "output", GuardrailMode::Observe, text)
+            .expect("observe mode should not fail");
+        assert_eq!(out, text);
     }
 
     fn eval_dataset_fixture() -> EvalDataset {
