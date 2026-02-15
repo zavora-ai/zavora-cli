@@ -334,10 +334,13 @@ impl Drop for Spinner {
 // ---------------------------------------------------------------------------
 
 /// Streaming-aware markdown renderer that buffers partial lines and renders
-/// complete lines with ANSI formatting as they arrive.
+/// complete lines with ANSI formatting as they arrive. Partial lines are
+/// rendered eagerly and re-rendered when more tokens arrive for smooth output.
 pub struct MarkdownRenderer {
     buf: String,
     in_codeblock: bool,
+    /// Length of the last partial line we printed (so we can erase it).
+    partial_printed: usize,
 }
 
 impl MarkdownRenderer {
@@ -345,20 +348,40 @@ impl MarkdownRenderer {
         Self {
             buf: String::new(),
             in_codeblock: false,
+            partial_printed: 0,
         }
     }
 
     /// Push a streaming delta. Returns rendered text ready to print.
     pub fn push(&mut self, delta: &str) -> String {
-        self.buf.push_str(delta);
+        // Erase previously printed partial line
         let mut output = String::new();
+        if self.partial_printed > 0 {
+            // Move cursor back and clear the partial line
+            output.push_str(&format!("\r\x1b[2K"));
+            self.partial_printed = 0;
+        }
 
-        // Render all complete lines, keep the remainder
+        self.buf.push_str(delta);
+
+        // Render all complete lines
         while let Some(pos) = self.buf.find('\n') {
             let line = self.buf[..pos].to_string();
             self.buf = self.buf[pos + 1..].to_string();
             output.push_str(&self.render_line(&line));
             output.push('\n');
+        }
+
+        // Eagerly render the partial line for smooth streaming
+        if !self.buf.is_empty() {
+            let partial = if self.in_codeblock {
+                // Inside code block — just pass through (green already set)
+                self.buf.clone()
+            } else {
+                render_inline(&self.buf)
+            };
+            self.partial_printed = 1; // flag that we have a partial
+            output.push_str(&partial);
         }
 
         output
@@ -369,8 +392,15 @@ impl MarkdownRenderer {
         if self.buf.is_empty() {
             return String::new();
         }
+        // Erase partial and render final version
+        let mut output = String::new();
+        if self.partial_printed > 0 {
+            output.push_str("\r\x1b[2K");
+            self.partial_printed = 0;
+        }
         let line = std::mem::take(&mut self.buf);
-        self.render_line(&line)
+        output.push_str(&self.render_line(&line));
+        output
     }
 
     fn render_line(&mut self, line: &str) -> String {
