@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-02-15T05:13:11Z",
+  "config": {
+    "host": "127.0.0.1",
+    "port": 8789,
+    "requests_per_endpoint": 300,
+    "concurrency": 30
+  },
+  "targets": {
+    "eval_p95_ms": 5,
+    "health_p95_ms": 50,
+    "a2a_ping_p95_ms": 80,
+    "server_rss_mb": 300
+  },
+  "eval": {
+    "report": ".zavora/evals/perf-reliability.json",
+    "pass_rate": 1.0,
+    "avg_latency_ms": 0.009,
+    "p95_latency_ms": 0.011,
+    "throughput_qps": 106246.146
+  },
+  "endpoint_load": {
+    "healthz": {
+      "sample_count": 300,
+      "avg_ms": 3.318,
+      "p95_ms": 9.597,
+      "p99_ms": 12.089,
+      "min_ms": 0.345,
+      "max_ms": 13.912
+    },
+    "a2a_ping": {
+      "sample_count": 300,
+      "avg_ms": 7.158,
+      "p95_ms": 19.277,
+      "p99_ms": 25.776,
+      "min_ms": 0.620,
+      "max_ms": 66.945
+    }
+  },
+  "resources": {
+    "server_rss_mb": 20.16
+  },
+  "status": {
+    "passed": true,
+    "failures": []
+  }
+}

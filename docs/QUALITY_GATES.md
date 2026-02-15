@@ -16,6 +16,7 @@ This executes:
 2. Guardrail regression tests (`cargo test guardrail_`)
 3. Security hardening gate (`make security-check`) during release workflow
 4. RustSec advisory policy tracked in `.cargo/audit.toml` (temporary ignores must be reviewed each release)
+5. GA performance/reliability gate (`make perf-check`) with endpoint p95 and RSS targets
 
 ## Thresholds
 

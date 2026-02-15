@@ -1218,9 +1218,13 @@ fn buffered_output_required(mode: GuardrailMode) -> bool {
 struct ServerState {
     cfg: RuntimeConfig,
     retrieval: Arc<dyn RetrievalService>,
-    runtime_tools: ResolvedRuntimeTools,
-    tool_confirmation: ToolConfirmationSettings,
     telemetry: TelemetrySink,
+    server_agent: Arc<dyn Agent>,
+    session_service: Arc<dyn SessionService>,
+    run_config: RunConfig,
+    provider_label: String,
+    model_name: String,
+    runner_cache: Arc<tokio::sync::RwLock<HashMap<String, Arc<Runner>>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1274,6 +1278,37 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
     (status, Json(json!({ "error": message.into() })))
 }
 
+fn server_runner_cache_key(cfg: &RuntimeConfig) -> String {
+    format!("{}::{}", cfg.user_id, cfg.session_id)
+}
+
+async fn get_or_build_server_runner(
+    state: &ServerState,
+    cfg: &RuntimeConfig,
+) -> Result<(Arc<Runner>, &'static str)> {
+    let key = server_runner_cache_key(cfg);
+    if let Some(runner) = state.runner_cache.read().await.get(&key).cloned() {
+        return Ok((runner, "hit"));
+    }
+
+    let runner = Arc::new(
+        build_runner_with_session_service(
+            state.server_agent.clone(),
+            cfg,
+            state.session_service.clone(),
+            Some(state.run_config.clone()),
+        )
+        .await?,
+    );
+
+    let mut cache = state.runner_cache.write().await;
+    if let Some(existing) = cache.get(&key).cloned() {
+        return Ok((existing, "hit-race"));
+    }
+    cache.insert(key, runner.clone());
+    Ok((runner, "miss"))
+}
+
 async fn handle_server_health(State(state): State<Arc<ServerState>>) -> Json<ServerHealthResponse> {
     Json(ServerHealthResponse {
         status: "ok",
@@ -1286,6 +1321,7 @@ async fn handle_server_ask(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<ServerAskRequest>,
 ) -> ApiResult<ServerAskResponse> {
+    let started_at = Instant::now();
     let mut cfg = state.cfg.clone();
     if let Some(session_id) = request.session_id {
         cfg.session_id = session_id;
@@ -1311,25 +1347,12 @@ async fn handle_server_ask(
     )
     .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
 
-    let (model, resolved_provider, model_name) =
-        resolve_model(&cfg).map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
-    let agent = build_single_agent_with_tools(
-        model,
-        &state.runtime_tools.tools,
-        state.tool_confirmation.policy.clone(),
-        Duration::from_secs(cfg.tool_timeout_secs),
-    )
-    .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let runner = build_runner_with_run_config(
-        agent,
-        &cfg,
-        Some(state.tool_confirmation.run_config.clone()),
-    )
-    .await
-    .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let (runner, cache_status) = get_or_build_server_runner(&state, &cfg)
+        .await
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
     let answer = run_prompt_with_retrieval(
-        &runner,
+        runner.as_ref(),
         &cfg,
         &guarded_prompt,
         state.retrieval.as_ref(),
@@ -1349,17 +1372,19 @@ async fn handle_server_ask(
     state.telemetry.emit(
         "server.ask.completed",
         json!({
-            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
-            "model": model_name.clone(),
+            "provider": state.provider_label.clone(),
+            "model": state.model_name.clone(),
             "session_id": cfg.session_id.clone(),
-            "user_id": cfg.user_id.clone()
+            "user_id": cfg.user_id.clone(),
+            "runner_cache": cache_status,
+            "latency_ms": round_metric(started_at.elapsed().as_secs_f64() * 1000.0)
         }),
     );
 
     Ok(Json(ServerAskResponse {
         answer,
-        provider: format!("{:?}", resolved_provider).to_ascii_lowercase(),
-        model: model_name,
+        provider: state.provider_label.clone(),
+        model: state.model_name.clone(),
         session_id: cfg.session_id,
         user_id: cfg.user_id,
     }))
@@ -1439,12 +1464,44 @@ async fn run_server(
     let retrieval = build_retrieval_service(&cfg)?;
     let runtime_tools = resolve_runtime_tools(&cfg).await;
     let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+    let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
+    let provider_label = format!("{:?}", resolved_provider).to_ascii_lowercase();
+    telemetry.emit(
+        "model.resolved",
+        json!({
+            "provider": provider_label.clone(),
+            "model": model_name.clone(),
+            "path": "server"
+        }),
+    );
+    let server_agent = build_single_agent_with_tools(
+        model,
+        &runtime_tools.tools,
+        tool_confirmation.policy.clone(),
+        Duration::from_secs(cfg.tool_timeout_secs),
+    )?;
+    let session_service = build_session_service(&cfg).await?;
+    let warm_runner = Arc::new(
+        build_runner_with_session_service(
+            server_agent.clone(),
+            &cfg,
+            session_service.clone(),
+            Some(tool_confirmation.run_config.clone()),
+        )
+        .await?,
+    );
+    let mut runner_cache = HashMap::new();
+    runner_cache.insert(server_runner_cache_key(&cfg), warm_runner);
     let state = Arc::new(ServerState {
         cfg: cfg.clone(),
         retrieval,
-        runtime_tools,
-        tool_confirmation,
         telemetry: telemetry.clone(),
+        server_agent,
+        session_service,
+        run_config: tool_confirmation.run_config.clone(),
+        provider_label: provider_label.clone(),
+        model_name: model_name.clone(),
+        runner_cache: Arc::new(tokio::sync::RwLock::new(runner_cache)),
     });
 
     telemetry.emit(
@@ -1453,7 +1510,9 @@ async fn run_server(
             "host": host,
             "port": port,
             "profile": cfg.profile,
-            "session_backend": format!("{:?}", cfg.session_backend)
+            "session_backend": format!("{:?}", cfg.session_backend),
+            "provider": provider_label,
+            "model": model_name
         }),
     );
 
@@ -5364,6 +5423,18 @@ provider = "not-a-provider"
             err.to_string().contains(
                 "Supported values: auto, gemini, openai, anthropic, deepseek, groq, ollama"
             )
+        );
+    }
+
+    #[test]
+    fn server_runner_cache_key_uses_user_and_session() {
+        let mut cfg = base_cfg();
+        cfg.user_id = "perf-user".to_string();
+        cfg.session_id = "perf-session".to_string();
+
+        assert_eq!(
+            server_runner_cache_key(&cfg),
+            "perf-user::perf-session".to_string()
         );
     }
 

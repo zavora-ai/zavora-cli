@@ -42,6 +42,7 @@ Minimum gates before tagging:
 - `cargo run -- eval run --dataset evals/datasets/retrieval-baseline.v1.json --output .zavora/evals/release-candidate.json --benchmark-iterations 200 --fail-under 0.90`
 - `make quality-gate`
 - `make security-check`
+- `make perf-check`
 - Changelog entry prepared
 
 ## Branch + Tag Strategy

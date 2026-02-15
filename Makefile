@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test eval quality-gate security-check ci release-check
+.PHONY: fmt fmt-check check lint test eval quality-gate security-check perf-check ci release-check
 
 fmt:
 	cargo fmt --all
@@ -23,6 +23,9 @@ quality-gate:
 
 security-check:
 	./scripts/security_check.sh
+
+perf-check:
+	./scripts/perf_reliability.sh
 
 ci: fmt-check check lint test quality-gate
 
