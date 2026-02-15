@@ -1,118 +1,192 @@
 # zavora-cli
 
-`zavora-cli` is a Rust command-line AI agent built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
-It is structured for fast iteration and release-based delivery with CI/release automation.
-
-## What It Supports
-
-- Provider-aware model runtime (`gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `ollama`)
-- Session backends (`memory` and persistent `sqlite`)
-- ADK workflow modes:
-  - `single` (`LlmAgent`)
-  - `sequential` (`SequentialAgent`)
-  - `parallel` (`ParallelAgent` + synthesis stage)
-  - `loop` (`LoopAgent` + `ExitLoopTool`)
-  - `graph` (`GraphAgent` with conditional routing and reusable templates)
-- Session-backed execution with `Runner`
-- Built-in release planning command for agile slices
+A Rust command-line AI agent built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
+Multi-provider, tool-augmented, with persistent sessions, context management, and coding workflows.
 
 ## Prerequisites
 
 - Rust toolchain (`rustup`, `cargo`)
-- One provider credential (or Ollama running locally)
+- At least one provider credential (or Ollama running locally)
 
-Set at least one of:
+Set one or more of:
 
-- `GOOGLE_API_KEY`
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `DEEPSEEK_API_KEY`
-- `GROQ_API_KEY`
-- For local: `OLLAMA_HOST` (optional, defaults to `http://localhost:11434`)
+```
+GOOGLE_API_KEY
+OPENAI_API_KEY
+ANTHROPIC_API_KEY
+DEEPSEEK_API_KEY
+GROQ_API_KEY
+OLLAMA_HOST          # optional, defaults to http://localhost:11434
+```
 
 ## Quick Start
 
 ```bash
 cargo run -- ask "Design a Rust CLI with release-based milestones"
+cargo run -- --provider openai --model gpt-4o-mini chat
+cargo run -- workflow sequential "Plan an MVP rollout with quality gates"
+cargo run -- workflow graph "Draft a release rollout plan with risks"
+cargo run -- release-plan "Build an enterprise-ready AI CLI" --releases 3
+cargo run -- doctor
 ```
+
+## Core Capabilities
+
+- **Providers**: `gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `ollama`
+- **Session backends**: `memory` (in-process) and `sqlite` (persistent across restarts)
+- **ADK workflow modes**: `single`, `sequential`, `parallel`, `loop`, `graph`
+- **Built-in tools**: `fs_read`, `fs_write`, `execute_bash`, `github_ops`, `todo_list`
+- **MCP integration**: discover and invoke external tool servers per profile
+- **Retrieval**: pluggable context injection (`disabled`, `local`, `semantic`)
+
+## Chat Mode
+
+Interactive chat with slash commands, context-aware prompts, and streaming output.
 
 ```bash
 cargo run -- --provider openai --model gpt-4o-mini chat
 ```
 
-```bash
-cargo run -- workflow sequential "Plan an MVP rollout with quality gates"
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/status` | Current provider, model, session info |
+| `/tools` | List active built-in and MCP tools |
+| `/mcp` | MCP server status and diagnostics |
+| `/usage` | Real-time context window usage breakdown by author |
+| `/compact` | Manually compact session history to reclaim context |
+| `/checkpoint save <label>` | Save session state snapshot |
+| `/checkpoint list` | List saved checkpoints |
+| `/checkpoint restore <tag>` | Restore session to a checkpoint |
+| `/tangent start` | Branch into an exploratory tangent |
+| `/tangent end` | Return to main session, optionally keeping tangent work |
+| `/todos list` | List todo lists in workspace |
+| `/todos show <id>` | Show a specific todo list |
+| `/todos clear` | Remove finished todo lists |
+| `/delegate <task>` | Run an isolated sub-agent prompt in a separate session |
+| `/provider <name>` | Switch provider mid-session |
+| `/model [id]` | Switch model or open interactive model picker |
+| `/exit` | Exit chat |
+
+### Context Management
+
+- **Context usage**: computed from real session events — `/usage` shows token breakdown by author (user, assistant, tool, system) with provider-aware context window limits
+- **Budget indicators**: prompt shows ⚠ (>75%) or 🔴 (>90%) when approaching context limits
+- **Auto-compaction**: configurable automatic summarization when context exceeds thresholds
+- **Manual compaction**: `/compact` summarizes history on demand
+
+### Checkpoints and Tangents
+
+- **Checkpoints** persist to `.zavora/checkpoints.json` and survive CLI restarts
+- **Tangent mode** branches the session for exploratory work, then merges or discards
+
+### Todos and Delegation
+
+- **Todo lists** are persisted to `.zavora/todos/` as JSON files
+- The `todo_list` built-in tool lets the agent create/complete/view/list/delete todos during execution
+- `/delegate <task>` runs an isolated sub-agent prompt in a separate session and returns the result
+
+## Built-in Tools
+
+### `fs_read`
+
+File and directory inspection with bounded controls.
+
+- `start_line`, `max_lines`, `max_bytes` for files; `max_entries` for directories
+- Workspace path policy: denies paths outside root and blocked segments (`.git`, `.zavora`, `.env*`)
+
+### `fs_write`
+
+Controlled file mutations.
+
+- Modes: `create`, `overwrite`, `append`, `patch`
+- `patch` applies minimal-diff replacement via `{ find, replace, replace_all }`
+- Requires tool confirmation by default
+
+### `execute_bash`
+
+Shell execution with safety policy.
+
+- Read-only commands auto-allowed (`ls`, `cat`, `rg`, `git status`, `git diff`)
+- Dangerous patterns blocked by default
+- Per-call `timeout_secs`, `retry_attempts`, `retry_delay_ms`, `max_output_chars`
+
+### `github_ops`
+
+GitHub workflow operations via `gh` CLI.
+
+- Actions: `issue_create`, `issue_update`, `pr_create`, `project_item_update`
+- Requires `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth status`
+
+### `todo_list`
+
+Task list management for structured agent execution.
+
+- Actions: `create`, `complete`, `view`, `list`, `delete`
+- Persisted to `.zavora/todos/<id>.json`
+
+## Tool Policy and Hooks
+
+### Tool Confirmation
+
+```toml
+[profiles.default]
+tool_confirmation_mode = "mcp-only"  # never | mcp-only | always
+require_confirm_tool = ["release_template"]
+approve_tool = ["search_incidents"]
 ```
 
-```bash
-cargo run -- workflow graph "Draft a release rollout plan with risks"
+### Tool Aliases
+
+Remap tool names for agent compatibility:
+
+```toml
+[profiles.default]
+tool_aliases = { "read_file" = "fs_read", "write_file" = "fs_write" }
 ```
 
-```bash
-cargo run -- release-plan "Build an enterprise-ready AI CLI" --releases 3
+### Tool Allow/Deny Lists
+
+Per-agent tool filtering with wildcard support:
+
+```toml
+[agents.coder]
+allow_tools = ["fs_read", "fs_write", "execute_bash", "github_ops.*"]
+deny_tools = ["execute_bash.rm_*"]
 ```
 
-```bash
-cargo run -- doctor
+### Hooks
+
+Pre/post-tool hooks for validation, logging, or blocking:
+
+```toml
+[[profiles.default.hooks.pre_tool]]
+name = "audit-log"
+command = "echo 'tool invoked: $TOOL_NAME' >> .zavora/audit.log"
+timeout_secs = 5
+
+[[profiles.default.hooks.pre_tool]]
+name = "block-rm"
+match_tool = "execute_bash"
+match_args = "rm -rf"
+action = "block"
+message = "Destructive rm blocked by hook policy"
 ```
 
-```bash
-cargo run -- server serve --host 127.0.0.1 --port 8787
+### Tool Reliability
+
+```toml
+[profiles.default]
+tool_timeout_secs = 45
+tool_retry_attempts = 2
+tool_retry_delay_ms = 500
 ```
-
-```bash
-cargo run -- server a2a-smoke
-```
-
-```bash
-cargo run -- eval run --benchmark-iterations 200 --fail-under 0.90
-```
-
-```bash
-cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db migrate
-```
-
-```bash
-cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list
-```
-
-```bash
-cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db --session-id team-planning sessions show --recent 30
-```
-
-```bash
-cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions delete --session-id team-planning --force
-```
-
-```bash
-cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run
-```
-
-Session retention behavior:
-- `memory` backend: in-process only; data resets when the CLI process exits.
-- `sqlite` backend: persistent across runs; `sessions delete` and `sessions prune` are destructive and require `--force` (or `--dry-run` for preview).
-
-## Development Commands
-
-Use `make` targets:
-
-- `make fmt`
-- `make fmt-check`
-- `make check`
-- `make lint`
-- `make test`
-- `make eval`
-- `make quality-gate`
-- `make security-check`
-- `make perf-check`
-- `make ci`
-- `make release-check`
 
 ## Profiles
 
-`zavora-cli` can resolve runtime defaults from profiles in `.zavora/config.toml` (override path with `--config-path`).
-
-Example profile config:
+Runtime defaults from `.zavora/config.toml` (override with `--config-path`):
 
 ```toml
 [profiles.default]
@@ -124,33 +198,55 @@ app_name = "zavora-cli"
 user_id = "local-user"
 session_id = "default-session"
 retrieval_backend = "disabled"
-retrieval_max_chunks = 3
-retrieval_max_chars = 4000
-retrieval_min_score = 1
 tool_confirmation_mode = "mcp-only"
-require_confirm_tool = []
-approve_tool = []
-tool_timeout_secs = 45
-tool_retry_attempts = 2
-tool_retry_delay_ms = 500
 telemetry_enabled = true
 telemetry_path = ".zavora/telemetry/events.jsonl"
-guardrail_input_mode = "disabled"   # disabled | observe | block | redact
-guardrail_output_mode = "disabled"  # disabled | observe | block | redact
+guardrail_input_mode = "disabled"
+guardrail_output_mode = "disabled"
 guardrail_terms = ["password", "secret", "api key"]
 guardrail_redact_replacement = "[REDACTED]"
+compaction_threshold = 0.75
+compaction_target = 0.50
+```
 
-[profiles.ops]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-session_backend = "sqlite"
-session_db_url = "sqlite://.zavora/ops-sessions.db"
-retrieval_backend = "local"
-retrieval_doc_path = "docs/ops-knowledge.md"
-retrieval_max_chunks = 4
-retrieval_max_chars = 3000
-retrieval_min_score = 2
+```bash
+cargo run -- profiles list
+cargo run -- --profile ops profiles show
+```
 
+## Agent Catalogs
+
+Configure agent behavior separately from profiles.
+
+Precedence: implicit `default` → global `~/.zavora/agents.toml` → local `.zavora/agents.toml`.
+
+```toml
+[agents.coder]
+description = "Code-focused assistant"
+provider = "openai"
+model = "gpt-4o-mini"
+tool_confirmation_mode = "always"
+resource_paths = ["docs/architecture.md"]
+allow_tools = ["fs_read", "fs_write", "execute_bash"]
+deny_tools = ["execute_bash.rm_*"]
+```
+
+```bash
+cargo run -- agents list
+cargo run -- agents show --name coder
+cargo run -- agents select --name coder
+cargo run -- --agent reviewer ask "Review this patch"
+```
+
+## MCP Toolset Manager
+
+```bash
+cargo run -- --profile ops mcp list
+cargo run -- --profile ops mcp discover
+cargo run -- --profile ops mcp discover --server ops-tools
+```
+
+```toml
 [[profiles.ops.mcp_servers]]
 name = "ops-tools"
 endpoint = "https://mcp.example.com/ops"
@@ -160,244 +256,14 @@ auth_bearer_env = "OPS_MCP_TOKEN"
 tool_allowlist = ["search_incidents", "get_runbook"]
 ```
 
-Inspect profile state:
+- Unreachable servers show categorized diagnostics in `mcp discover`
+- Unavailable servers are skipped at runtime with a warning
 
-```bash
-cargo run -- profiles list
-cargo run -- --profile ops profiles show
-```
+## Guardrails
 
-## Agent Catalogs
+Independent input/output content policy:
 
-Agent behavior can be configured separately from profiles using agent catalogs.
-
-Catalog precedence:
-- implicit `default` agent (built in)
-- global catalog `~/.zavora/agents.toml`
-- local catalog `.zavora/agents.toml` (wins over global on name collisions)
-
-Active agent precedence:
-- `--agent <name>` (one-shot override)
-- persisted selection in `.zavora/agent-selection.toml`
-- fallback to `default`
-
-Example catalog:
-
-```toml
-[agents.default]
-description = "Default engineering assistant"
-instruction = "Be concise and deterministic."
-
-[agents.coder]
-description = "Code-focused assistant"
-provider = "openai"
-model = "gpt-4o-mini"
-tool_confirmation_mode = "always"
-resource_paths = ["docs/architecture.md", "docs/roadmap.md"]
-allow_tools = ["fs_read", "fs_write", "execute_bash", "github_ops.*"]
-deny_tools = ["execute_bash.rm_*"]
-```
-
-Inspect and select agents:
-
-```bash
-cargo run -- agents list
-cargo run -- agents show --name coder
-cargo run -- agents select --name coder
-cargo run -- --agent reviewer ask "Review this patch"
-```
-
-Sensitive runtime config handling:
-- `profiles show`, `doctor`, and `migrate` redact session DB URLs by default.
-- CLI errors and `command.failed` telemetry events redact sqlite URLs by default.
-- Use `--show-sensitive-config` (or `ZAVORA_SHOW_SENSITIVE_CONFIG=true`) only for local debugging when full values are required.
-
-## MCP Toolset Manager
-
-Configure MCP servers per profile and use CLI discovery commands:
-
-```bash
-cargo run -- --profile ops mcp list
-cargo run -- --profile ops mcp discover
-cargo run -- --profile ops mcp discover --server ops-tools
-```
-
-Behavior:
-- Enabled MCP servers are discovered with per-server timeout/auth settings.
-- Unreachable servers fail with categorized tooling errors in `mcp discover`.
-- Runtime command execution (`ask`, `chat`, `workflow single`) loads built-in tools plus discovered MCP tools.
-- If an MCP server is unavailable during runtime tool discovery, it is skipped with a warning and execution continues.
-
-## Tool Confirmation Safety Controls
-
-`zavora-cli` uses ADK-Rust tool confirmation policy controls with a safe default:
-- default mode is `mcp-only`: discovered MCP tools require explicit approval
-- required-but-unapproved tools are denied deterministically
-- policy is configurable per profile and per tool
-
-Profile fields:
-
-```toml
-[profiles.default]
-tool_confirmation_mode = "mcp-only" # never | mcp-only | always
-require_confirm_tool = ["release_template"] # optional extra required tools
-approve_tool = ["search_incidents"] # allow specific required tools
-```
-
-CLI overrides:
-
-```bash
-cargo run -- \
-  --tool-confirmation-mode always \
-  --require-confirm-tool release_template \
-  --approve-tool release_template \
-  ask "Create a release checklist"
-```
-
-Inspect active policy with:
-
-```bash
-cargo run -- profiles show
-cargo run -- doctor
-```
-
-## Tool Reliability Controls
-
-Tool execution reliability is configurable at profile/CLI level:
-
-```toml
-[profiles.default]
-tool_timeout_secs = 45
-tool_retry_attempts = 2
-tool_retry_delay_ms = 500
-```
-
-CLI override example:
-
-```bash
-cargo run -- \
-  --tool-timeout-secs 60 \
-  --tool-retry-attempts 3 \
-  --tool-retry-delay-ms 800 \
-  mcp discover
-```
-
-Runtime behavior:
-- single-agent tool timeout is enforced via ADK `tool_timeout`
-- MCP discovery/invocation retries follow configured retry attempts/delay
-- tool lifecycle telemetry emits structured events for `requested`, `succeeded`, and `failed`
-
-## Coding File Read Tool (`fs_read`)
-
-`fs_read` is a built-in tool for file and directory inspection during agent runs.
-
-- Reads file content with bounded controls (`start_line`, `max_lines`, `max_bytes`)
-- Reads directory entries with bounded controls (`max_entries`)
-- Enforces deterministic path policy:
-  - denies paths outside workspace root
-  - denies policy-blocked segments/files (for example `.git`, `.zavora`, `.env*`)
-- Returns structured tool errors so telemetry captures `tool.failed` events consistently
-
-To require explicit approval for this tool in sensitive workflows:
-
-```toml
-[profiles.default]
-tool_confirmation_mode = "never"
-require_confirm_tool = ["fs_read"]
-approve_tool = [] # deny until explicitly approved
-```
-
-## Coding File Write Tool (`fs_write`)
-
-`fs_write` is a built-in mutation tool for controlled file updates.
-
-- Supports `create`, `overwrite`, `append`, and `patch` modes
-- `patch` mode applies minimal-diff replacement via `{ find, replace, replace_all }`
-- Uses the same workspace path policy as `fs_read` (outside-root and blocked path denial)
-- Requires explicit tool confirmation by default (`fs_write` is auto-added to required confirmations)
-
-Example payloads used by the agent:
-- Create: `{ "path": "docs/new.md", "mode": "create", "content": "..." }`
-- Patch: `{ "path": "README.md", "mode": "patch", "patch": { "find": "old", "replace": "new" } }`
-
-## Shell Execution Tool (`execute_bash`)
-
-`execute_bash` is a built-in shell execution tool with policy controls:
-
-- Read-only commands are auto-allowed (for example `ls`, `cat`, `rg`, `git status`, `git diff`)
-- Blocked dangerous patterns are denied by default
-- Dangerous overrides require both `allow_dangerous=true` and `approved=true`
-- Non-read-only commands require `approved=true`
-- Supports per-call timeout/retry controls:
-  - `timeout_secs`
-  - `retry_attempts`
-  - `retry_delay_ms`
-  - `max_output_chars`
-
-Example payload:
-- `{ "command": "git status", "approved": false }`
-- `{ "command": "cargo test", "approved": true, "timeout_secs": 60, "retry_attempts": 2 }`
-
-## GitHub Workflow Tool (`github_ops`)
-
-`github_ops` provides native GitHub workflow operations through `gh`:
-
-- `issue_create`
-- `issue_update`
-- `pr_create`
-- `project_item_update`
-
-Security and operability:
-- Preflight auth check enforces GitHub credentials via `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth status`
-- Clear hints are returned when auth is missing or `gh` is unavailable
-- Tool confirmation requires explicit approval by default (`github_ops` is auto-added to required decisions)
-
-## Telemetry Baseline and Reporting
-
-Structured telemetry is enabled by default and written as JSONL.
-
-Profile/runtime controls:
-
-```toml
-[profiles.default]
-telemetry_enabled = true
-telemetry_path = ".zavora/telemetry/events.jsonl"
-```
-
-CLI/env overrides:
-
-```bash
-cargo run -- \
-  --telemetry-enabled false \
-  --telemetry-path .zavora/telemetry/custom-events.jsonl \
-  doctor
-```
-
-- `ZAVORA_TELEMETRY_ENABLED=true|false`
-- `ZAVORA_TELEMETRY_PATH=<path>`
-
-Minimal dashboard report:
-
-```bash
-cargo run -- telemetry report --limit 2000
-```
-
-The report summarizes:
-- parsed events and parse errors
-- unique command runs
-- command completion/failure counts
-- tool lifecycle counts (`requested`, `succeeded`, `failed`)
-
-## Guardrail Policy Framework
-
-Guardrails can be configured independently for input and output:
-
-- `disabled`: no guardrail matching
-- `observe`: allow content, emit guardrail events/logs
-- `block`: reject content with actionable error
-- `redact`: mask matched terms before continuation/output
-
-Profile controls:
+- `disabled` | `observe` | `block` | `redact`
 
 ```toml
 [profiles.default]
@@ -407,86 +273,11 @@ guardrail_terms = ["password", "secret", "api key", "private key"]
 guardrail_redact_replacement = "[REDACTED]"
 ```
 
-CLI/env overrides:
-
 ```bash
-cargo run -- \
-  --guardrail-input-mode block \
-  --guardrail-output-mode redact \
-  --guardrail-term secret \
-  --guardrail-term password \
-  --guardrail-redact-replacement "[MASKED]" \
-  ask "Summarize this content"
+cargo run -- --guardrail-input-mode block --guardrail-output-mode redact ask "Summarize this"
 ```
-
-- `ZAVORA_GUARDRAIL_INPUT_MODE`
-- `ZAVORA_GUARDRAIL_OUTPUT_MODE`
-- `ZAVORA_GUARDRAIL_TERM`
-- `ZAVORA_GUARDRAIL_REDACT_REPLACEMENT`
-
-Observability:
-- guardrail outcomes emit structured telemetry events (`guardrail.input.*`, `guardrail.output.*`)
-- `profiles show` and `doctor` print active guardrail modes and term counts
-- in chat, output `block`/`redact` modes switch to buffered rendering so policies can be enforced before printing
-
-## Evaluation Harness and Benchmark Suite
-
-Run dataset-based quality evaluation and retrieval benchmark metrics:
-
-```bash
-cargo run -- \
-  eval run \
-  --dataset evals/datasets/retrieval-baseline.v1.json \
-  --output .zavora/evals/latest.json \
-  --benchmark-iterations 200 \
-  --fail-under 0.90
-```
-
-What the eval command produces:
-- pass/fail quality score per dataset case
-- aggregate pass rate
-- benchmark metrics (`avg_latency_ms`, `p95_latency_ms`, `throughput_qps`)
-- machine-readable JSON report for release artifacts
-
-Release baseline reports are tracked under `evals/reports/` and summarized in `docs/EVAL_BASELINE.md`.
-CI quality enforcement uses `make quality-gate` (eval threshold + guardrail regression tests).
-
-## Retrieval Abstraction
-
-Retrieval is pluggable and disabled by default.
-
-- `disabled`: no context injection (default)
-- `local`: load chunks from a local text/markdown document and inject top matches into prompts
-- `semantic`: feature-gated semantic ranking backend (`--features semantic-search`)
-
-Example:
-
-```bash
-cargo run -- \
-  --retrieval-backend local \
-  --retrieval-doc-path ./docs/knowledge.md \
-  --retrieval-max-chunks 3 \
-  --retrieval-max-chars 3000 \
-  --retrieval-min-score 1 \
-  ask "Create a release plan from our internal standards"
-```
-
-Feature-gated semantic backend:
-
-```bash
-cargo run --features semantic-search -- \
-  --retrieval-backend semantic \
-  --retrieval-doc-path ./docs/knowledge.md \
-  ask "What are our rollout guardrails?"
-```
-
-Retrieval integration points:
-- `ask`, `workflow`, `release-plan`: prompt is enriched before runner execution
-- `chat`: each user turn is enriched before streaming execution
 
 ## Persistent Sessions
-
-Use SQLite-backed sessions to persist conversation history across CLI restarts:
 
 ```bash
 cargo run -- \
@@ -496,69 +287,99 @@ cargo run -- \
   chat
 ```
 
-Provider/model switching behavior:
-- Today: switch provider/model per invocation with `--provider` and `--model`.
-- Chat supports in-session switching via `/provider <name>`, `/model <id>`, and `/status`.
-- Run `/model` with no arguments to open the interactive model picker (provider-aware options with context window metadata).
-- Chat also includes slash command discovery/diagnostics: `/help`, `/tools`, `/mcp`, `/usage`.
-- Model/provider compatibility checks are enforced before switching.
-- If a switch fails validation or runner rebuild, the previous provider/model and session remain active.
+```bash
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions show --recent 30
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions delete --session-id old --force
+cargo run -- --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run
+```
+
+## Retrieval
+
+```bash
+cargo run -- --retrieval-backend local --retrieval-doc-path ./docs/knowledge.md ask "What are our standards?"
+cargo run --features semantic-search -- --retrieval-backend semantic --retrieval-doc-path ./docs/knowledge.md ask "Rollout guardrails?"
+```
+
+## Telemetry
+
+Structured JSONL telemetry enabled by default.
+
+```bash
+cargo run -- telemetry report --limit 2000
+```
+
+Summarizes: event counts, command runs, tool lifecycle (`requested`, `succeeded`, `failed`).
+
+## Evaluation Harness
+
+```bash
+cargo run -- eval run --dataset evals/datasets/retrieval-baseline.v1.json --fail-under 0.90
+```
+
+Produces: per-case pass/fail, aggregate pass rate, benchmark metrics (`avg_latency_ms`, `p95_latency_ms`, `throughput_qps`).
 
 ## Server Mode and A2A
 
-Start server mode:
-
 ```bash
 cargo run -- server serve --host 127.0.0.1 --port 8787
-```
-
-Endpoints:
-- `GET /healthz`
-- `POST /v1/ask`
-- `POST /v1/a2a/ping`
-
-Sample A2A payload:
-
-```json
-{
-  "from_agent": "sales-agent",
-  "to_agent": "procurement-agent",
-  "message_id": "msg-001",
-  "correlation_id": "corr-001",
-  "payload": { "intent": "supply-check" }
-}
-```
-
-Run smoke validation:
-
-```bash
 cargo run -- server a2a-smoke
 ```
 
+Endpoints: `GET /healthz`, `POST /v1/ask`, `POST /v1/a2a/ping`.
+
+## Development
+
+```bash
+make fmt          # format
+make check        # cargo check
+make lint         # clippy
+make test         # unit tests
+make eval         # evaluation harness
+make quality-gate # eval + guardrail regression
+make security-check
+make perf-check
+make ci           # full CI pipeline
+make release-check
+```
+
+## Sensitive Config
+
+- `profiles show`, `doctor`, and `migrate` redact session DB URLs by default
+- Use `--show-sensitive-config` for local debugging when full values are needed
+
 ## Release Model
 
-This repo follows a release train model with SemVer tags:
+SemVer release train: plan by release slices, merge behind CI, tag stable increments.
 
-- Plan work by release slices (`R1`, `R2`, `R3`)
-- Merge continuously behind CI
-- Tag stable increments as `vX.Y.Z`
-- Publish release notes from `CHANGELOG.md`
+Current version: **v1.1.1**
 
-See `docs/AGILE_RELEASE_CYCLE.md` for the full process.
-See `docs/PROJECT_PLAN.md` and `docs/GITHUB_MILESTONE_ISSUES.md` for the sprint roadmap and ticket breakdown.
-See `docs/ADK_CAPABILITY_MATRIX.md`, `docs/ADK_TARGET_ARCHITECTURE.md`, and `docs/SPRINT_BACKLOG_RISK_REGISTER.md` for Sprint 0 execution artifacts.
-See `docs/RETRIEVAL_ABSTRACTION.md` for retrieval interface and integration details.
-See `docs/MCP_TOOLSET_MANAGER.md` for MCP profile schema, discovery, and runtime registration flow.
-See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.
-See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.
-See `docs/GUARDRAIL_POLICY.md` for guardrail modes, telemetry events, and enforcement behavior.
-See `docs/QUALITY_GATES.md` for CI/release gate thresholds and remediation flow.
-See `docs/SERVER_MODE.md` for server startup, API contract, and A2A smoke flow.
-See `docs/SECURITY_HARDENING.md` for security controls and release security checks.
-See `docs/PERFORMANCE_RELIABILITY.md` for load targets, stress harness commands, and perf summary artifacts.
-See `docs/OPERATOR_RUNBOOK.md` for operational procedures in server/production-like environments.
-See `docs/MIGRATION_GUIDE_v1.md` for pre-1.0 to v1.0.0 upgrade instructions.
-See `docs/GA_SIGNOFF.md` for GA completion checklist and gate evidence.
-See `WORKING_STYLE.md` for sprint execution conventions and definition of done.
-See `docs/PHASE2_QCLI_PARITY_PLAN.md` for the Phase 2 Q-style parity architecture and sprint issue plan.
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| `CHANGELOG.md` | Release history |
+| `WORKING_STYLE.md` | Sprint conventions and definition of done |
+| `docs/PHASE2_QCLI_PARITY_PLAN.md` | Phase 2 parity architecture and sprint plan |
+| `docs/PARITY_MATRIX.md` | Feature parity status matrix |
+| `docs/PARITY_BENCHMARK.md` | Parity benchmark scenarios and scoring |
+| `docs/GA_SIGNOFF.md` | GA completion checklist |
+| `docs/GA_SIGNOFF_v110.md` | v1.1.0 RC sign-off |
+| `docs/AGILE_RELEASE_CYCLE.md` | Release process |
+| `docs/PROJECT_PLAN.md` | Sprint roadmap |
+| `docs/ADK_CAPABILITY_MATRIX.md` | ADK capability coverage |
+| `docs/ADK_TARGET_ARCHITECTURE.md` | Target architecture |
+| `docs/RETRIEVAL_ABSTRACTION.md` | Retrieval interface details |
+| `docs/MCP_TOOLSET_MANAGER.md` | MCP schema and discovery flow |
+| `docs/GRAPH_WORKFLOWS.md` | Graph routing and templates |
+| `docs/GUARDRAIL_POLICY.md` | Guardrail modes and enforcement |
+| `docs/QUALITY_GATES.md` | CI/release gate thresholds |
+| `docs/SERVER_MODE.md` | Server API and A2A flow |
+| `docs/SECURITY_HARDENING.md` | Security controls |
+| `docs/PERFORMANCE_RELIABILITY.md` | Load targets and perf summary |
+| `docs/OPERATOR_RUNBOOK.md` | Operational procedures |
+| `docs/MIGRATION_GUIDE_v1.md` | Pre-1.0 to v1.0.0 upgrade |
+| `docs/EVAL_BASELINE.md` | Eval dataset baseline metrics |
+| `docs/DIFFERENTIATION_ROADMAP.md` | Current and planned differentiators |
+
 Temporary upstream RustSec exceptions are tracked in `.cargo/audit.toml` and reviewed each release.
