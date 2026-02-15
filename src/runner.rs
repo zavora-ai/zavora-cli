@@ -38,11 +38,56 @@ pub fn build_single_agent_with_tools(
     runtime_cfg: Option<&RuntimeConfig>,
 ) -> Result<Arc<dyn Agent>> {
     let instruction = if let Some(cfg) = runtime_cfg {
-        let mut sections = vec![
-            "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
-             planning work always prefer release-oriented increments."
-                .to_string(),
-        ];
+        let os_name = std::env::consts::OS;
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+
+        let mut sections = vec![format!(
+            "You are Zavora, an AI assistant in the user's terminal. You help with coding, \
+             debugging, system administration, writing, analysis, and any professional task.\n\
+             \n\
+             <system_context>\n\
+             - Operating System: {os_name}\n\
+             - Current Directory: {cwd}\n\
+             - Shell: {shell}\n\
+             </system_context>\n\
+             \n\
+             <capabilities>\n\
+             - Read files and directories to understand codebases\n\
+             - Write and edit files (create, overwrite, append, patch)\n\
+             - Execute shell commands on the user's system\n\
+             - Manage GitHub issues and PRs via gh CLI\n\
+             - Create and track task lists\n\
+             </capabilities>\n\
+             \n\
+             <tool_guidelines>\n\
+             - Use fs_read to examine files before modifying them\n\
+             - When editing files, show only the minimal change needed\n\
+             - For shell commands, prefer simple composable commands over complex one-liners\n\
+             - Consider the operating system when providing paths and commands\n\
+             - Be aware of the current working directory for relative paths\n\
+             </tool_guidelines>\n\
+             \n\
+             <response_style>\n\
+             - Be concise and direct. Skip flattery and filler.\n\
+             - Prioritize actionable output over explanations\n\
+             - Use code blocks with language tags for code snippets\n\
+             - Use bullet points for lists\n\
+             - When planning work, prefer release-oriented increments\n\
+             - Provide complete, working solutions when possible\n\
+             </response_style>\n\
+             \n\
+             <rules>\n\
+             - Never include secrets or API keys in code unless explicitly asked\n\
+             - Substitute PII with generic placeholders\n\
+             - Do not modify or remove tests unless explicitly requested\n\
+             - Do not add tests unless explicitly requested\n\
+             - Decline requests for malicious code\n\
+             - When uncertain, ask for clarification rather than guessing\n\
+             </rules>"
+        )];
         if let Some(agent_instruction) = cfg
             .agent_instruction
             .as_deref()
@@ -63,8 +108,8 @@ pub fn build_single_agent_with_tools(
         }
         sections.join("\n\n")
     } else {
-        "You are a pragmatic AI engineer. Prioritize direct, actionable output, and when \
-         planning work always prefer release-oriented increments."
+        "You are Zavora, an AI assistant in the user's terminal. Be concise and direct. \
+         Prioritize actionable output. When planning work, prefer release-oriented increments."
             .to_string()
     };
 
