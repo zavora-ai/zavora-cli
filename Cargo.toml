@@ -29,6 +29,8 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "s
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
+crossterm = "0.28"
+winnow = "0.7"
 
 [dev-dependencies]
 tempfile = "3.25.0"

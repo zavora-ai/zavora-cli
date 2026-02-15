@@ -9,7 +9,8 @@ use serde_json::Value;
 use crate::config::RuntimeConfig;
 use crate::retrieval::{RetrievalPolicy, RetrievalService, augment_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
-use crate::theme::{MarkdownRenderer, Spinner};
+use crate::theme::Spinner;
+use crate::markdown::{ParseState, parse_markdown};
 
 pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
 
@@ -318,7 +319,12 @@ pub async fn run_prompt_streaming(
     let mut emitted_text_by_author: HashMap<String, String> = HashMap::new();
     let mut printed_any_output = false;
     let mut spinner = Some(Spinner::start("Thinking..."));
-    let mut md = MarkdownRenderer::new();
+
+    // Winnow streaming markdown state
+    let mut md_buf = String::new();
+    let mut md_offset: usize = 0;
+    let mut md_state = ParseState::new();
+    let mut stdout = io::stdout();
 
     while let Some(event_result) = stream.next().await {
         let event = event_result.context("runner returned event error")?;
@@ -340,12 +346,24 @@ pub async fn run_prompt_streaming(
             if let Some(s) = spinner.take() {
                 s.stop();
             }
-            let rendered = md.push(&delta);
-            if !rendered.is_empty() {
-                print!("{rendered}");
-                io::stdout().flush().context("failed to flush stdout")?;
+
+            md_buf.push_str(&delta);
+
+            // Parse as much as possible from the buffer
+            loop {
+                let input = winnow::Partial::new(&md_buf[md_offset..]);
+                match parse_markdown(input, &mut stdout, &mut md_state) {
+                    Ok(parsed) => {
+                        md_offset += winnow::stream::Offset::offset_from(&parsed, &input);
+                        stdout.flush().context("failed to flush stdout")?;
+                        md_state.newline = md_state.set_newline;
+                        md_state.set_newline = false;
+                    }
+                    Err(winnow::error::ErrMode::Incomplete(_)) => break,
+                    Err(_) => break,
+                }
             }
-            io::stdout().flush().context("failed to flush stdout")?;
+
             emitted_text_by_author
                 .entry(event.author.clone())
                 .or_default()
@@ -357,11 +375,19 @@ pub async fn run_prompt_streaming(
     // Ensure spinner is stopped if stream ended without output
     drop(spinner);
 
-    // Flush any remaining partial line from the markdown renderer
-    let remaining = md.flush();
-    if !remaining.is_empty() {
-        print!("{remaining}");
-        io::stdout().flush().context("failed to flush stdout")?;
+    // Flush remaining buffer: append newline to force parser to complete (Q CLI hack)
+    md_buf.push('\n');
+    loop {
+        let input = winnow::Partial::new(&md_buf[md_offset..]);
+        match parse_markdown(input, &mut stdout, &mut md_state) {
+            Ok(parsed) => {
+                md_offset += winnow::stream::Offset::offset_from(&parsed, &input);
+                stdout.flush().ok();
+                md_state.newline = md_state.set_newline;
+                md_state.set_newline = false;
+            }
+            _ => break,
+        }
     }
 
     if printed_any_output {

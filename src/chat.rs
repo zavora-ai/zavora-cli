@@ -881,6 +881,7 @@ pub async fn run_chat(
             };
 
         if buffered_output_required(cfg.guardrail_output_mode) {
+            println!();
             let answer = run_prompt_with_retrieval(
                 &runner,
                 &cfg,
@@ -902,12 +903,27 @@ pub async fn run_chat(
                     continue;
                 }
             };
-            let mut md = crate::theme::MarkdownRenderer::new();
-            let rendered = md.push(&answer);
-            let flushed = md.flush();
-            print!("{rendered}{flushed}");
+            // Render markdown for buffered output
+            let mut md_state = crate::markdown::ParseState::new();
+            let mut buf = answer.clone();
+            buf.push('\n');
+            let mut offset = 0;
+            let mut stdout = std::io::stdout();
+            loop {
+                let input = winnow::Partial::new(&buf[offset..]);
+                match crate::markdown::parse_markdown(input, &mut stdout, &mut md_state) {
+                    Ok(parsed) => {
+                        offset += winnow::stream::Offset::offset_from(&parsed, &input);
+                        let _ = std::io::Write::flush(&mut stdout);
+                        md_state.newline = md_state.set_newline;
+                        md_state.set_newline = false;
+                    }
+                    _ => break,
+                }
+            }
             println!();
         } else {
+            println!();
             let answer = run_prompt_streaming_with_retrieval(
                 &runner,
                 &cfg,
