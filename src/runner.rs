@@ -16,7 +16,7 @@ use crate::provider::resolve_model;
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
 use crate::tool_policy::filter_tools_by_policy;
-use crate::tools::{build_builtin_tools, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME};
+use crate::tools::{build_builtin_tools, FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME};
 
 #[cfg(test)]
 pub fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
@@ -172,7 +172,7 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
     let mut confirm_names = BTreeSet::<String>::new();
 
     // Guarded built-in tools always require confirmation (unless pre-approved)
-    for name in [FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
+    for name in [FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
         if !approved.contains(name) {
             confirm_names.insert(name.to_string());
         }

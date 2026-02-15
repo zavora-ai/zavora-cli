@@ -46,6 +46,7 @@ pub enum ChatCommand {
     Delegate(String),
     Provider(String),
     Model(Option<String>),
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +88,7 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
         "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
         "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
+        "agent" => ParsedChatCommand::Command(ChatCommand::Agent),
         "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
         "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
         "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
@@ -131,6 +133,7 @@ pub fn print_chat_help() {
     println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
     println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
     println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
+    println!("  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}");
     println!();
 }
 
@@ -773,6 +776,38 @@ pub async fn dispatch_chat_command(
                 }
             }
 
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Agent => {
+            use crate::tools::confirming::{is_agent_mode, trust_tool};
+            if is_agent_mode() {
+                println!("  {DIM}Agent mode is already active.{RESET}");
+                return Ok(ChatCommandAction::Continue);
+            }
+            eprintln!();
+            eprintln!("  {BOLD}{YELLOW}⚠  Agent mode{RESET}");
+            eprintln!("  {DIM}This will auto-approve fs_read, fs_write, and execute_bash");
+            eprintln!("  for the rest of this session. The agent will be able to read,");
+            eprintln!("  write, and execute without asking.{RESET}");
+            eprintln!();
+            eprint!("  {DIM}Enable agent mode? [{GREEN}y{DIM}/{GREEN}n{DIM}]:{RESET} ");
+            let _ = std::io::stderr().flush();
+            let input = tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                buf.trim().to_lowercase()
+            })
+            .await
+            .unwrap_or_default();
+            if input == "y" || input == "yes" {
+                trust_tool("fs_read");
+                trust_tool("fs_write");
+                trust_tool("execute_bash");
+                eprintln!("  {GREEN}✓ Agent mode enabled.{RESET}");
+            } else {
+                eprintln!("  {DIM}Cancelled.{RESET}");
+            }
+            eprintln!();
             Ok(ChatCommandAction::Continue)
         }
     }

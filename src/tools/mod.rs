@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::todos;
 
+pub const FS_READ_TOOL_NAME: &str = "fs_read";
 pub const FS_WRITE_TOOL_NAME: &str = "fs_write";
 pub const EXECUTE_BASH_TOOL_NAME: &str = "execute_bash";
 pub const GITHUB_OPS_TOOL_NAME: &str = "github_ops";
