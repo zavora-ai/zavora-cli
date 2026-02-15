@@ -1,5 +1,8 @@
 # zavora-cli
 
+[![Crates.io](https://img.shields.io/crates/v/zavora-cli.svg)](https://crates.io/crates/zavora-cli)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 ```
   ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗  █████╗
   ╚══███╔╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗██╔══██╗
@@ -11,17 +14,27 @@
 
 **Your AI agent, in the terminal.** Built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
 
+Multi-agent orchestration, tool safety controls, streaming markdown, checkpoints, MCP integration — all from a single binary.
+
 ## Install
 
 ```bash
+cargo install zavora-cli
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/zavora-ai/zavora-cli.git
+cd zavora-cli
 cargo install --path .
 ```
 
-Requires Rust toolchain (`rustup`, `cargo`).
+Requires Rust 1.85+ (`rustup`, `cargo`).
 
-## Set Up a Provider
+## Quick Start
 
-Export at least one API key:
+1. Export an API key for any supported provider:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -34,13 +47,19 @@ Or use Ollama locally with no key needed:
 OLLAMA_HOST=http://localhost:11434  # optional, this is the default
 ```
 
+2. Start chatting:
+
+```bash
+zavora-cli chat
+```
+
 ## Usage
 
 ```bash
 # Ask a one-shot question
 zavora-cli ask "Explain Rust ownership"
 
-# Interactive chat
+# Interactive chat with a specific model
 zavora-cli --provider openai --model gpt-4.1 chat
 
 # Workflows
@@ -51,9 +70,17 @@ zavora-cli workflow graph "Draft a release plan with risks"
 zavora-cli doctor
 ```
 
-## Chat Commands
+## Multi-Agent Orchestration
 
-Once in chat mode, these slash commands are available:
+The assistant automatically delegates to specialist sub-agents when appropriate:
+
+- **git agent** — git operations, commits, branch management
+- **research agent** — codebase exploration, file search, analysis
+- **planner agent** — task breakdown, todo lists, project planning
+
+Transfers are visible in the UI with `→ agent_name` indicators. Tool calls show as `⚡ tool_name`.
+
+## Chat Commands
 
 | Command | Description |
 |---------|-------------|
@@ -77,17 +104,13 @@ Once in chat mode, these slash commands are available:
 | `/agent` | Trust all tools for the session (agent mode) |
 | `/exit` | Exit chat |
 
----
-
 ## Built-in Tools
-
-The agent has access to these tools during execution:
 
 | Tool | Purpose |
 |------|---------|
-| `fs_read` | Read files/directories with bounded controls and workspace path policy |
+| `fs_read` | Read files and directories with workspace path policy |
 | `fs_write` | Create, overwrite, append, or patch files (confirmation required) |
-| `execute_bash` | Run shell commands with safety policy (read-only auto-allowed) |
+| `execute_bash` | Run shell commands with safety policy (read-only commands auto-approved) |
 | `github_ops` | GitHub operations via `gh` CLI (issues, PRs, projects) |
 | `todo_list` | Create/complete/view/list/delete task lists (persisted to `.zavora/todos/`) |
 
@@ -98,20 +121,7 @@ The agent has access to these tools during execution:
 - `/compact` manually summarizes history to reclaim space
 - Auto-compaction triggers when configured thresholds are exceeded
 
-## Checkpoints and Tangents
-
-- `/checkpoint save <label>` snapshots session state — persisted to `.zavora/checkpoints.json` across restarts
-- `/tangent start` branches the session for exploratory work; `/tangent end` merges or discards
-
-## Delegation
-
-`/delegate <task>` runs a prompt in an isolated sub-agent session and returns the result inline.
-
----
-
 ## Configuration
-
-### Profiles
 
 Runtime defaults live in `.zavora/config.toml`:
 
@@ -126,9 +136,6 @@ tool_confirmation_mode = "mcp-only"
 compaction_threshold = 0.75
 compaction_target = 0.50
 telemetry_enabled = true
-guardrail_input_mode = "disabled"
-guardrail_output_mode = "disabled"
-guardrail_terms = ["password", "secret", "api key"]
 ```
 
 ```bash
@@ -147,34 +154,20 @@ provider = "openai"
 model = "gpt-4.1"
 tool_confirmation_mode = "always"
 allow_tools = ["fs_read", "fs_write", "execute_bash"]
-deny_tools = ["execute_bash.rm_*"]
 ```
 
 ```bash
 zavora-cli agents list
-zavora-cli agents select --name coder
 zavora-cli --agent reviewer ask "Review this patch"
 ```
-
-### Persistent Sessions
-
-```bash
-zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db chat
-zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions list
-```
-
----
 
 ## Advanced Features
 
 ### Tool Policy and Hooks
 
-Control tool execution with confirmation modes, aliases, allow/deny lists, and hooks:
-
 ```toml
 [profiles.default]
 tool_confirmation_mode = "mcp-only"  # never | mcp-only | always
-tool_aliases = { "read_file" = "fs_read", "write_file" = "fs_write" }
 tool_timeout_secs = 45
 tool_retry_attempts = 2
 
@@ -188,8 +181,6 @@ message = "Destructive rm blocked by hook policy"
 
 ### MCP Integration
 
-Discover and invoke external tool servers per profile:
-
 ```toml
 [[profiles.ops.mcp_servers]]
 name = "ops-tools"
@@ -198,10 +189,6 @@ enabled = true
 timeout_secs = 15
 auth_bearer_env = "OPS_MCP_TOKEN"
 tool_allowlist = ["search_incidents", "get_runbook"]
-```
-
-```bash
-zavora-cli --profile ops mcp discover
 ```
 
 ### Guardrails
@@ -214,36 +201,17 @@ zavora-cli --guardrail-input-mode block --guardrail-output-mode redact ask "Summ
 
 ### Retrieval
 
-Pluggable context injection from local documents or semantic search:
-
 ```bash
 zavora-cli --retrieval-backend local --retrieval-doc-path ./docs/knowledge.md ask "What are our standards?"
-```
-
-### Telemetry
-
-Structured JSONL telemetry enabled by default:
-
-```bash
-zavora-cli telemetry report --limit 2000
-```
-
-### Evaluation Harness
-
-```bash
-zavora-cli eval run --dataset evals/datasets/retrieval-baseline.v1.json --fail-under 0.90
 ```
 
 ### Server Mode and A2A
 
 ```bash
 zavora-cli server serve --host 127.0.0.1 --port 8787
-zavora-cli server a2a-smoke
 ```
 
 Endpoints: `GET /healthz`, `POST /v1/ask`, `POST /v1/a2a/ping`.
-
----
 
 ## Development
 
@@ -252,33 +220,9 @@ make fmt          # format
 make check        # cargo check
 make lint         # clippy
 make test         # unit tests
-make eval         # evaluation harness
-make quality-gate # eval + guardrail regression
 make ci           # full CI pipeline
 ```
 
-## Sensitive Config
+## License
 
-- `profiles show`, `doctor`, and `migrate` redact session DB URLs by default
-- Use `--show-sensitive-config` for local debugging when full values are needed
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| `CHANGELOG.md` | Release history |
-| `WORKING_STYLE.md` | Sprint conventions and definition of done |
-| `docs/PARITY_MATRIX.md` | Feature parity status matrix |
-| `docs/PARITY_BENCHMARK.md` | Parity benchmark scenarios and scoring |
-| `docs/GA_SIGNOFF_v110.md` | v1.1.0 RC sign-off |
-| `docs/PHASE2_QCLI_PARITY_PLAN.md` | Phase 2 parity architecture |
-| `docs/AGILE_RELEASE_CYCLE.md` | Release process |
-| `docs/ADK_CAPABILITY_MATRIX.md` | ADK capability coverage |
-| `docs/RETRIEVAL_ABSTRACTION.md` | Retrieval interface details |
-| `docs/MCP_TOOLSET_MANAGER.md` | MCP schema and discovery flow |
-| `docs/GUARDRAIL_POLICY.md` | Guardrail modes and enforcement |
-| `docs/SERVER_MODE.md` | Server API and A2A flow |
-| `docs/SECURITY_HARDENING.md` | Security controls |
-| `docs/DIFFERENTIATION_ROADMAP.md` | Current and planned differentiators |
-
-Current version: **v1.1.3**
+MIT
