@@ -27,11 +27,18 @@ pub fn is_agent_mode() -> bool {
 /// Wraps a tool with an interactive confirmation prompt.
 pub struct ConfirmingTool {
     inner: Arc<dyn Tool>,
+    /// When true, show what the tool is doing but don't prompt — auto-approve.
+    display_only: bool,
 }
 
 impl ConfirmingTool {
     pub fn wrap(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
-        Arc::new(Self { inner: tool })
+        Arc::new(Self { inner: tool, display_only: false })
+    }
+
+    /// Wrap a tool in display-only mode: shows what it's doing but auto-approves.
+    pub fn wrap_display_only(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
+        Arc::new(Self { inner: tool, display_only: true })
     }
 }
 
@@ -144,8 +151,8 @@ impl Tool for ConfirmingTool {
 
         eprint!("{display}");
 
-        // If trusted, execute immediately without prompting
-        if trusted {
+        // If trusted or display-only, show action and execute immediately
+        if trusted || self.display_only {
             theme::resume_spinner();
             let mut approved_args = args;
             if let Some(obj) = approved_args.as_object_mut() {

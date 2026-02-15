@@ -172,10 +172,16 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
     let mut confirm_names = BTreeSet::<String>::new();
 
     // Guarded built-in tools always require confirmation (unless pre-approved)
-    for name in [FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
+    for name in [FS_WRITE_TOOL_NAME, EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME] {
         if !approved.contains(name) {
             confirm_names.insert(name.to_string());
         }
+    }
+
+    // fs_read is display-only (shows path, auto-approves) unless explicitly pre-approved
+    let mut display_only_names = BTreeSet::<String>::new();
+    if !approved.contains(FS_READ_TOOL_NAME) {
+        display_only_names.insert(FS_READ_TOOL_NAME.to_string());
     }
 
     match cfg.tool_confirmation_mode {
@@ -205,12 +211,14 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
         }
     }
 
-    // Wrap tools that need confirmation
+    // Wrap tools that need confirmation or display-only
     tools = tools
         .into_iter()
         .map(|tool| {
             if confirm_names.contains(tool.name()) {
                 ConfirmingTool::wrap(tool)
+            } else if display_only_names.contains(tool.name()) {
+                ConfirmingTool::wrap_display_only(tool)
             } else {
                 tool
             }
