@@ -74,6 +74,7 @@ Once in chat mode, these slash commands are available:
 | `/delegate <task>` | Run isolated sub-agent prompt |
 | `/provider <name>` | Switch provider mid-session |
 | `/model [id]` | Switch model or open picker |
+| `/agent` | Trust all tools for the session (agent mode) |
 | `/exit` | Exit chat |
 
 ---
@@ -280,4 +281,4 @@ make ci           # full CI pipeline
 | `docs/SECURITY_HARDENING.md` | Security controls |
 | `docs/DIFFERENTIATION_ROADMAP.md` | Current and planned differentiators |
 
-Current version: **v1.1.1**
+Current version: **v1.1.3**

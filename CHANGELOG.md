@@ -6,6 +6,44 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-02-15
+
+### Added
+
+- Syntax-highlighted diffs for fs_write confirmations (syntect + similar crates)
+  - base16-ocean.dark theme, truecolor RGB backgrounds for added/removed lines
+  - Proper unified diff via `similar::TextDiff` with line numbers in gutter
+  - Language detection from file extension; graceful fallback to plain text
+- Tool result display after execution
+  - `execute_bash`: stdout shown directly, stderr in red
+  - `fs_write`: `✓ wrote <path>` confirmation on success
+- `/usage` diagnostics: events count, raw chars, overhead breakdown, API tokens
+- `/agent` chat command: trust all tools for the session with warning prompt
+- Comprehensive system prompt with `<system_context>`, `<operational_directives>`,
+  `<tone>`, `<coding_standards>`, `<tool_guidelines>`, `<response_format>`, `<rules>`
+- `fs_read` display-only mode: shows path but auto-approves (no y/n prompt)
+- Tool transparency: actions always visible even when trusted (Q CLI pattern)
+- Terminal-width-aware banner and tip boxes (capped at 120 columns)
+- Default to chat mode: bare `zavora-cli` enters interactive chat
+
+### Changed
+
+- Context windows updated to factual values from official model cards
+  - Model-level lookup (`model_context_window`) with provider fallback
+  - GPT-5 family: 400K, Claude Sonnet 4: 1M, DeepSeek: 128K, Groq Scout: 131K
+- Context usage now counts FunctionCall args and FunctionResponse payloads
+- Added 1500-token overhead estimate for system prompt + tool declarations
+- Prompt shows `<1%` instead of `0%` for small utilization values
+- System prompt: "don't repeat file contents after tool writes them"
+
+### Fixed
+
+- OpenAI 400 Bad Request on multi-turn: `before_model_callback` restores
+  `role: "function"` on FunctionResponse parts (ADK maps all to "model")
+- Tool confirmation: injects `"approved": true` into args when user approves
+- Context usage was stuck at 0%: only Part::Text was counted, missing all
+  FunctionCall/FunctionResponse content
+
 ## [1.1.2] — 2026-02-15
 
 ### Added
