@@ -12,21 +12,32 @@ pub const EXECUTE_BASH_MAX_OUTPUT_CHARS_LIMIT: usize = 20000;
 pub const EXECUTE_BASH_DENIED_PATTERNS: &[&str] = &[
     "rm -rf", "mkfs", "shutdown", "reboot", "poweroff", "halt", ":(){", "dd if=",
 ];
-pub const EXECUTE_BASH_READ_ONLY_PREFIXES: &[&str] = &[
-    "ls",
-    "pwd",
-    "cat ",
-    "rg ",
-    "grep ",
-    "head ",
-    "tail ",
-    "wc ",
-    "find ",
-    "stat ",
-    "git status",
-    "git diff",
-    "git log",
-    "echo ",
+
+/// Shell-level dangerous patterns that can smuggle writes (Q CLI pattern).
+pub const DANGEROUS_PATTERNS: &[&str] = &[
+    "<(", "$(", "`", ">", "&&", "||", "&", ";", "\n", "\r", "IFS",
+];
+
+/// Commands that are always safe to auto-approve (no side effects).
+pub const READONLY_COMMANDS: &[&str] = &[
+    "ls", "cat", "echo", "pwd", "which", "head", "tail", "find", "grep", "rg",
+    "dir", "type", "wc", "stat", "file", "diff", "sort", "uniq", "tr", "cut",
+    "awk", "less", "more", "env", "printenv", "uname", "whoami", "id",
+    "date", "cal", "df", "du", "free", "uptime", "hostname", "arch",
+    "realpath", "dirname", "basename", "readlink", "sha256sum", "md5sum",
+    "xxd", "hexdump", "strings", "nm", "ldd", "otool", "jq", "yq",
+];
+
+/// Git subcommands that are read-only (no repo mutation).
+pub const READONLY_GIT_SUBCOMMANDS: &[&str] = &[
+    "status", "diff", "log", "show", "blame", "shortlog", "describe",
+    "branch", "tag", "remote", "rev-parse", "rev-list", "name-rev",
+    "for-each-ref", "symbolic-ref",
+    "ls-files", "ls-tree", "ls-remote", "cat-file", "diff-tree",
+    "diff-files", "diff-index",
+    "config", "stash", "reflog", "whatchanged", "cherry",
+    "merge-base", "grep", "count-objects", "fsck", "verify-pack",
+    "help", "version",
 ];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteBashRequest {
@@ -154,34 +165,88 @@ pub fn parse_execute_bash_request(args: &Value) -> Result<ExecuteBashRequest, Ex
 }
 
 pub fn is_read_only_command(command: &str) -> bool {
-    let normalized = command.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
         return false;
     }
 
-    let has_read_only_prefix = EXECUTE_BASH_READ_ONLY_PREFIXES
-        .iter()
-        .any(|prefix| normalized == *prefix || normalized.starts_with(prefix));
+    // Split by shell words; if shlex fails, treat as unsafe.
+    let Some(args) = shlex::split(trimmed) else {
+        return false;
+    };
 
-    if !has_read_only_prefix {
+    // Reject any token containing dangerous patterns.
+    if args.iter().any(|a| DANGEROUS_PATTERNS.iter().any(|p| a.contains(p))) {
         return false;
     }
 
-    // Reject command chaining operators that could smuggle writes after a read-only prefix.
-    if contains_command_chaining(&normalized) {
-        return false;
+    // Split on pipes and check each command in the chain.
+    let mut current: Vec<&str> = Vec::new();
+    let mut commands: Vec<Vec<&str>> = Vec::new();
+    for arg in &args {
+        if arg == "|" {
+            if !current.is_empty() { commands.push(current); }
+            current = Vec::new();
+        } else if arg.contains('|') {
+            // Pipe embedded in token without spacing — unsafe.
+            return false;
+        } else {
+            current.push(arg);
+        }
+    }
+    if !current.is_empty() { commands.push(current); }
+
+    for cmd_args in &commands {
+        let Some(cmd) = cmd_args.first() else { return false; };
+
+        // `find` with mutation flags is unsafe.
+        if *cmd == "find" && cmd_args.iter().any(|a| {
+            a.contains("-exec") || a.contains("-delete") || a.contains("-ok")
+                || a.contains("-fprint") || a.contains("-fls")
+        }) {
+            return false;
+        }
+
+        // `grep -P` (perl regex) has RCE risk.
+        if *cmd == "grep" && cmd_args.iter().any(|a| *a == "-P" || *a == "--perl-regexp") {
+            return false;
+        }
+
+        // git: check subcommand against readonly list.
+        if *cmd == "git" {
+            if let Some(sub) = cmd_args.get(1) {
+                if !READONLY_GIT_SUBCOMMANDS.contains(sub) {
+                    return false;
+                }
+                // git stash: only "list" and "show" are readonly.
+                if *sub == "stash" {
+                    let action = cmd_args.get(2).map(|s| s.as_ref()).unwrap_or("list");
+                    if action != "list" && action != "show" {
+                        return false;
+                    }
+                }
+                // git config: only without --set/--unset/--add/--remove.
+                if *sub == "config" && cmd_args.iter().any(|a| {
+                    a.starts_with("--set") || a.starts_with("--unset") || a.starts_with("--add")
+                        || a.starts_with("--remove") || a.starts_with("--replace")
+                }) {
+                    return false;
+                }
+                continue;
+            }
+            return false; // bare `git` with no subcommand
+        }
+
+        if !READONLY_COMMANDS.contains(cmd) {
+            return false;
+        }
     }
 
     true
 }
 
 pub fn contains_command_chaining(command: &str) -> bool {
-    for pattern in &[";", "&&", "||", "|", "$(", "`"] {
-        if command.contains(pattern) {
-            return true;
-        }
-    }
-    false
+    DANGEROUS_PATTERNS.iter().any(|p| command.contains(p))
 }
 
 pub fn matched_denied_pattern(command: &str) -> Option<&'static str> {

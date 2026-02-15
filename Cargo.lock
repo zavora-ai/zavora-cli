@@ -6246,6 +6246,7 @@ dependencies = [
  "rustyline 15.0.0",
  "serde",
  "serde_json",
+ "shlex",
  "similar",
  "strsim",
  "syntect",
