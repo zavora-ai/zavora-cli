@@ -124,13 +124,18 @@ pub fn print_startup_banner(provider: &str, model: &str) {
     println!(
         "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
     );
-    println!("  {DIM}{}━{RESET}", "━".repeat(68));
+    println!("  {DIM}{}━{RESET}", "━".repeat(term_width().min(120).saturating_sub(4)));
     println!();
+}
+
+/// Get terminal width, defaulting to 80.
+fn term_width() -> usize {
+    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
 }
 
 /// Draw a bordered tip box.
 fn draw_tip_box(title: &str, content: &str) {
-    let width: usize = 70;
+    let width: usize = term_width().min(120).saturating_sub(2); // leave 2 for leading indent
     let inner = width - 4;
 
     // Top border with title
