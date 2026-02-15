@@ -163,24 +163,4 @@ pub fn filter_tools_by_policy(
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Minimal test-only Tool impl for policy tests
-// ---------------------------------------------------------------------------
-
-/// A trivial `Tool` implementation used only in tests.
-pub struct StubTool {
-    pub tool_name: String,
-}
-
-#[async_trait]
-impl Tool for StubTool {
-    fn name(&self) -> &str {
-        &self.tool_name
-    }
-    fn description(&self) -> &str {
-        "stub tool for testing"
-    }
-    async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> AdkResult<Value> {
-        Ok(Value::Null)
-    }
-}
+// StubTool moved to tests.rs — not needed in production code.

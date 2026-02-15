@@ -5,7 +5,26 @@ use std::sync::Arc;
 
 use adk_rust::prelude::*;
 use adk_session::*;
+use async_trait::async_trait;
 use serde_json::{Value, json};
+
+/// A trivial `Tool` implementation used only in tests.
+struct StubTool {
+    tool_name: String,
+}
+
+#[async_trait]
+impl Tool for StubTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+    fn description(&self) -> &str {
+        "stub tool for testing"
+    }
+    async fn execute(&self, _ctx: Arc<dyn ToolContext>, _args: Value) -> adk_rust::Result<Value> {
+        Ok(Value::Null)
+    }
+}
 
 
 use crate::cli::*;
@@ -1998,7 +2017,7 @@ fn test_wildcard_star_only() {
 // ---------------------------------------------------------------------------
 
 fn make_mock_tool(name: &str) -> Arc<dyn Tool> {
-    Arc::new(crate::tool_policy::StubTool {
+    Arc::new(StubTool {
         tool_name: name.to_string(),
     })
 }
