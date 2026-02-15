@@ -147,45 +147,28 @@ pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
     let mut system_chars = 0usize;
 
     for event in events {
-        let text_len = event
-            .llm_response
-            .content
-            .as_ref()
-            .map(|c| {
-                c.parts
-                    .iter()
-                    .map(|p| match p {
-                        adk_rust::Part::Text { text } => text.len(),
-                        _ => 0,
-                    })
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
+        let (mut text_chars, mut fn_chars) = (0usize, 0usize);
+        if let Some(content) = &event.llm_response.content {
+            for part in &content.parts {
+                match part {
+                    adk_rust::Part::Text { text } => text_chars += text.len(),
+                    adk_rust::Part::FunctionCall { name, args, .. } => {
+                        fn_chars += name.len() + args.to_string().len();
+                    }
+                    adk_rust::Part::FunctionResponse { function_response, .. } => {
+                        fn_chars += function_response.name.len() + function_response.response.to_string().len();
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         match event.author.as_str() {
-            "user" => user_chars += text_len,
-            "system" => system_chars += text_len,
+            "user" => user_chars += text_chars + fn_chars,
+            "system" => system_chars += text_chars + fn_chars,
             _ => {
-                // Check if this event has tool-related content (function calls/responses)
-                let has_tool_parts = event
-                    .llm_response
-                    .content
-                    .as_ref()
-                    .map(|c| {
-                        c.parts.iter().any(|p| {
-                            matches!(
-                                p,
-                                adk_rust::Part::FunctionCall { .. }
-                                    | adk_rust::Part::FunctionResponse { .. }
-                            )
-                        })
-                    })
-                    .unwrap_or(false);
-                if has_tool_parts {
-                    tool_chars += text_len;
-                } else {
-                    assistant_chars += text_len;
-                }
+                assistant_chars += text_chars;
+                tool_chars += fn_chars;
             }
         }
     }
