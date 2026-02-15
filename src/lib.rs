@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod compact;
 pub mod config;
 pub mod context;
 pub mod error;

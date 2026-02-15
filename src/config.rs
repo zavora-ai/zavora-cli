@@ -46,6 +46,9 @@ pub struct RuntimeConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     pub max_prompt_chars: usize,
     pub server_runner_cache_max: usize,
+    pub auto_compact_enabled: bool,
+    pub compact_interval: u32,
+    pub compact_overlap: u32,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -529,6 +532,9 @@ pub fn resolve_runtime_config_with_agents(
         mcp_servers,
         max_prompt_chars: 32_000,
         server_runner_cache_max: 64,
+        auto_compact_enabled: true,
+        compact_interval: 10,
+        compact_overlap: 2,
     })
 }
 

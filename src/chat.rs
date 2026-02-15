@@ -20,6 +20,7 @@ use crate::runner::{
 use crate::session::build_session_service;
 use crate::streaming::{run_prompt_with_retrieval, run_prompt_streaming_with_retrieval};
 use crate::telemetry::TelemetrySink;
+use crate::compact::{CompactStrategy, compact_session};
 use crate::context::ContextUsage;
 use crate::tool_policy::matches_wildcard;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub enum ChatCommand {
     Tools,
     Mcp,
     Usage,
+    Compact,
     Provider(String),
     Model(Option<String>),
 }
@@ -72,6 +74,7 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "tools" => ParsedChatCommand::Command(ChatCommand::Tools),
         "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
         "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
+        "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
         "provider" => {
             if arg.is_empty() {
                 ParsedChatCommand::MissingArgument {
@@ -100,7 +103,8 @@ pub fn print_chat_help() {
     println!("- /model [id]: pick a model interactively or switch directly by id");
     println!("- /tools: show active built-in/MCP tools and confirmation policy");
     println!("- /mcp: show MCP server and tool summary");
-    println!("- /usage: show usage examples");
+    println!("- /usage: show context usage and token breakdown");
+    println!("- /compact: summarize conversation to free context space");
     println!("- /exit: end interactive chat");
 }
 
@@ -450,6 +454,15 @@ pub async fn dispatch_chat_command(
                 print!("{}", usage.format_usage());
             } else {
                 print_chat_usage();
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Compact => {
+            println!("Compacting conversation...");
+            match compact_session(session_service, cfg, &CompactStrategy::default()).await {
+                Ok(Some(msg)) => println!("{msg}"),
+                Ok(None) => println!("Conversation too short to compact."),
+                Err(e) => eprintln!("Compaction failed: {e}"),
             }
             Ok(ChatCommandAction::Continue)
         }

@@ -251,6 +251,15 @@ pub async fn build_runner_with_session_service(
     ensure_session_exists(&session_service, cfg).await?;
     let artifact_service = Arc::new(InMemoryArtifactService::new());
 
+    let compaction_config = if cfg.auto_compact_enabled {
+        Some(crate::compact::build_compaction_config(
+            cfg.compact_interval,
+            cfg.compact_overlap,
+        ))
+    } else {
+        None
+    };
+
     Runner::new(RunnerConfig {
         app_name: cfg.app_name.clone(),
         agent,
@@ -259,7 +268,7 @@ pub async fn build_runner_with_session_service(
         memory_service: None,
         plugin_manager: None,
         run_config,
-        compaction_config: None,
+        compaction_config,
     })
     .context("failed to build ADK runner")
 }
