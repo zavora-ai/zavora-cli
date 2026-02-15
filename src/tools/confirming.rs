@@ -143,9 +143,19 @@ impl Tool for ConfirmingTool {
         match input.as_str() {
             "t" | "trust" => {
                 TRUSTED_TOOLS.lock().unwrap().insert(self.inner.name().to_string());
-                self.inner.execute(ctx, args).await
+                let mut approved_args = args;
+                if let Some(obj) = approved_args.as_object_mut() {
+                    obj.insert("approved".to_string(), Value::Bool(true));
+                }
+                self.inner.execute(ctx, approved_args).await
             }
-            "y" | "yes" => self.inner.execute(ctx, args).await,
+            "y" | "yes" => {
+                let mut approved_args = args;
+                if let Some(obj) = approved_args.as_object_mut() {
+                    obj.insert("approved".to_string(), Value::Bool(true));
+                }
+                self.inner.execute(ctx, approved_args).await
+            }
             _ => {
                 eprintln!("  {DIM}Tool denied.{RESET}");
                 Ok(serde_json::json!({
