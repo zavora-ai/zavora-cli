@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "Rust CLI AI agent built on ADK-Rust with provider-aware runtime, workflow orchestration, and tool safety controls"
 license = "MIT"
 repository = "https://github.com/zavora-ai/zavora-cli"
-authors = ["Zavora AI <eng@zavora.ai>"]
+authors = ["Zavora AI <info@zavora.ai>"]
 keywords = ["cli", "ai", "agent", "adk", "llm"]
 categories = ["command-line-utilities"]
 
