@@ -447,4 +447,6 @@ See `docs/PERFORMANCE_RELIABILITY.md` for load targets, stress harness commands,
 See `docs/OPERATOR_RUNBOOK.md` for operational procedures in server/production-like environments.
 See `docs/MIGRATION_GUIDE_v1.md` for pre-1.0 to v1.0.0 upgrade instructions.
 See `docs/GA_SIGNOFF.md` for GA completion checklist and gate evidence.
+See `WORKING_STYLE.md` for sprint execution conventions and definition of done.
+See `docs/PHASE2_QCLI_PARITY_PLAN.md` for the Phase 2 Q-style parity architecture and sprint issue plan.
 Temporary upstream RustSec exceptions are tracked in `.cargo/audit.toml` and reviewed each release.
