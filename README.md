@@ -57,6 +57,14 @@ cargo run -- doctor
 ```
 
 ```bash
+cargo run -- server serve --host 127.0.0.1 --port 8787
+```
+
+```bash
+cargo run -- server a2a-smoke
+```
+
+```bash
 cargo run -- eval run --benchmark-iterations 200 --fail-under 0.90
 ```
 
@@ -382,6 +390,37 @@ Provider/model switching behavior:
 - Model/provider compatibility checks are enforced before switching.
 - If a switch fails validation or runner rebuild, the previous provider/model and session remain active.
 
+## Server Mode and A2A
+
+Start server mode:
+
+```bash
+cargo run -- server serve --host 127.0.0.1 --port 8787
+```
+
+Endpoints:
+- `GET /healthz`
+- `POST /v1/ask`
+- `POST /v1/a2a/ping`
+
+Sample A2A payload:
+
+```json
+{
+  "from_agent": "sales-agent",
+  "to_agent": "procurement-agent",
+  "message_id": "msg-001",
+  "correlation_id": "corr-001",
+  "payload": { "intent": "supply-check" }
+}
+```
+
+Run smoke validation:
+
+```bash
+cargo run -- server a2a-smoke
+```
+
 ## Release Model
 
 This repo follows a release train model with SemVer tags:
@@ -400,3 +439,4 @@ See `docs/GRAPH_WORKFLOWS.md` for reusable templates and graph routing behavior.
 See `docs/EVAL_BASELINE.md` for current eval dataset baseline metrics.
 See `docs/GUARDRAIL_POLICY.md` for guardrail modes, telemetry events, and enforcement behavior.
 See `docs/QUALITY_GATES.md` for CI/release gate thresholds and remediation flow.
+See `docs/SERVER_MODE.md` for server startup, API contract, and A2A smoke flow.

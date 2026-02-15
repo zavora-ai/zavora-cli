@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,6 +21,10 @@ use adk_session::{
 use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router as AxumRouter};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -154,6 +159,19 @@ enum EvalCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ServerCommands {
+    #[command(about = "Run HTTP server mode for health, ask, and A2A endpoints")]
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
+    #[command(about = "Run local A2A contract smoke check")]
+    A2aSmoke,
+}
+
 const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli ask \"Design a Rust CLI with release-based milestones\"\n\
   zavora-cli --provider openai --model gpt-4o-mini chat\n\
@@ -164,6 +182,8 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli mcp discover --server ops-tools\n\
   zavora-cli --tool-confirmation-mode always --approve-tool release_template ask \"Draft release checklist\"\n\
   zavora-cli --guardrail-input-mode observe --guardrail-output-mode redact ask \"Review this draft\"\n\
+  zavora-cli server serve --host 127.0.0.1 --port 8787\n\
+  zavora-cli server a2a-smoke\n\
   zavora-cli telemetry report --limit 2000\n\
   zavora-cli eval run --benchmark-iterations 200 --fail-under 0.90\n\
 \n\
@@ -314,6 +334,11 @@ enum Commands {
     Eval {
         #[command(subcommand)]
         command: EvalCommands,
+    },
+    #[command(about = "Server mode and A2A smoke checks")]
+    Server {
+        #[command(subcommand)]
+        command: ServerCommands,
     },
 }
 
@@ -503,6 +528,10 @@ fn command_label(command: &Commands) -> String {
         },
         Commands::Eval { command } => match command {
             EvalCommands::Run { .. } => "eval.run".to_string(),
+        },
+        Commands::Server { command } => match command {
+            ServerCommands::Serve { .. } => "server.serve".to_string(),
+            ServerCommands::A2aSmoke => "server.a2a-smoke".to_string(),
         },
     }
 }
@@ -1185,6 +1214,298 @@ fn buffered_output_required(mode: GuardrailMode) -> bool {
     matches!(mode, GuardrailMode::Block | GuardrailMode::Redact)
 }
 
+#[derive(Clone)]
+struct ServerState {
+    cfg: RuntimeConfig,
+    retrieval: Arc<dyn RetrievalService>,
+    runtime_tools: ResolvedRuntimeTools,
+    tool_confirmation: ToolConfirmationSettings,
+    telemetry: TelemetrySink,
+}
+
+#[derive(Debug, Serialize)]
+struct ServerHealthResponse {
+    status: &'static str,
+    app_name: String,
+    profile: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerAskRequest {
+    prompt: String,
+    session_id: Option<String>,
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ServerAskResponse {
+    answer: String,
+    provider: String,
+    model: String,
+    session_id: String,
+    user_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct A2aPingRequest {
+    from_agent: String,
+    to_agent: String,
+    message_id: String,
+    correlation_id: Option<String>,
+    #[serde(default)]
+    payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct A2aPingResponse {
+    from_agent: String,
+    to_agent: String,
+    message_id: String,
+    correlation_id: String,
+    acknowledged_message_id: String,
+    status: String,
+    payload: Value,
+}
+
+type ApiError = (StatusCode, Json<Value>);
+type ApiResult<T> = std::result::Result<Json<T>, ApiError>;
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
+    (status, Json(json!({ "error": message.into() })))
+}
+
+async fn handle_server_health(State(state): State<Arc<ServerState>>) -> Json<ServerHealthResponse> {
+    Json(ServerHealthResponse {
+        status: "ok",
+        app_name: state.cfg.app_name.clone(),
+        profile: state.cfg.profile.clone(),
+    })
+}
+
+async fn handle_server_ask(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<ServerAskRequest>,
+) -> ApiResult<ServerAskResponse> {
+    let mut cfg = state.cfg.clone();
+    if let Some(session_id) = request.session_id {
+        cfg.session_id = session_id;
+    }
+    if let Some(user_id) = request.user_id {
+        cfg.user_id = user_id;
+    }
+
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "prompt cannot be empty for /v1/ask",
+        ));
+    }
+
+    let guarded_prompt = apply_guardrail(
+        &cfg,
+        &state.telemetry,
+        "input",
+        cfg.guardrail_input_mode,
+        &prompt,
+    )
+    .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+
+    let (model, resolved_provider, model_name) =
+        resolve_model(&cfg).map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let agent = build_single_agent_with_tools(
+        model,
+        &state.runtime_tools.tools,
+        state.tool_confirmation.policy.clone(),
+        Duration::from_secs(cfg.tool_timeout_secs),
+    )
+    .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let runner = build_runner_with_run_config(
+        agent,
+        &cfg,
+        Some(state.tool_confirmation.run_config.clone()),
+    )
+    .await
+    .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+    let answer = run_prompt_with_retrieval(
+        &runner,
+        &cfg,
+        &guarded_prompt,
+        state.retrieval.as_ref(),
+        &state.telemetry,
+    )
+    .await
+    .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let answer = apply_guardrail(
+        &cfg,
+        &state.telemetry,
+        "output",
+        cfg.guardrail_output_mode,
+        &answer,
+    )
+    .map_err(|err| api_error(StatusCode::FORBIDDEN, err.to_string()))?;
+
+    state.telemetry.emit(
+        "server.ask.completed",
+        json!({
+            "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+            "model": model_name.clone(),
+            "session_id": cfg.session_id.clone(),
+            "user_id": cfg.user_id.clone()
+        }),
+    );
+
+    Ok(Json(ServerAskResponse {
+        answer,
+        provider: format!("{:?}", resolved_provider).to_ascii_lowercase(),
+        model: model_name,
+        session_id: cfg.session_id,
+        user_id: cfg.user_id,
+    }))
+}
+
+fn process_a2a_ping(request: A2aPingRequest) -> Result<A2aPingResponse> {
+    if request.from_agent.trim().is_empty() {
+        return Err(anyhow::anyhow!("from_agent is required for A2A ping"));
+    }
+    if request.to_agent.trim().is_empty() {
+        return Err(anyhow::anyhow!("to_agent is required for A2A ping"));
+    }
+    if request.message_id.trim().is_empty() {
+        return Err(anyhow::anyhow!("message_id is required for A2A ping"));
+    }
+
+    let correlation_id = request
+        .correlation_id
+        .clone()
+        .unwrap_or_else(|| request.message_id.clone());
+
+    Ok(A2aPingResponse {
+        from_agent: request.to_agent.clone(),
+        to_agent: request.from_agent.clone(),
+        message_id: format!("ack-{}", request.message_id),
+        correlation_id,
+        acknowledged_message_id: request.message_id,
+        status: "acknowledged".to_string(),
+        payload: json!({
+            "accepted": true,
+            "protocol": "zavora-a2a-v1"
+        }),
+    })
+}
+
+async fn handle_a2a_ping(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<A2aPingRequest>,
+) -> ApiResult<A2aPingResponse> {
+    state.telemetry.emit(
+        "a2a.ping.received",
+        json!({
+            "from_agent": request.from_agent.clone(),
+            "to_agent": request.to_agent.clone(),
+            "message_id": request.message_id.clone()
+        }),
+    );
+    let response = process_a2a_ping(request)
+        .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    state.telemetry.emit(
+        "a2a.ping.responded",
+        json!({
+            "message_id": response.message_id,
+            "status": response.status
+        }),
+    );
+    Ok(Json(response))
+}
+
+fn build_server_router(state: Arc<ServerState>) -> AxumRouter {
+    AxumRouter::new()
+        .route("/healthz", get(handle_server_health))
+        .route("/v1/ask", post(handle_server_ask))
+        .route("/v1/a2a/ping", post(handle_a2a_ping))
+        .with_state(state)
+}
+
+async fn run_server(
+    cfg: RuntimeConfig,
+    host: String,
+    port: u16,
+    telemetry: &TelemetrySink,
+) -> Result<()> {
+    let addr = format!("{host}:{port}")
+        .parse::<SocketAddr>()
+        .with_context(|| format!("invalid server bind address '{}:{}'", host, port))?;
+    let retrieval = build_retrieval_service(&cfg)?;
+    let runtime_tools = resolve_runtime_tools(&cfg).await;
+    let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+    let state = Arc::new(ServerState {
+        cfg: cfg.clone(),
+        retrieval,
+        runtime_tools,
+        tool_confirmation,
+        telemetry: telemetry.clone(),
+    });
+
+    telemetry.emit(
+        "server.started",
+        json!({
+            "host": host,
+            "port": port,
+            "profile": cfg.profile,
+            "session_backend": format!("{:?}", cfg.session_backend)
+        }),
+    );
+
+    println!(
+        "Server mode listening on http://{} (health: /healthz, ask: /v1/ask, a2a: /v1/a2a/ping)",
+        addr
+    );
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .context("failed to bind server listener")?;
+    axum::serve(listener, build_server_router(state))
+        .await
+        .context("server runtime failed")
+}
+
+fn run_a2a_smoke(telemetry: &TelemetrySink) -> Result<()> {
+    let request = A2aPingRequest {
+        from_agent: "sales-agent".to_string(),
+        to_agent: "procurement-agent".to_string(),
+        message_id: "msg-001".to_string(),
+        correlation_id: Some("corr-001".to_string()),
+        payload: json!({ "intent": "supply-check" }),
+    };
+    let response = process_a2a_ping(request.clone())?;
+
+    if response.acknowledged_message_id != request.message_id {
+        return Err(anyhow::anyhow!(
+            "a2a smoke failed: ack id '{}' does not match request id '{}'",
+            response.acknowledged_message_id,
+            request.message_id
+        ));
+    }
+    if response.correlation_id != "corr-001" {
+        return Err(anyhow::anyhow!(
+            "a2a smoke failed: expected correlation_id corr-001 but got '{}'",
+            response.correlation_id
+        ));
+    }
+
+    telemetry.emit(
+        "a2a.smoke.passed",
+        json!({
+            "from_agent": request.from_agent,
+            "to_agent": request.to_agent,
+            "message_id": request.message_id
+        }),
+    );
+    println!("A2A smoke passed: basic request/ack contract is valid.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1442,6 +1763,16 @@ async fn run_cli(cli: Cli) -> Result<()> {
                     fail_under,
                     &telemetry,
                 )?;
+                Ok(())
+            }
+        },
+        Commands::Server { command } => match command {
+            ServerCommands::Serve { host, port } => {
+                run_server(cfg.clone(), host, port, &telemetry).await?;
+                Ok(())
+            }
+            ServerCommands::A2aSmoke => {
+                run_a2a_smoke(&telemetry)?;
                 Ok(())
             }
         },
@@ -4753,6 +5084,46 @@ guardrail_redact_replacement = "***"
         let out = apply_guardrail(&cfg, &telemetry, "output", GuardrailMode::Observe, text)
             .expect("observe mode should not fail");
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn a2a_ping_process_returns_ack_envelope() {
+        let req = A2aPingRequest {
+            from_agent: "sales".to_string(),
+            to_agent: "procurement".to_string(),
+            message_id: "msg-1".to_string(),
+            correlation_id: Some("corr-1".to_string()),
+            payload: json!({"intent": "supply-check"}),
+        };
+
+        let response = process_a2a_ping(req.clone()).expect("a2a processing should succeed");
+        assert_eq!(response.to_agent, "sales");
+        assert_eq!(response.from_agent, "procurement");
+        assert_eq!(response.acknowledged_message_id, "msg-1");
+        assert_eq!(response.correlation_id, "corr-1");
+        assert_eq!(response.status, "acknowledged");
+        assert!(response.message_id.starts_with("ack-"));
+    }
+
+    #[test]
+    fn a2a_ping_process_rejects_invalid_request() {
+        let req = A2aPingRequest {
+            from_agent: "".to_string(),
+            to_agent: "procurement".to_string(),
+            message_id: "msg-1".to_string(),
+            correlation_id: None,
+            payload: json!({}),
+        };
+
+        let err = process_a2a_ping(req).expect_err("missing from_agent should fail");
+        assert!(err.to_string().contains("from_agent is required"));
+    }
+
+    #[test]
+    fn a2a_smoke_command_passes_with_default_fixture() {
+        let cfg = base_cfg();
+        let telemetry = test_telemetry(&cfg);
+        run_a2a_smoke(&telemetry).expect("a2a smoke should pass");
     }
 
     fn eval_dataset_fixture() -> EvalDataset {
