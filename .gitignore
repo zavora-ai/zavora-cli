@@ -8,3 +8,6 @@ evals/reports/latest.json
 *.bak
 .idea/
 .vscode/
+go/
+test/
+test-projects/
