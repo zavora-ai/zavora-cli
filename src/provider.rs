@@ -60,7 +60,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
             let model_name = cfg
                 .model
                 .clone()
-                .unwrap_or_else(|| "gpt-4.1".to_string());
+                .unwrap_or_else(|| "gpt-5-mini".to_string());
             validate_model_for_provider(provider, &model_name)?;
             let model = OpenAIClient::new(OpenAIConfig::new(api_key, model_name.clone()))?;
             Ok((Arc::new(model), provider, model_name))
