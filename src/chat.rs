@@ -27,6 +27,7 @@ use crate::compact::{CompactStrategy, compact_session};
 use crate::context::ContextUsage;
 use crate::tool_policy::matches_wildcard;
 use crate::todos;
+use crate::theme::{build_prompt, suggest_command, is_first_run, print_onboarding};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -778,8 +779,15 @@ pub async fn run_chat(
     let mut line = String::new();
     let mut checkpoint_store = CheckpointStore::new();
 
+    // First-run onboarding
+    let workspace = std::env::current_dir().unwrap_or_default();
+    if is_first_run(&workspace) {
+        print_onboarding();
+    }
+
     loop {
-        print!("zavora> ");
+        let prompt = build_prompt(&checkpoint_store, None);
+        print!("{prompt}");
         io::stdout().flush().context("failed to flush stdout")?;
         line.clear();
         stdin
@@ -800,7 +808,12 @@ pub async fn run_chat(
                 continue;
             }
             ParsedChatCommand::UnknownCommand(command) => {
-                println!("Unknown command '{command}'. Use /help.");
+                let bare = command.trim_start_matches('/');
+                if let Some(suggestion) = suggest_command(bare) {
+                    println!("Unknown command '{command}'. {suggestion}");
+                } else {
+                    println!("Unknown command '{command}'. Use /help.");
+                }
                 continue;
             }
             ParsedChatCommand::Command(command) => {
