@@ -20,6 +20,7 @@ use crate::runner::{
 use crate::session::build_session_service;
 use crate::streaming::{run_prompt_with_retrieval, run_prompt_streaming_with_retrieval};
 use crate::telemetry::TelemetrySink;
+use crate::tool_policy::matches_wildcard;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -317,22 +318,58 @@ pub fn print_chat_tools(
         approved_count,
         required_count.saturating_sub(approved_count)
     );
-    println!(
-        "Built-in tools: {}",
-        if built_in_tools.is_empty() {
-            "<none>".to_string()
-        } else {
-            built_in_tools.join(", ")
+
+    let allow = &cfg.agent_allow_tools;
+    let deny = &cfg.agent_deny_tools;
+    let has_policy = !allow.is_empty() || !deny.is_empty();
+
+    println!("Built-in tools:");
+    if built_in_tools.is_empty() {
+        println!("  <none>");
+    } else {
+        for name in &built_in_tools {
+            let suffix = tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
+            println!("  - {name}{suffix}");
         }
-    );
-    println!(
-        "MCP tools: {}",
-        if mcp_tools.is_empty() {
-            "<none>".to_string()
-        } else {
-            mcp_tools.join(", ")
+    }
+    println!("MCP tools:");
+    if mcp_tools.is_empty() {
+        println!("  <none>");
+    } else {
+        for name in &mcp_tools {
+            let suffix = tool_permission_label(name, allow, deny, has_policy, &tool_confirmation.run_config);
+            println!("  - {name}{suffix}");
         }
-    );
+    }
+}
+
+fn tool_permission_label(
+    name: &str,
+    allow: &[String],
+    deny: &[String],
+    has_policy: bool,
+    run_config: &RunConfig,
+) -> String {
+    let mut tags = Vec::new();
+    if has_policy {
+        if !allow.is_empty() && allow.iter().any(|p| matches_wildcard(p.trim(), name)) {
+            tags.push("allowed");
+        }
+        if deny.iter().any(|p| matches_wildcard(p.trim(), name)) {
+            tags.push("denied");
+        }
+    }
+    if let Some(decision) = run_config.tool_confirmation_decisions.get(name) {
+        match decision {
+            ToolConfirmationDecision::Approve => tags.push("approved"),
+            ToolConfirmationDecision::Deny => tags.push("requires-approval"),
+        }
+    }
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", tags.join(", "))
+    }
 }
 
 pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools) {
