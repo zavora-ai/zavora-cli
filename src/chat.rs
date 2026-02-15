@@ -20,6 +20,9 @@ use crate::runner::{
 use crate::session::build_session_service;
 use crate::streaming::{run_prompt_with_retrieval, run_prompt_streaming_with_retrieval};
 use crate::telemetry::TelemetrySink;
+use crate::checkpoint::{
+    CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
+};
 use crate::compact::{CompactStrategy, compact_session};
 use crate::context::ContextUsage;
 use crate::tool_policy::matches_wildcard;
@@ -32,6 +35,8 @@ pub enum ChatCommand {
     Mcp,
     Usage,
     Compact,
+    Checkpoint(String),  // subcommand + args: "save [label]", "list", "restore <tag>"
+    Tangent(String),     // "" (toggle), "tail"
     Provider(String),
     Model(Option<String>),
 }
@@ -75,6 +80,8 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
         "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
         "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
+        "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
+        "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
         "provider" => {
             if arg.is_empty() {
                 ParsedChatCommand::MissingArgument {
@@ -105,6 +112,8 @@ pub fn print_chat_help() {
     println!("- /mcp: show MCP server and tool summary");
     println!("- /usage: show context usage and token breakdown");
     println!("- /compact: summarize conversation to free context space");
+    println!("- /checkpoint save|list|restore: manage conversation snapshots");
+    println!("- /tangent: enter/exit exploratory branch (tail: keep last exchange)");
     println!("- /exit: end interactive chat");
 }
 
@@ -435,6 +444,7 @@ pub async fn dispatch_chat_command(
     tool_confirmation: &ToolConfirmationSettings,
     telemetry: &TelemetrySink,
     context_usage: Option<&ContextUsage>,
+    checkpoint_store: &mut CheckpointStore,
 ) -> Result<ChatCommandAction> {
     match command {
         ChatCommand::Exit => Ok(ChatCommandAction::Exit),
@@ -463,6 +473,89 @@ pub async fn dispatch_chat_command(
                 Ok(Some(msg)) => println!("{msg}"),
                 Ok(None) => println!("Conversation too short to compact."),
                 Err(e) => eprintln!("Compaction failed: {e}"),
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Checkpoint(sub) => {
+            let parts: Vec<&str> = sub.split_whitespace().collect();
+            match parts.first().map(|s| *s) {
+                Some("save") => {
+                    let label = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+                    match snapshot_session_events(session_service, cfg).await {
+                        Ok(events) => {
+                            let cp = checkpoint_store.save(&label, events);
+                            println!("Checkpoint [{}] '{}' saved.", cp.tag, cp.label);
+                        }
+                        Err(e) => eprintln!("Failed to save checkpoint: {e}"),
+                    }
+                }
+                Some("list") => {
+                    print!("{}", format_checkpoint_list(checkpoint_store));
+                }
+                Some("restore") => {
+                    if let Some(tag_str) = parts.get(1) {
+                        if let Ok(tag) = tag_str.parse::<usize>() {
+                            if let Some(cp) = checkpoint_store.get(tag) {
+                                let events = cp.events.clone();
+                                match restore_session_events(session_service, cfg, &events).await {
+                                    Ok(()) => println!("Restored to checkpoint [{}] '{}'.", cp.tag, cp.label),
+                                    Err(e) => eprintln!("Restore failed: {e}"),
+                                }
+                            } else {
+                                println!("No checkpoint with tag {tag}. Use /checkpoint list.");
+                            }
+                        } else {
+                            println!("Invalid tag. Usage: /checkpoint restore <number>");
+                        }
+                    } else {
+                        println!("Usage: /checkpoint restore <tag>");
+                    }
+                }
+                _ => {
+                    println!("Usage: /checkpoint save [label] | list | restore <tag>");
+                }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Tangent(sub) => {
+            match sub.trim() {
+                "tail" => {
+                    if !checkpoint_store.in_tangent() {
+                        println!("Not in tangent mode. Use /tangent to enter.");
+                    } else {
+                        match snapshot_session_events(session_service, cfg).await {
+                            Ok(current) => {
+                                if let Some(events) = checkpoint_store.exit_tangent_tail(&current) {
+                                    match restore_session_events(session_service, cfg, &events).await {
+                                        Ok(()) => println!("Exited tangent mode (kept last exchange)."),
+                                        Err(e) => eprintln!("Tangent tail restore failed: {e}"),
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to read session: {e}"),
+                        }
+                    }
+                }
+                _ => {
+                    if checkpoint_store.in_tangent() {
+                        // Exit tangent
+                        if let Some(events) = checkpoint_store.exit_tangent() {
+                            match restore_session_events(session_service, cfg, &events).await {
+                                Ok(()) => println!("Exited tangent mode. Conversation restored."),
+                                Err(e) => eprintln!("Tangent restore failed: {e}"),
+                            }
+                        }
+                    } else {
+                        // Enter tangent
+                        match snapshot_session_events(session_service, cfg).await {
+                            Ok(events) => {
+                                let tag = checkpoint_store.enter_tangent(events);
+                                println!("Entered tangent mode (baseline checkpoint [{tag}]). Use /tangent to exit or /tangent tail to keep last exchange.");
+                            }
+                            Err(e) => eprintln!("Failed to enter tangent: {e}"),
+                        }
+                    }
+                }
             }
             Ok(ChatCommandAction::Continue)
         }
@@ -627,6 +720,7 @@ pub async fn run_chat(
     }
     let stdin = io::stdin();
     let mut line = String::new();
+    let mut checkpoint_store = CheckpointStore::new();
 
     loop {
         print!("zavora> ");
@@ -665,6 +759,7 @@ pub async fn run_chat(
                     &tool_confirmation,
                     telemetry,
                     None, // context usage computed on demand in future
+                    &mut checkpoint_store,
                 )
                 .await?;
                 if matches!(action, ChatCommandAction::Exit) {
