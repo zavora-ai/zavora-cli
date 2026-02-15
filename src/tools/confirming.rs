@@ -117,14 +117,11 @@ impl Tool for ConfirmingTool {
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
-        // Skip prompt if tool is trusted for this session
-        if TRUSTED_TOOLS.lock().unwrap().contains(self.inner.name()) {
-            return self.inner.execute(ctx, args).await;
-        }
+        let trusted = TRUSTED_TOOLS.lock().unwrap().contains(self.inner.name());
 
         theme::pause_spinner();
 
-        // Show diff for fs_write, command for execute_bash, path for fs_read, raw args for others
+        // Always show what the tool is doing (Q CLI pattern: transparency even when trusted)
         let display = if self.inner.name() == "fs_write" {
             format_fs_write_diff(&args)
         } else if self.inner.name() == "execute_bash" {
@@ -146,6 +143,17 @@ impl Tool for ConfirmingTool {
         };
 
         eprint!("{display}");
+
+        // If trusted, execute immediately without prompting
+        if trusted {
+            theme::resume_spinner();
+            let mut approved_args = args;
+            if let Some(obj) = approved_args.as_object_mut() {
+                obj.insert("approved".to_string(), Value::Bool(true));
+            }
+            return self.inner.execute(ctx, approved_args).await;
+        }
+
         eprintln!(
             "{DIM}Allow this action? Use '{GREEN}t{DIM}' to trust this tool for the session. [{GREEN}y{DIM}/{GREEN}n{DIM}/{GREEN}t{DIM}]:{RESET}"
         );
