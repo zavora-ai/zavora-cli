@@ -2334,7 +2334,7 @@ fn test_context_usage_normal() {
         assistant_chars: 2000,
         tool_chars: 500,
         system_chars: 500,
-        context_window_tokens: 128_000,
+        context_window_tokens: 128_000, api_total_tokens: 0, event_count: 0,
     };
     assert_eq!(usage.total_chars(), 4000);
     assert_eq!(usage.budget_level(), BudgetLevel::Normal);
@@ -2346,28 +2346,27 @@ fn test_context_usage_normal() {
 
 #[test]
 fn test_context_usage_warning() {
-    // 80% of 1000 tokens = 800 tokens = 3200 chars
+    // 80% of 1000 tokens via api_total_tokens
     let usage = ContextUsage {
         user_chars: 1600,
         assistant_chars: 1600,
         tool_chars: 0,
         system_chars: 0,
-        context_window_tokens: 1000,
+        context_window_tokens: 1000, api_total_tokens: 800, event_count: 0,
     };
-    // 3200 chars / 4 = 800 tokens, 800/1000 = 80%
     assert_eq!(usage.budget_level(), BudgetLevel::Warning);
     assert!(usage.prompt_indicator().contains("⚠"));
 }
 
 #[test]
 fn test_context_usage_critical() {
-    // 95% of 1000 tokens = 950 tokens = 3800 chars
+    // 95% of 1000 tokens via api_total_tokens
     let usage = ContextUsage {
         user_chars: 1900,
         assistant_chars: 1900,
         tool_chars: 0,
         system_chars: 0,
-        context_window_tokens: 1000,
+        context_window_tokens: 1000, api_total_tokens: 950, event_count: 0,
     };
     assert_eq!(usage.budget_level(), BudgetLevel::Critical);
     assert!(usage.prompt_indicator().contains("🔴"));
@@ -2380,7 +2379,7 @@ fn test_context_usage_format() {
         assistant_chars: 8000,
         tool_chars: 2000,
         system_chars: 1000,
-        context_window_tokens: 128_000,
+        context_window_tokens: 128_000, api_total_tokens: 0, event_count: 0,
     };
     let output = usage.format_usage();
     assert!(output.contains("Context"));
@@ -2405,7 +2404,7 @@ fn test_context_usage_zero_window() {
         assistant_chars: 0,
         tool_chars: 0,
         system_chars: 0,
-        context_window_tokens: 0,
+        context_window_tokens: 0, api_total_tokens: 0, event_count: 0,
     };
     assert_eq!(usage.utilization(), 0.0);
     assert_eq!(usage.budget_level(), BudgetLevel::Normal);
@@ -2840,9 +2839,18 @@ fn test_build_prompt_with_budget() {
         assistant_chars: 0,
         tool_chars: 0,
         system_chars: 0,
-        context_window_tokens: 1000,
+        context_window_tokens: 10_000, api_total_tokens: 0, event_count: 0,
     };
-    // 3200/4 = 800 tokens, 800/1000 = 80% => Warning
+    // 3200/4 = 800 + 1500 overhead = 2300 tokens, 2300/10000 = 23% => but let's use api_total_tokens
+    // Actually use api_total_tokens to bypass overhead
+    let usage = ContextUsage {
+        user_chars: 3200,
+        assistant_chars: 0,
+        tool_chars: 0,
+        system_chars: 0,
+        context_window_tokens: 1000, api_total_tokens: 800, event_count: 0,
+    };
+    // 800/1000 = 80% => Warning
     let prompt = build_prompt(&store, Some(&usage));
     assert!(prompt.contains("⚠"));
 }

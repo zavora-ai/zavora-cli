@@ -63,11 +63,16 @@ pub fn build_prompt(
 
     // Budget indicator with color
     if let Some(usage) = context_usage {
-        let pct = (usage.utilization() * 100.0) as u32;
+        let util = usage.utilization();
+        let pct_str = if (util * 100.0) as u32 == 0 && util > 0.0 {
+            "<1".to_string()
+        } else {
+            format!("{}", (util * 100.0) as u32)
+        };
         let indicator = match usage.budget_level() {
-            BudgetLevel::Normal => format!("{DIM}{}%{RESET}", pct),
-            BudgetLevel::Warning => format!("{BOLD_YELLOW}⚠ {}%{RESET}", pct),
-            BudgetLevel::Critical => format!("{BOLD_RED}🔴 {}%{RESET}", pct),
+            BudgetLevel::Normal => format!("{DIM}{pct_str}%{RESET}"),
+            BudgetLevel::Warning => format!("{BOLD_YELLOW}⚠ {pct_str}%{RESET}"),
+            BudgetLevel::Critical => format!("{BOLD_RED}🔴 {pct_str}%{RESET}"),
         };
         parts.push(indicator);
     }

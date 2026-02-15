@@ -49,7 +49,14 @@ pub struct ContextUsage {
     pub tool_chars: usize,
     pub system_chars: usize,
     pub context_window_tokens: usize,
+    /// Actual total token count from the API's last usage_metadata (includes system prompt, tools, history).
+    pub api_total_tokens: usize,
+    /// Number of session events.
+    pub event_count: usize,
 }
+
+/// Estimated overhead for system prompt + tool declarations not captured in session events.
+const PROMPT_OVERHEAD_TOKENS: usize = 1500;
 
 impl ContextUsage {
     pub fn total_chars(&self) -> usize {
@@ -57,7 +64,11 @@ impl ContextUsage {
     }
 
     pub fn total_tokens(&self) -> usize {
-        estimate_tokens(self.total_chars())
+        if self.api_total_tokens > 0 {
+            self.api_total_tokens
+        } else {
+            estimate_tokens(self.total_chars()) + PROMPT_OVERHEAD_TOKENS
+        }
     }
 
     pub fn utilization(&self) -> f64 {
@@ -78,10 +89,12 @@ impl ContextUsage {
         }
     }
 
-    /// Short indicator string for prompt display (e.g. "[72%]", "[⚠ 85%]", "[🔴 93%]").
+    /// Short indicator string for prompt display (e.g. "[<1%]", "[72%]", "[⚠ 85%]", "[🔴 93%]").
     pub fn prompt_indicator(&self) -> String {
-        let pct = (self.utilization() * 100.0) as u32;
+        let util = self.utilization();
+        let pct = (util * 100.0) as u32;
         match self.budget_level() {
+            BudgetLevel::Normal if pct == 0 && util > 0.0 => "<1%".to_string(),
             BudgetLevel::Normal => format!("{}%", pct),
             BudgetLevel::Warning => format!("⚠ {}%", pct),
             BudgetLevel::Critical => format!("🔴 {}%", pct),
@@ -104,13 +117,26 @@ impl ContextUsage {
         let r = "\x1b[0m"; // reset
         let b = "\x1b[1m"; // bold
 
+        let pct_display = if pct == 0 && self.utilization() > 0.0 {
+            "<1".to_string()
+        } else {
+            pct.to_string()
+        };
+
         let mut out = String::new();
-        out.push_str(&format!("\n  {b}Context{r}  {pct_color}{total_tokens}/{window} tokens ({pct}%){r}\n\n"));
+        out.push_str(&format!("\n  {b}Context{r}  {pct_color}{total_tokens}/{window} tokens ({pct_display}%){r}\n\n"));
         out.push_str(&format!("  {d}User:{r}      {:>6} tokens\n", estimate_tokens(self.user_chars)));
         out.push_str(&format!("  {d}Assistant:{r}  {:>6} tokens\n", estimate_tokens(self.assistant_chars)));
         out.push_str(&format!("  {d}Tools:{r}     {:>6} tokens\n", estimate_tokens(self.tool_chars)));
         out.push_str(&format!("  {d}System:{r}    {:>6} tokens\n", estimate_tokens(self.system_chars)));
+        out.push_str(&format!("  {d}Overhead:{r}  {:>6} tokens {d}(system prompt + tool decls){r}\n", PROMPT_OVERHEAD_TOKENS));
         out.push_str(&format!("  {d}Remaining:{r} {:>6} tokens\n", remaining));
+
+        out.push_str(&format!("\n  {d}Events:{r}    {:>6}\n", self.event_count));
+        out.push_str(&format!("  {d}Chars:{r}     {:>6}\n", self.total_chars()));
+        if self.api_total_tokens > 0 {
+            out.push_str(&format!("  {d}API tokens:{r}{:>6} {d}(from provider){r}\n", self.api_total_tokens));
+        }
 
         match self.budget_level() {
             BudgetLevel::Normal => {}
@@ -145,6 +171,7 @@ pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
     let mut assistant_chars = 0usize;
     let mut tool_chars = 0usize;
     let mut system_chars = 0usize;
+    let mut api_total_tokens = 0usize;
 
     for event in events {
         let (mut text_chars, mut fn_chars) = (0usize, 0usize);
@@ -160,6 +187,13 @@ pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Track the latest API-reported total token count (includes system prompt, tools, full history)
+        if let Some(meta) = &event.llm_response.usage_metadata {
+            if meta.total_token_count > 0 {
+                api_total_tokens = meta.total_token_count as usize;
             }
         }
 
@@ -179,5 +213,7 @@ pub fn compute_context_usage(events: &[Event], provider: &str) -> ContextUsage {
         tool_chars,
         system_chars,
         context_window_tokens: default_context_window(provider),
+        api_total_tokens,
+        event_count: events.len(),
     }
 }
