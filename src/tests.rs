@@ -2886,3 +2886,99 @@ fn test_format_command_palette() {
     assert!(palette.contains("/todos"));
     assert!(palette.contains("/delegate"));
 }
+
+// ---------------------------------------------------------------------------
+// Parity benchmark tests
+// ---------------------------------------------------------------------------
+
+use crate::benchmark::*;
+
+#[test]
+fn test_default_scenarios_count() {
+    let scenarios = default_scenarios();
+    assert_eq!(scenarios.len(), 12);
+}
+
+#[test]
+fn test_parity_level_scores() {
+    assert_eq!(ParityLevel::Met.score(), 1.0);
+    assert_eq!(ParityLevel::Partial.score(), 0.5);
+    assert_eq!(ParityLevel::NotMet.score(), 0.0);
+}
+
+#[test]
+fn test_scorecard_compute_all_pass() {
+    let scenarios = vec![
+        BenchmarkScenario {
+            id: "s1".into(),
+            category: BenchmarkCategory::ChatUX,
+            description: "test".into(),
+            weight: 1.0,
+            pass_criteria: "pass".into(),
+        },
+        BenchmarkScenario {
+            id: "s2".into(),
+            category: BenchmarkCategory::FileEdits,
+            description: "test".into(),
+            weight: 2.0,
+            pass_criteria: "pass".into(),
+        },
+    ];
+    let results = vec![
+        ScenarioResult { scenario_id: "s1".into(), passed: true, score: 1.0, notes: String::new() },
+        ScenarioResult { scenario_id: "s2".into(), passed: true, score: 1.0, notes: String::new() },
+    ];
+    let card = Scorecard::compute(&scenarios, &results);
+    assert_eq!(card.total_score, 3.0);
+    assert_eq!(card.max_score, 3.0);
+    assert_eq!(card.pass_rate, 1.0);
+    assert!(card.meets_threshold(BASELINE_THRESHOLD));
+    assert!(card.meets_threshold(TARGET_THRESHOLD));
+}
+
+#[test]
+fn test_scorecard_compute_partial() {
+    let scenarios = vec![
+        BenchmarkScenario {
+            id: "s1".into(),
+            category: BenchmarkCategory::ChatUX,
+            description: "test".into(),
+            weight: 1.0,
+            pass_criteria: "pass".into(),
+        },
+    ];
+    let results = vec![
+        ScenarioResult { scenario_id: "s1".into(), passed: false, score: 0.5, notes: "partial".into() },
+    ];
+    let card = Scorecard::compute(&scenarios, &results);
+    assert_eq!(card.pass_rate, 0.5);
+    assert!(!card.meets_threshold(BASELINE_THRESHOLD));
+}
+
+#[test]
+fn test_scorecard_format_display() {
+    let scenarios = default_scenarios();
+    let results: Vec<ScenarioResult> = scenarios.iter().map(|s| ScenarioResult {
+        scenario_id: s.id.clone(),
+        passed: true,
+        score: 1.0,
+        notes: String::new(),
+    }).collect();
+    let card = Scorecard::compute(&scenarios, &results);
+    let display = card.format_display();
+    assert!(display.contains("Parity Scorecard:"));
+    assert!(display.contains("100%"));
+}
+
+#[test]
+fn test_scorecard_empty() {
+    let card = Scorecard::compute(&[], &[]);
+    assert_eq!(card.pass_rate, 0.0);
+    assert_eq!(card.total_score, 0.0);
+}
+
+#[test]
+fn test_category_labels() {
+    assert_eq!(BenchmarkCategory::ProjectCreation.label(), "Project Creation");
+    assert_eq!(BenchmarkCategory::ContextManagement.label(), "Context Management");
+}
