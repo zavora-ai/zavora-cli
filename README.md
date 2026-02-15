@@ -1,6 +1,15 @@
 # zavora-cli
 
-A Rust command-line AI agent built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
+```
+  ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗  █████╗
+  ╚══███╔╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗██╔══██╗
+    ███╔╝ ███████║██║   ██║██║   ██║██████╔╝███████║
+   ███╔╝  ██╔══██║╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██║
+  ███████╗██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║██║  ██║
+  ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
+```
+
+**Your AI agent, in the terminal.** Built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
 
 ## Install
 
