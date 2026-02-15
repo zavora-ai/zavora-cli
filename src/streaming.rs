@@ -325,6 +325,7 @@ pub async fn run_prompt_streaming(
     let mut emitted_text_by_author: HashMap<String, String> = HashMap::new();
     let mut printed_any_output = false;
     let mut spinner = Some(Spinner::start("Thinking..."));
+    let mut current_author = String::new();
 
     // Winnow streaming markdown state
     let mut md_buf = String::new();
@@ -349,6 +350,34 @@ pub async fn run_prompt_streaming(
         }
 
         emit_tool_lifecycle_events(&event, telemetry);
+
+        // Show agent transfers and tool calls
+        if event.author != "user" && event.author != current_author && !current_author.is_empty() {
+            if let Some(s) = spinner.take() { s.stop(); }
+            eprintln!(
+                "{}  → {}{}",
+                crate::theme::DIM, event.author, crate::theme::RESET
+            );
+            spinner = Some(Spinner::start("Working..."));
+        }
+        if event.author != "user" {
+            current_author = event.author.clone();
+        }
+        // Show tool calls inline
+        if let Some(content) = event.content() {
+            for part in &content.parts {
+                if let Part::FunctionCall { name, .. } = part {
+                    if name != "transfer_to_agent" {
+                        if let Some(s) = spinner.take() { s.stop(); }
+                        eprintln!(
+                            "{}  ⚡ {}{}",
+                            crate::theme::DIM, name, crate::theme::RESET
+                        );
+                        spinner = Some(Spinner::start("Running..."));
+                    }
+                }
+            }
+        }
 
         let delta = tracker.ingest_parts(
             &event.author,
