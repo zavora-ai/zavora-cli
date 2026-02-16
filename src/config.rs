@@ -49,6 +49,8 @@ pub struct RuntimeConfig {
     pub auto_compact_enabled: bool,
     pub compact_interval: u32,
     pub compact_overlap: u32,
+    pub compaction_threshold: f64,
+    pub compaction_target: f64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -90,6 +92,8 @@ pub struct ProfileConfig {
     pub guardrail_redact_replacement: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    pub compaction_threshold: Option<f64>,
+    pub compaction_target: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +539,8 @@ pub fn resolve_runtime_config_with_agents(
         auto_compact_enabled: true,
         compact_interval: 10,
         compact_overlap: 2,
+        compaction_threshold: profile.compaction_threshold.unwrap_or(0.75),
+        compaction_target: profile.compaction_target.unwrap_or(0.10),
     })
 }
 

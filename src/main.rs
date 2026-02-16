@@ -5,7 +5,7 @@ use clap::Parser;
 use serde_json::json;
 use tracing::level_filters::LevelFilter;
 
-use zavora_cli::agents::*;
+use zavora_cli::agent_catalog::*;
 use zavora_cli::chat::*;
 use zavora_cli::cli::*;
 use zavora_cli::config::*;

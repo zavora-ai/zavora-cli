@@ -1,3 +1,4 @@
+pub mod agent_catalog;
 pub mod agents;
 pub mod benchmark;
 pub mod chat;

@@ -21,6 +21,36 @@ use crate::tools::{
     build_builtin_tools,
 };
 
+const ORCHESTRATOR_INSTRUCTION: &str = "\
+You are the orchestrator. You coordinate specialist agents to accomplish complex tasks.
+
+CAPABILITY AGENTS (call as tools when you need their unique skills):
+- time_agent: Get current time, parse relative dates (\"next Friday\", \"in 2 days\")
+- memory_agent: Recall/store persistent learnings across sessions
+- search_agent: Web search for current info (only available with Gemini model)
+
+WORKFLOW AGENTS (use for complex multi-step work):
+- file_search_agent: Comprehensive file discovery with saturation detection
+- sequential_agent: Create plans and execute steps with progress tracking
+- quality_agent: Verify work against acceptance criteria
+
+ORCHESTRATION PATTERN:
+1. Bootstrap: Get time context, recall relevant memories
+2. Gather: Search/discover resources if needed
+3. Plan: Create structured plan with acceptance criteria
+4. Execute: Run steps one at a time, producing artifacts
+5. Verify: Check quality against criteria
+6. Commit: Store high-signal learnings
+
+RULES:
+- Always start with time context for time-sensitive tasks
+- Use memory_agent to recall user preferences and past decisions
+- Store only high-signal learnings: preferences, decisions, patterns
+- For simple tasks, just use your built-in tools directly
+- For complex multi-step tasks, use sequential_agent
+- Search agent requires Gemini model (check availability first)
+";
+
 #[cfg(test)]
 pub fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let tools = build_builtin_tools();
@@ -47,27 +77,31 @@ pub fn build_single_agent_with_tools(
             .unwrap_or_else(|_| ".".to_string());
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
 
-        let mut sections = vec![format!(
-            "You are Zavora, an AI assistant in the user's terminal. You help with coding, \
-             debugging, system administration, writing, analysis, and any professional task.\n\
-             \n\
-             <system_context>\n\
-             - Operating System: {os_name}\n\
-             - Current Directory: {cwd}\n\
-             - Shell: {shell}\n\
-             </system_context>\n\
-             \n\
-             <operational_directives>\n\
-             EXECUTE IMMEDIATELY. When the user asks you to do something, do it. Don't narrate \
-             what you would do — use your tools and produce the result.\n\
-             OUTPUT FIRST. Lead with code, results, or actions. Explanations come after, and only \
-             if needed.\n\
-             ZERO FLUFF. No philosophical preambles, no unsolicited advice, no filler. Every \
+        let mut sections = vec![
+            format!(
+                "You are Zavora, an AI assistant in the user's terminal. You help with coding, \
+                 debugging, system administration, writing, analysis, and any professional task.\n\
+                 \n\
+                 <system_context>\n\
+                 - Operating System: {os_name}\n\
+                 - Current Directory: {cwd}\n\
+                 - Shell: {shell}\n\
+                 </system_context>\n\
+                 \n\
+                 <operational_directives>\n\
+                 EXECUTE IMMEDIATELY. When the user asks you to do something, do it. Don't narrate \
+                 what you would do — use your tools and produce the result.\n\
+                 OUTPUT FIRST. Lead with code, results, or actions. Explanations come after, and only \
+                 if needed.\n\
+                 ZERO FLUFF. No philosophical preambles, no unsolicited advice, no filler. Every \
              sentence must earn its place.\n\
              STAY FOCUSED. Answer what was asked. Don't wander into tangents or related topics \
              unless directly relevant.\n\
              </operational_directives>\n\
-             \n\
+             "
+            ),
+            ORCHESTRATOR_INSTRUCTION.to_string(),
+            format!("\n\
              <tone>\n\
              You talk like a human, not like a bot. You are conversational and natural.\n\
              - Mirror the user's style: short question gets a short answer, detailed question \
@@ -143,16 +177,9 @@ pub fn build_single_agent_with_tools(
              - Do not add tests unless explicitly requested\n\
              - Decline requests for malicious code\n\
              - When uncertain, ask for clarification rather than guessing\n\
-             </rules>\n\
-             \n\
-             <delegation>\n\
-             You have specialist sub-agents. Transfer to them for focused tasks:\n\
-             - git_agent: git commits, branches, merges, rebasing, PR workflows, conflict resolution\n\
-             - research_agent: codebase exploration, file search, log analysis, investigative tasks\n\
-             - planner_agent: task breakdown, project planning, todo list management, spec writing\n\
-             Handle simple/quick tasks yourself. Delegate when the task is clearly in a specialist's domain.\n\
-             </delegation>"
-        )];
+             </rules>"
+            )
+        ];
         if let Some(agent_instruction) = cfg
             .agent_instruction
             .as_deref()
@@ -178,13 +205,9 @@ pub fn build_single_agent_with_tools(
             .to_string()
     };
 
-    // Build sub-agents from the same tool set (they inherit ConfirmingTool wrapping).
-    let sub_agents = build_sub_agents(
-        model.clone(),
-        tools,
-        tool_confirmation_policy.clone(),
-        tool_timeout,
-    );
+    // Note: Sub-agents removed. New capability agents (time, memory, search) will be
+    // exposed as tools once agent tool interface is ready.
+    // Old git/research/planner agents were weak (just filtered tools).
 
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -213,128 +236,14 @@ pub fn build_single_agent_with_tools(
     for tool in tools {
         builder = builder.tool(tool.clone());
     }
-    for agent in sub_agents {
-        builder = builder.sub_agent(agent);
-    }
 
     Ok(Arc::new(builder.build()?))
 }
 
 // ---------------------------------------------------------------------------
-// Sub-agent builders
+// Old sub-agent code removed - replaced with new capability + workflow agents
+// See src/agents/ for new architecture
 // ---------------------------------------------------------------------------
-
-fn pick_tools(all: &[Arc<dyn Tool>], names: &[&str]) -> Vec<Arc<dyn Tool>> {
-    all.iter()
-        .filter(|t| names.contains(&t.name()))
-        .cloned()
-        .collect()
-}
-
-fn before_model_role_fix() -> adk_rust::BeforeModelCallback {
-    Box::new(|_ctx, mut request| {
-        Box::pin(async move {
-            for content in &mut request.contents {
-                if content.role == "model"
-                    && content
-                        .parts
-                        .iter()
-                        .any(|p| matches!(p, adk_rust::prelude::Part::FunctionResponse { .. }))
-                {
-                    content.role = "function".to_string();
-                }
-            }
-            Ok(BeforeModelResult::Continue(request))
-        })
-    })
-}
-
-fn build_sub_agents(
-    model: Arc<dyn Llm>,
-    tools: &[Arc<dyn Tool>],
-    policy: ToolConfirmationPolicy,
-    timeout: Duration,
-) -> Vec<Arc<dyn Agent>> {
-    let mut agents: Vec<Arc<dyn Agent>> = Vec::new();
-
-    // --- git_agent ---
-    {
-        let mut b = LlmAgentBuilder::new("git_agent")
-            .description("Specialist for git operations: commits, branches, merges, rebasing, history, and PR workflows")
-            .instruction(
-                "You are a git specialist. You handle all version-control tasks:\n\
-                 - Commits, branches, merges, rebasing, cherry-pick\n\
-                 - Conflict resolution and history inspection\n\
-                 - Conventional commit messages (feat/fix/refactor/docs/test/chore)\n\
-                 - PR creation and review workflows via gh CLI\n\
-                 - Always verify build/tests pass before committing\n\
-                 - Make atomic commits: one logical change per commit\n\
-                 When your task is complete, provide a brief summary of what was done."
-            )
-            .model(model.clone())
-            .tool_confirmation_policy(policy.clone())
-            .tool_timeout(timeout)
-            .before_model_callback(before_model_role_fix());
-        for t in pick_tools(tools, &[EXECUTE_BASH_TOOL_NAME, GITHUB_OPS_TOOL_NAME]) {
-            b = b.tool(t);
-        }
-        if let Ok(a) = b.build() {
-            agents.push(Arc::new(a));
-        }
-    }
-
-    // --- research_agent ---
-    {
-        let mut b = LlmAgentBuilder::new("research_agent")
-            .description("Specialist for codebase exploration, file search, log analysis, and investigative tasks")
-            .instruction(
-                "You are a research specialist. You investigate codebases and systems:\n\
-                 - Search files with grep, find, ripgrep patterns\n\
-                 - Read and analyze source code, configs, logs\n\
-                 - Trace call chains and data flows\n\
-                 - Summarize findings with file paths and line numbers\n\
-                 - Be thorough: check multiple files, cross-reference, verify assumptions\n\
-                 When your investigation is complete, provide a structured summary."
-            )
-            .model(model.clone())
-            .tool_confirmation_policy(policy.clone())
-            .tool_timeout(timeout)
-            .before_model_callback(before_model_role_fix());
-        for t in pick_tools(tools, &[EXECUTE_BASH_TOOL_NAME, FS_READ_TOOL_NAME]) {
-            b = b.tool(t);
-        }
-        if let Ok(a) = b.build() {
-            agents.push(Arc::new(a));
-        }
-    }
-
-    // --- planner_agent ---
-    {
-        let mut b = LlmAgentBuilder::new("planner_agent")
-            .description("Specialist for task breakdown, project planning, and todo management")
-            .instruction(
-                "You are a planning specialist. You break down work into actionable steps:\n\
-                 - Decompose complex tasks into ordered, concrete steps\n\
-                 - Create and manage todo lists for tracking progress\n\
-                 - Read existing code/docs to inform plans\n\
-                 - Write planning documents, specs, and checklists\n\
-                 - Each task should be independently verifiable\n\
-                 When planning is complete, provide the plan summary.",
-            )
-            .model(model.clone())
-            .tool_confirmation_policy(policy)
-            .tool_timeout(timeout)
-            .before_model_callback(before_model_role_fix());
-        for t in pick_tools(tools, &[FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, "todo_list"]) {
-            b = b.tool(t);
-        }
-        if let Ok(a) = b.build() {
-            agents.push(Arc::new(a));
-        }
-    }
-
-    agents
-}
 
 #[derive(Clone)]
 pub struct ResolvedRuntimeTools {

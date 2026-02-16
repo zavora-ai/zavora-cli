@@ -72,13 +72,33 @@ zavora-cli doctor
 
 ## Multi-Agent Orchestration
 
-The assistant automatically delegates to specialist sub-agents when appropriate:
+The assistant uses a **capability + workflow** agent architecture by default:
 
-- **git agent** — git operations, commits, branch management
-- **research agent** — codebase exploration, file search, analysis
-- **planner agent** — task breakdown, todo lists, project planning
+**Capability Agents** (callable as tools):
+- **time_agent** — Current time context, parse relative dates ("next Friday", "in 2 days")
+- **memory_agent** — Persistent learnings across sessions (stored in `.zavora/memory.json`)
+- **search_agent** — Web search via Gemini's Google Search (requires Gemini model)
 
-Transfers are visible in the UI with `→ agent_name` indicators. Tool calls show as `⚡ tool_name`.
+**Workflow Agents** (execution patterns):
+- **file_search_agent** — Iterative file discovery with saturation detection
+- **sequential_agent** — Plan creation and step-by-step execution with progress tracking
+- **quality_agent** — Verification against acceptance criteria
+
+**Orchestration Pattern:**
+```
+Bootstrap (time + memory) → Gather (search/files) → Plan → Execute → Verify → Commit
+```
+
+The orchestrator automatically:
+- Recalls relevant memories at the start of tasks
+- Uses time context for time-sensitive work
+- Delegates to workflow agents for complex multi-step tasks
+- Stores high-signal learnings after successful completions
+
+The LLM can call capability agents as tools, or you can use chat commands:
+- `/memory recall|remember|forget` — Manage persistent learnings
+- `/time [query]` — Get time context or parse dates
+- `/orchestrate <goal>` — Run full orchestration loop
 
 ## Chat Commands
 
@@ -88,6 +108,10 @@ Transfers are visible in the UI with `→ agent_name` indicators. Tool calls sho
 | `/status` | Current provider, model, session info |
 | `/usage` | Context window usage breakdown by author |
 | `/compact` | Compact session history to reclaim context |
+| `/autocompact` | Toggle automatic compaction (threshold-based) |
+| `/memory <cmd>` | recall\|remember\|forget persistent learnings |
+| `/time [query]` | Get time context or parse relative dates |
+| `/orchestrate <goal>` | Run full agent orchestration loop |
 | `/tools` | List active built-in and MCP tools |
 | `/mcp` | MCP server diagnostics |
 | `/checkpoint save <label>` | Save session snapshot |
@@ -113,13 +137,16 @@ Transfers are visible in the UI with `→ agent_name` indicators. Tool calls sho
 | `execute_bash` | Run shell commands with safety policy (read-only commands auto-approved) |
 | `github_ops` | GitHub operations via `gh` CLI (issues, PRs, projects) |
 | `todo_list` | Create/complete/view/list/delete task lists (persisted to `.zavora/todos/`) |
+| `time_agent` | Current time context and relative date parsing |
+| `memory_agent` | Persistent learnings storage and recall |
 
 ## Context Management
 
 - `/usage` shows real-time token breakdown by author (user, assistant, tool, system)
-- Prompt shows ⚠ (>75%) or 🔴 (>90%) when approaching context limits
+- Prompt shows ⚠ (>80%) or 🔴 (>90%) when approaching context limits
 - `/compact` manually summarizes history to reclaim space
-- Auto-compaction triggers when configured thresholds are exceeded
+- `/autocompact` toggles automatic compaction (default: enabled at 75% → 10%)
+- Auto-compaction uses LLM-generated structured summaries
 
 ## Configuration
 
@@ -133,8 +160,9 @@ session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/sessions.db"
 retrieval_backend = "disabled"
 tool_confirmation_mode = "mcp-only"
+auto_compact_enabled = true
 compaction_threshold = 0.75
-compaction_target = 0.50
+compaction_target = 0.10
 telemetry_enabled = true
 ```
 

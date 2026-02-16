@@ -94,6 +94,8 @@ fn base_cfg() -> RuntimeConfig {
         auto_compact_enabled: true,
         compact_interval: 10,
         compact_overlap: 2,
+        compaction_threshold: 0.75,
+        compaction_target: 0.10,
     }
 }
 

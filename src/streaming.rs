@@ -381,12 +381,72 @@ pub async fn run_prompt_streaming(
         // Show tool calls inline
         if let Some(content) = event.content() {
             for part in &content.parts {
-                if let Part::FunctionCall { name, .. } = part {
+                if let Part::FunctionCall { name, args, .. } = part {
                     if name != "transfer_to_agent" {
                         if let Some(s) = spinner.take() {
                             s.stop();
                         }
+                        
+                        // Show tool name
                         eprintln!("{}  ⚡ {}{}", crate::theme::DIM, name, crate::theme::RESET);
+                        
+                        // Show what the tool is doing
+                        if let Some(args_obj) = args.as_object() {
+                            let summary = match name.as_str() {
+                                "time_agent" => {
+                                    if let Some(action) = args_obj.get("action").and_then(|v| v.as_str()) {
+                                        match action {
+                                            "handshake" => Some("Getting current time".to_string()),
+                                            "parse" => {
+                                                if let Some(query) = args_obj.get("query").and_then(|v| v.as_str()) {
+                                                    Some(format!("Parsing: {}", query))
+                                                } else {
+                                                    Some("Parsing date".to_string())
+                                                }
+                                            }
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                "memory_agent" => {
+                                    if let Some(action) = args_obj.get("action").and_then(|v| v.as_str()) {
+                                        match action {
+                                            "recall" => {
+                                                if let Some(query) = args_obj.get("text").and_then(|v| v.as_str()) {
+                                                    Some(format!("Recalling: {}", query))
+                                                } else {
+                                                    Some("Searching memories".to_string())
+                                                }
+                                            }
+                                            "remember" => {
+                                                if let Some(text) = args_obj.get("text").and_then(|v| v.as_str()) {
+                                                    let preview = if text.len() > 50 {
+                                                        format!("{}...", &text[..50])
+                                                    } else {
+                                                        text.to_string()
+                                                    };
+                                                    Some(format!("Storing: {}", preview))
+                                                } else {
+                                                    Some("Storing memory".to_string())
+                                                }
+                                            }
+                                            "forget" => Some("Removing memory".to_string()),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            
+                            if let Some(msg) = summary {
+                                eprintln!("{}     {}{}", crate::theme::DIM, msg, crate::theme::RESET);
+                            }
+                        }
+                        
                         spinner = Some(Spinner::start("Running..."));
                     }
                 }

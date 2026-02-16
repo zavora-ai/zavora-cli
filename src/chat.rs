@@ -12,7 +12,7 @@ use crate::checkpoint::{
     CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
 };
 use crate::cli::{GuardrailMode, Provider};
-use crate::compact::{CompactStrategy, compact_session};
+use crate::compact::{CompactStrategy, compact_session, compact_to_target};
 use crate::config::RuntimeConfig;
 use crate::context::{ContextUsage, compute_context_usage};
 use crate::error::format_cli_error;
@@ -29,6 +29,7 @@ use crate::theme::{
 };
 use crate::todos;
 use crate::tool_policy::matches_wildcard;
+use crate::agents::{memory::MemoryAgent, time::TimeAgent, orchestrator::{Orchestrator, OrchestratorConfig}};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -45,6 +46,10 @@ pub enum ChatCommand {
     Provider(String),
     Model(Option<String>),
     Agent,
+    AutoCompact,
+    Memory(String),
+    Time(String),
+    Orchestrate(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +92,10 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
         "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
         "agent" => ParsedChatCommand::Command(ChatCommand::Agent),
+        "autocompact" => ParsedChatCommand::Command(ChatCommand::AutoCompact),
+        "memory" => ParsedChatCommand::Command(ChatCommand::Memory(arg.to_string())),
+        "time" => ParsedChatCommand::Command(ChatCommand::Time(arg.to_string())),
+        "orchestrate" => ParsedChatCommand::Command(ChatCommand::Orchestrate(arg.to_string())),
         "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
         "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
         "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
@@ -118,6 +127,10 @@ pub fn print_chat_help() {
     println!("  {CYAN}/status{RESET}            {DIM}active provider, model, session{RESET}");
     println!("  {CYAN}/usage{RESET}             {DIM}context window token breakdown{RESET}");
     println!("  {CYAN}/compact{RESET}           {DIM}summarize history to free context{RESET}");
+    println!("  {CYAN}/autocompact{RESET}       {DIM}toggle automatic compaction{RESET}");
+    println!("  {CYAN}/memory{RESET} <cmd>      {DIM}recall|remember|forget learnings{RESET}");
+    println!("  {CYAN}/time{RESET} <query>      {DIM}get time context or parse dates{RESET}");
+    println!("  {CYAN}/orchestrate{RESET} <goal> {DIM}run full agent orchestration loop{RESET}");
     println!("  {CYAN}/tools{RESET}             {DIM}list active tools and policy{RESET}");
     println!("  {CYAN}/mcp{RESET}               {DIM}MCP server diagnostics{RESET}");
     println!();
@@ -815,6 +828,107 @@ pub async fn dispatch_chat_command(
             eprintln!();
             Ok(ChatCommandAction::Continue)
         }
+        ChatCommand::AutoCompact => {
+            cfg.auto_compact_enabled = !cfg.auto_compact_enabled;
+            let status = if cfg.auto_compact_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            println!(
+                "Auto-compaction {status} (threshold={:.0}%, target={:.0}%)",
+                cfg.compaction_threshold * 100.0,
+                cfg.compaction_target * 100.0
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Memory(sub) => {
+            let workspace = std::env::current_dir().unwrap_or_default();
+            let mut memory = MemoryAgent::new(&workspace).unwrap_or_else(|e| {
+                eprintln!("Failed to load memory: {e}");
+                MemoryAgent::new(&workspace).unwrap()
+            });
+
+            let parts: Vec<&str> = sub.split_whitespace().collect();
+            match parts.first().copied() {
+                Some("recall") => {
+                    let query = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+                    let results = memory.recall(&query, &[], 10);
+                    if results.is_empty() {
+                        println!("No memories found for: {}", query);
+                    } else {
+                        println!("Found {} memories:", results.len());
+                        for entry in results {
+                            println!("  [{}] {}", entry.confidence, entry.text);
+                            println!("    tags: {}", entry.tags.join(", "));
+                        }
+                    }
+                }
+                Some("remember") => {
+                    let text = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+                    if text.is_empty() {
+                        println!("Usage: /memory remember <text>");
+                    } else {
+                        memory.remember(text.clone(), vec!["manual".to_string()], 0.9, None).unwrap();
+                        println!("Stored: {}", text);
+                    }
+                }
+                Some("forget") => {
+                    let selector = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+                    if selector.is_empty() {
+                        println!("Usage: /memory forget <selector>");
+                    } else {
+                        match memory.forget(&selector) {
+                            Ok(count) => println!("Removed {} memories", count),
+                            Err(e) => eprintln!("Failed to forget: {e}"),
+                        }
+                    }
+                }
+                _ => {
+                    println!("Usage: /memory recall|remember|forget <args>");
+                }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Time(query) => {
+            if query.trim().is_empty() {
+                let ctx = TimeAgent::handshake();
+                println!("Current time: {}", ctx.now_iso);
+                println!("Timezone: {}", ctx.timezone);
+                println!("Weekday: {}", ctx.weekday);
+                println!("Date: {}", ctx.date);
+            } else {
+                match TimeAgent::parse_relative(&query) {
+                    Ok(dt) => println!("{} → {}", query, dt.to_rfc3339()),
+                    Err(e) => eprintln!("Failed to parse: {e}"),
+                }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Orchestrate(goal) => {
+            if goal.trim().is_empty() {
+                println!("Usage: /orchestrate <goal>");
+                println!("Example: /orchestrate Implement feature X with tests");
+                return Ok(ChatCommandAction::Continue);
+            }
+
+            println!("{}Starting orchestration...{}", crate::theme::DIM, crate::theme::RESET);
+            
+            let workspace = std::env::current_dir().unwrap_or_default();
+            let memory = MemoryAgent::new(&workspace).ok();
+            let mut orchestrator = Orchestrator::new(OrchestratorConfig::default(), memory);
+
+            match orchestrator.execute(goal.clone(), vec![]).await {
+                Ok(result) => {
+                    println!("\n{}", result.format_summary());
+                }
+                Err(e) => {
+                    eprintln!("Orchestration failed: {e}");
+                }
+            }
+            
+            Ok(ChatCommandAction::Continue)
+        }
     }
 }
 
@@ -864,6 +978,11 @@ pub async fn run_chat(
     if is_first_run(&workspace) {
         print_onboarding();
     }
+
+    // Initial greeting (no tools, just a simple hello)
+    println!();
+    println!("Hello, I'm Zavora. How may I help you today?");
+    println!();
 
     let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
 
@@ -1003,6 +1122,29 @@ pub async fn run_chat(
                 )
             {
                 eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
+            }
+        }
+
+        // Check if auto-compaction should trigger
+        if cfg.auto_compact_enabled {
+            if let Ok(events) = snapshot_session_events(&session_service, &cfg).await {
+                let provider_str = format!("{:?}", resolved_provider).to_ascii_lowercase();
+                let usage = compute_context_usage(&events, &provider_str, &model_name);
+                if usage.utilization() >= cfg.compaction_threshold {
+                    println!();
+                    println!(
+                        "{}Auto-compacting ({}% usage)...{}",
+                        crate::theme::DIM,
+                        (usage.utilization() * 100.0) as u32,
+                        crate::theme::RESET
+                    );
+                    let target_util = cfg.compaction_target;
+                    match compact_to_target(&session_service, &cfg, target_util).await {
+                        Ok(msg) => println!("{}{}{}", crate::theme::DIM, msg, crate::theme::RESET),
+                        Err(e) => eprintln!("Auto-compaction failed: {e}"),
+                    }
+                    println!();
+                }
             }
         }
     }

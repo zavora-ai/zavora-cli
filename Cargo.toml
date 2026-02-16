@@ -21,7 +21,9 @@ adk-session = { version = "0.3.0", features = ["database"] }
 adk-tool = { version = "0.3.0", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }
+chrono = "0.4"
 clap = { version = "4.5.58", features = ["derive", "env"] }
+md5 = "0.7"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 shlex = "1.3"

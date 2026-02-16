@@ -76,6 +76,16 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         |_ctx, args| async move { Ok(github_ops::github_ops_tool_response(&args)) },
     );
 
+    let _todo_list = FunctionTool::new(
+        "todo_list",
+        "Manage task lists for structured execution planning. \
+         Args: action=create|complete|view|list|delete. \
+         create: {id, description, tasks: [string]}. \
+         complete: {id, task_index: number}. \
+         view: {id}. list: {}. delete: {id}.",
+        |_ctx, args| async move { Ok(todo_tool_response(&args)) },
+    );
+
     let todo_list = FunctionTool::new(
         "todo_list",
         "Manage task lists for structured execution planning. \
@@ -86,6 +96,11 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         |_ctx, args| async move { Ok(todo_tool_response(&args)) },
     );
 
+    // Agent tools
+    let workspace = std::env::current_dir().unwrap_or_default();
+    let time_agent = crate::agents::tools::TimeAgentTool::new();
+    let memory_agent = crate::agents::tools::MemoryAgentTool::new(workspace);
+
     vec![
         Arc::new(current_time),
         Arc::new(release_template),
@@ -94,6 +109,8 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(execute_bash),
         Arc::new(github_ops),
         Arc::new(todo_list),
+        Arc::new(time_agent),
+        Arc::new(memory_agent),
     ]
 }
 
