@@ -30,6 +30,7 @@ use crate::theme::{
 use crate::todos;
 use crate::tool_policy::matches_wildcard;
 use crate::agents::{memory::MemoryAgent, time::TimeAgent, orchestrator::{Orchestrator, OrchestratorConfig}};
+use crate::agents::memory::MemoryEntry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -979,9 +980,50 @@ pub async fn run_chat(
         print_onboarding();
     }
 
-    // Initial greeting (no tools, just a simple hello)
+    // Bootstrap: Get time and memory context once at startup for personalized greeting
+    let time_context = TimeAgent::handshake();
+    let memory_agent = MemoryAgent::new(&workspace)?;
+    let memories: Vec<MemoryEntry> = memory_agent.recall("", &[], 5);
+    
+    // Generate natural greeting with LLM
     println!();
-    println!("Hello, I'm Zavora. How may I help you today?");
+    if memories.is_empty() {
+        println!("Hello, I'm Zavora. How may I help you today?");
+    } else {
+        let memory_text: Vec<String> = memories.iter()
+            .map(|m| m.text.clone())
+            .collect();
+        let greeting_prompt = format!(
+            "Current time: {} ({})\nContext: {}\n\n\
+             Generate a brief, natural greeting (one sentence). Use their name if you know it. Be warm, not robotic.\n\n\
+             Examples:\n\
+             - Hi Sarah! What can I help with?\n\
+             - Hey Alex, good to see you again. What's up?\n\
+             - Morning James! What are we working on today?\n\
+             - Hello! How can I help?\n\n\
+             Output plain text only, no markdown, no code blocks.\n\n\
+             Your greeting:",
+            time_context.now_iso,
+            time_context.weekday,
+            memory_text.join("; ")
+        );
+        
+        
+        match run_prompt_streaming_with_retrieval(
+            &runner,
+            &cfg,
+            &greeting_prompt,
+            retrieval_service.as_ref(),
+            telemetry,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(_) => {
+                println!("Hello, I'm Zavora. How may I help you today?");
+            }
+        }
+    }
     println!();
 
     let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
