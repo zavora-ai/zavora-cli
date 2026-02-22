@@ -18,11 +18,25 @@ Multi-agent orchestration, tool safety controls, streaming markdown, checkpoints
 
 ## Install
 
+### Cargo (recommended)
+
 ```bash
 cargo install zavora-cli
 ```
 
-Or build from source:
+### npm
+
+```bash
+npm i -g @zavora-ai/zavora-cli
+```
+
+### Homebrew
+
+```bash
+brew install --formula https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/Formula/zavora-cli.rb
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/zavora-ai/zavora-cli.git
@@ -30,7 +44,8 @@ cd zavora-cli
 cargo install --path .
 ```
 
-Requires Rust 1.85+ (`rustup`, `cargo`).
+Requires Rust 1.85+ (`rustup`, `cargo`) for cargo/source builds.
+Maintainer distribution workflow: `docs/DISTRIBUTION.md`.
 
 ## Quick Start
 

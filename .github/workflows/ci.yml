@@ -34,5 +34,13 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm package dry-run
+        run: make npm-pack-check
+
       - name: Quality Gate (eval + guardrails)
         run: make quality-gate
