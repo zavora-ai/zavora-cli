@@ -71,7 +71,7 @@ impl TimeAgent {
     /// Perform time arithmetic: base + delta.
     pub fn time_arithmetic(base: DateTime<Utc>, delta: &str) -> anyhow::Result<DateTime<Utc>> {
         let delta = delta.trim();
-        
+
         if let Some(rest) = delta.strip_prefix('+') {
             let duration = parse_duration(rest)?;
             Ok(base + duration)
@@ -99,10 +99,9 @@ fn parse_weekday(s: &str) -> Option<Weekday> {
 
 fn next_weekday(from: DateTime<Utc>, target: Weekday) -> DateTime<Utc> {
     let current = from.weekday();
-    let days_ahead = ((target.num_days_from_monday() as i64
-        - current.num_days_from_monday() as i64
-        + 7)
-        % 7) as i64;
+    let target_day = i64::from(target.num_days_from_monday());
+    let current_day = i64::from(current.num_days_from_monday());
+    let days_ahead = (target_day - current_day + 7) % 7;
     let days_ahead = if days_ahead == 0 { 7 } else { days_ahead };
     from + Duration::days(days_ahead)
 }

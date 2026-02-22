@@ -277,6 +277,61 @@ async fn workflow_modes_return_deterministic_mock_output() {
     }
 }
 
+#[test]
+fn search_subagent_is_only_attached_for_explicit_gemini_provider() {
+    let mut cfg = base_cfg();
+    cfg.provider = Provider::Gemini;
+    let gemini_agent = build_single_agent_with_tools(
+        mock_model("gemini"),
+        &[],
+        ToolConfirmationPolicy::Never,
+        Duration::from_secs(45),
+        Some(&cfg),
+    )
+    .expect("gemini agent should build");
+    assert!(
+        gemini_agent
+            .sub_agents()
+            .iter()
+            .any(|agent| agent.name() == "search_agent"),
+        "search sub-agent should be available for explicit Gemini provider"
+    );
+
+    cfg.provider = Provider::Auto;
+    let auto_agent = build_single_agent_with_tools(
+        mock_model("auto"),
+        &[],
+        ToolConfirmationPolicy::Never,
+        Duration::from_secs(45),
+        Some(&cfg),
+    )
+    .expect("auto agent should build");
+    assert!(
+        auto_agent
+            .sub_agents()
+            .iter()
+            .all(|agent| agent.name() != "search_agent"),
+        "search sub-agent should not be attached in auto provider mode"
+    );
+
+    cfg.provider = Provider::Openai;
+    let openai_agent = build_single_agent_with_tools(
+        mock_model("openai"),
+        &[],
+        ToolConfirmationPolicy::Never,
+        Duration::from_secs(45),
+        Some(&cfg),
+    )
+    .expect("openai agent should build");
+    assert!(
+        openai_agent
+            .sub_agents()
+            .iter()
+            .all(|agent| agent.name() != "search_agent"),
+        "search sub-agent should not be attached for non-Gemini providers"
+    );
+}
+
 #[tokio::test]
 async fn sqlite_session_backend_persists_history_between_runners() {
     let dir = tempdir().expect("temp directory should create");

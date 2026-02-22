@@ -16,31 +16,14 @@ const BG_GUTTER_DELETE: &str = "\x1b[48;2;79;40;40m";
 const BG_GUTTER_INSERT: &str = "\x1b[48;2;40;67;43m";
 const CLEAR_LINE: &str = "\x1b[K";
 
-use std::sync::LazyLock;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
-use syntect::util::as_24_bit_terminal_escaped;
-
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
-
-/// Syntax-highlight a single line of code. Returns the line with ANSI escapes, or the plain line on failure.
-fn highlight_line(line: &str, highlighter: &mut Option<HighlightLines<'_>>) -> String {
-    if let Some(h) = highlighter.as_mut() {
-        if let Ok(ranges) = h.highlight_line(line, &SYNTAX_SET) {
-            return as_24_bit_terminal_escaped(&ranges, false);
-        }
-    }
+/// Render a single line in the diff body. Kept as a helper so syntax highlighting can be reintroduced later.
+fn highlight_line(line: &str, _highlighter: &mut Option<()>) -> String {
     line.to_string()
 }
 
-/// Try to create a syntax highlighter for the given file path.
-fn make_highlighter(path: &str) -> Option<HighlightLines<'static>> {
-    let ext = std::path::Path::new(path).extension()?.to_str()?;
-    let syntax = SYNTAX_SET.find_syntax_by_extension(ext)?;
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
-    Some(HighlightLines::new(syntax, theme))
+/// Placeholder for optional future syntax highlighter state.
+fn make_highlighter(_path: &str) -> Option<()> {
+    None
 }
 
 /// Display tool result after execution.
@@ -179,8 +162,8 @@ fn format_fs_write_diff(args: &Value) -> String {
     out
 }
 
-/// Render a unified diff between old and new text with syntax highlighting and line numbers.
-fn render_diff(old: &str, new: &str, hl: &mut Option<HighlightLines<'_>>) -> String {
+/// Render a unified diff between old and new text with line numbers.
+fn render_diff(old: &str, new: &str, hl: &mut Option<()>) -> String {
     use similar::{ChangeTag, TextDiff};
 
     let diff = TextDiff::from_lines(old, new);

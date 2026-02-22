@@ -103,7 +103,7 @@ impl FileLoopAgent {
         // - find . -name "*.rs" -type f
         // - grep -r "pattern" --include="*.rs"
         // - rg "pattern" -l
-        
+
         // For now, return empty
         Ok(Vec::new())
     }

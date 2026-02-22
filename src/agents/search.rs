@@ -21,34 +21,35 @@ pub struct EvidenceBundle {
     pub confidence: f32,
 }
 
+const SEARCH_AGENT_INSTRUCTION: &str = r#"You are a web research specialist.
+
+Use the google_search tool for current information and return a single JSON object with:
+- query: the final query executed
+- results: top relevant results [{title, url, snippet}]
+- extracted_facts: concise factual bullets backed by the results (or empty)
+- confidence: float in [0.0, 1.0]
+
+Rules:
+- Prefer recency and source quality.
+- Include direct URLs for all reported facts.
+- If evidence is weak or conflicting, lower confidence and say so in extracted_facts."#;
+
 /// Check if search capability is available (Gemini model).
 pub fn is_search_available(provider: &str) -> bool {
-    provider.to_lowercase() == "gemini"
+    provider.eq_ignore_ascii_case("gemini")
 }
 
 /// Build search agent with Google Search tool.
 pub fn build_search_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let search_tool = adk_tool::builtin::GoogleSearchTool::new();
-    
+
     let agent = LlmAgentBuilder::new("search_agent")
-        .description("Web search specialist using Google Search")
-        .instruction(
-            "You are a search specialist. Your job is to:\n\
-             1. Formulate effective search queries\n\
-             2. Execute searches using google_search tool\n\
-             3. Extract key facts from results\n\
-             4. Provide evidence bundle with citations\n\n\
-             Always include:\n\
-             - Original query\n\
-             - Top results (title, URL, snippet)\n\
-             - Extracted facts (if applicable)\n\
-             - Confidence score (0.0-1.0)\n\n\
-             Format your response as structured data, not conversational text."
-        )
+        .description("Web research specialist using Google Search")
+        .instruction(SEARCH_AGENT_INSTRUCTION)
         .model(model)
         .tool(Arc::new(search_tool))
         .build()?;
-    
+
     Ok(Arc::new(agent))
 }
 
@@ -57,7 +58,35 @@ pub fn capability_missing_response() -> String {
     serde_json::json!({
         "error": "CapabilityMissing",
         "message": "Search agent requires Gemini model with Google Search",
-        "suggestion": "Use --provider gemini --model gemini-2.0-flash-exp"
+        "suggestion": "Use --provider gemini --model gemini-2.5-flash"
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn is_search_available_is_case_insensitive_for_gemini() {
+        assert!(is_search_available("gemini"));
+        assert!(is_search_available("GEMINI"));
+        assert!(is_search_available("Gemini"));
+        assert!(!is_search_available("openai"));
+    }
+
+    #[test]
+    fn capability_missing_response_includes_provider_hint() {
+        let response = capability_missing_response();
+        let payload: Value =
+            serde_json::from_str(&response).expect("response should be valid json");
+        assert_eq!(payload["error"], "CapabilityMissing");
+        assert!(
+            payload["suggestion"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--provider gemini")
+        );
+    }
 }

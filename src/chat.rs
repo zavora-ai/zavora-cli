@@ -8,6 +8,12 @@ use adk_session::SessionService;
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::agents::memory::MemoryEntry;
+use crate::agents::{
+    memory::MemoryAgent,
+    orchestrator::{Orchestrator, OrchestratorConfig},
+    time::TimeAgent,
+};
 use crate::checkpoint::{
     CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
 };
@@ -29,8 +35,6 @@ use crate::theme::{
 };
 use crate::todos;
 use crate::tool_policy::matches_wildcard;
-use crate::agents::{memory::MemoryAgent, time::TimeAgent, orchestrator::{Orchestrator, OrchestratorConfig}};
-use crate::agents::memory::MemoryEntry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
     Exit,
@@ -870,7 +874,9 @@ pub async fn dispatch_chat_command(
                     if text.is_empty() {
                         println!("Usage: /memory remember <text>");
                     } else {
-                        memory.remember(text.clone(), vec!["manual".to_string()], 0.9, None).unwrap();
+                        memory
+                            .remember(text.clone(), vec!["manual".to_string()], 0.9, None)
+                            .unwrap();
                         println!("Stored: {}", text);
                     }
                 }
@@ -913,8 +919,12 @@ pub async fn dispatch_chat_command(
                 return Ok(ChatCommandAction::Continue);
             }
 
-            println!("{}Starting orchestration...{}", crate::theme::DIM, crate::theme::RESET);
-            
+            println!(
+                "{}Starting orchestration...{}",
+                crate::theme::DIM,
+                crate::theme::RESET
+            );
+
             let workspace = std::env::current_dir().unwrap_or_default();
             let memory = MemoryAgent::new(&workspace).ok();
             let mut orchestrator = Orchestrator::new(OrchestratorConfig::default(), memory);
@@ -927,7 +937,7 @@ pub async fn dispatch_chat_command(
                     eprintln!("Orchestration failed: {e}");
                 }
             }
-            
+
             Ok(ChatCommandAction::Continue)
         }
     }
@@ -984,15 +994,13 @@ pub async fn run_chat(
     let time_context = TimeAgent::handshake();
     let memory_agent = MemoryAgent::new(&workspace)?;
     let memories: Vec<MemoryEntry> = memory_agent.recall("", &[], 5);
-    
+
     // Generate natural greeting with LLM
     println!();
     if memories.is_empty() {
         println!("Hello, I'm Zavora. How may I help you today?");
     } else {
-        let memory_text: Vec<String> = memories.iter()
-            .map(|m| m.text.clone())
-            .collect();
+        let memory_text: Vec<String> = memories.iter().map(|m| m.text.clone()).collect();
         let greeting_prompt = format!(
             "Current time: {} ({})\nContext: {}\n\n\
              Generate a brief, natural greeting (one sentence). Use their name if you know it. Be warm, not robotic.\n\n\
@@ -1007,8 +1015,7 @@ pub async fn run_chat(
             time_context.weekday,
             memory_text.join("; ")
         );
-        
-        
+
         match run_prompt_streaming_with_retrieval(
             &runner,
             &cfg,

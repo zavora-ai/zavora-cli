@@ -386,19 +386,23 @@ pub async fn run_prompt_streaming(
                         if let Some(s) = spinner.take() {
                             s.stop();
                         }
-                        
+
                         // Show tool name
                         eprintln!("{}  ⚡ {}{}", crate::theme::DIM, name, crate::theme::RESET);
-                        
+
                         // Show what the tool is doing
                         if let Some(args_obj) = args.as_object() {
                             let summary = match name.as_str() {
                                 "time_agent" => {
-                                    if let Some(action) = args_obj.get("action").and_then(|v| v.as_str()) {
+                                    if let Some(action) =
+                                        args_obj.get("action").and_then(|v| v.as_str())
+                                    {
                                         match action {
                                             "handshake" => Some("Getting current time".to_string()),
                                             "parse" => {
-                                                if let Some(query) = args_obj.get("query").and_then(|v| v.as_str()) {
+                                                if let Some(query) =
+                                                    args_obj.get("query").and_then(|v| v.as_str())
+                                                {
                                                     Some(format!("Parsing: {}", query))
                                                 } else {
                                                     Some("Parsing date".to_string())
@@ -411,17 +415,23 @@ pub async fn run_prompt_streaming(
                                     }
                                 }
                                 "memory_agent" => {
-                                    if let Some(action) = args_obj.get("action").and_then(|v| v.as_str()) {
+                                    if let Some(action) =
+                                        args_obj.get("action").and_then(|v| v.as_str())
+                                    {
                                         match action {
                                             "recall" => {
-                                                if let Some(query) = args_obj.get("text").and_then(|v| v.as_str()) {
+                                                if let Some(query) =
+                                                    args_obj.get("text").and_then(|v| v.as_str())
+                                                {
                                                     Some(format!("Recalling: {}", query))
                                                 } else {
                                                     Some("Searching memories".to_string())
                                                 }
                                             }
                                             "remember" => {
-                                                if let Some(text) = args_obj.get("text").and_then(|v| v.as_str()) {
+                                                if let Some(text) =
+                                                    args_obj.get("text").and_then(|v| v.as_str())
+                                                {
                                                     let preview = if text.len() > 50 {
                                                         format!("{}...", &text[..50])
                                                     } else {
@@ -441,12 +451,17 @@ pub async fn run_prompt_streaming(
                                 }
                                 _ => None,
                             };
-                            
+
                             if let Some(msg) = summary {
-                                eprintln!("{}     {}{}", crate::theme::DIM, msg, crate::theme::RESET);
+                                eprintln!(
+                                    "{}     {}{}",
+                                    crate::theme::DIM,
+                                    msg,
+                                    crate::theme::RESET
+                                );
                             }
                         }
-                        
+
                         spinner = Some(Spinner::start("Running..."));
                     }
                 }

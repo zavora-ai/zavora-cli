@@ -26,29 +26,22 @@ You are the orchestrator. You coordinate specialist agents to accomplish complex
 
 CAPABILITY AGENTS (call as tools when you need their unique skills):
 - time_agent: Get current time, parse relative dates (\"next Friday\", \"in 2 days\")
-- memory_agent: Recall/store persistent learnings across sessions
-- search_agent: Web search for current info (only available with Gemini model)
+- memory_agent: Recall/store USER preferences, decisions, and learnings (NOT for general knowledge)
+
+SUBAGENTS (automatically available when conditions met):
+- search_agent: For news, current events, and web searches (enabled only with --provider gemini)
 
 WORKFLOW AGENTS (use for complex multi-step work):
 - file_search_agent: Comprehensive file discovery with saturation detection
 - sequential_agent: Create plans and execute steps with progress tracking
 - quality_agent: Verify work against acceptance criteria
 
-ORCHESTRATION PATTERN:
-1. Bootstrap: Get time context, recall relevant memories
-2. Gather: Search/discover resources if needed
-3. Plan: Create structured plan with acceptance criteria
-4. Execute: Run steps one at a time, producing artifacts
-5. Verify: Check quality against criteria
-6. Commit: Store high-signal learnings
-
 RULES:
-- Always start with time context for time-sensitive tasks
-- Use memory_agent to recall user preferences and past decisions
-- Store only high-signal learnings: preferences, decisions, patterns
-- For simple tasks, just use your built-in tools directly
+- For news/web searches: delegate to search_agent
+- memory_agent is ONLY for user preferences/decisions, NOT for facts or general knowledge
+- For simple tasks, use your built-in tools directly
 - For complex multi-step tasks, use sequential_agent
-- Search agent requires Gemini model (check availability first)
+- Store only high-signal learnings: user preferences, decisions, patterns (not facts)
 ";
 
 #[cfg(test)]
@@ -101,7 +94,8 @@ pub fn build_single_agent_with_tools(
              "
             ),
             ORCHESTRATOR_INSTRUCTION.to_string(),
-            format!("\n\
+            format!(
+                "\n\
              <tone>\n\
              You talk like a human, not like a bot. You are conversational and natural.\n\
              - Mirror the user's style: short question gets a short answer, detailed question \
@@ -178,7 +172,7 @@ pub fn build_single_agent_with_tools(
              - Decline requests for malicious code\n\
              - When uncertain, ask for clarification rather than guessing\n\
              </rules>"
-            )
+            ),
         ];
         if let Some(agent_instruction) = cfg
             .agent_instruction
@@ -205,9 +199,9 @@ pub fn build_single_agent_with_tools(
             .to_string()
     };
 
-    // Note: Sub-agents removed. New capability agents (time, memory, search) will be
-    // exposed as tools once agent tool interface is ready.
-    // Old git/research/planner agents were weak (just filtered tools).
+    // Intentional: search sub-agent is only enabled when the invocation explicitly
+    // runs with --provider gemini. Auto-detected provider mode does not attach it.
+    let search_subagent = build_search_subagent_for_provider(runtime_cfg, model.clone());
 
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -237,7 +231,30 @@ pub fn build_single_agent_with_tools(
         builder = builder.tool(tool.clone());
     }
 
+    // Add search subagent if available
+    if let Some(search_agent) = search_subagent {
+        builder = builder.sub_agent(search_agent);
+    }
+
     Ok(Arc::new(builder.build()?))
+}
+
+fn build_search_subagent_for_provider(
+    runtime_cfg: Option<&RuntimeConfig>,
+    model: Arc<dyn Llm>,
+) -> Option<Arc<dyn Agent>> {
+    let cfg = runtime_cfg?;
+    if cfg.provider != crate::cli::Provider::Gemini {
+        return None;
+    }
+
+    match crate::agents::search::build_search_agent(model) {
+        Ok(agent) => Some(agent),
+        Err(err) => {
+            tracing::warn!("failed to build search sub-agent: {}", err);
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,12 @@ impl TimeAgentTool {
     }
 }
 
+impl Default for TimeAgentTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Tool for TimeAgentTool {
     fn name(&self) -> &str {
@@ -27,7 +33,10 @@ impl Tool for TimeAgentTool {
     }
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
-        let action = args.get("action").and_then(Value::as_str).unwrap_or("handshake");
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("handshake");
 
         match action {
             "handshake" => {
@@ -84,7 +93,10 @@ impl Tool for MemoryAgentTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
         let mut memory = MemoryAgent::new(&self.workspace)
             .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
-        let action = args.get("action").and_then(Value::as_str).unwrap_or("recall");
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("recall");
 
         match action {
             "recall" => {
@@ -134,7 +146,8 @@ impl Tool for MemoryAgentTool {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.8) as f32;
 
-                memory.remember(text.to_string(), tags.clone(), confidence, None)
+                memory
+                    .remember(text.to_string(), tags.clone(), confidence, None)
                     .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
                 Ok(json!({
                     "status": "stored",
@@ -149,7 +162,8 @@ impl Tool for MemoryAgentTool {
                     return Ok(json!({"error": "selector is required"}));
                 }
 
-                let removed = memory.forget(selector)
+                let removed = memory
+                    .forget(selector)
                     .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
                 Ok(json!({
                     "status": "removed",

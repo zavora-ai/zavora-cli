@@ -11,7 +11,6 @@
 /// - `file_loop`: Comprehensive file discovery
 /// - `sequential`: Plan and execute with tracking
 /// - `quality`: Verify work against criteria
-
 pub mod file_loop;
 pub mod memory;
 pub mod orchestrator;

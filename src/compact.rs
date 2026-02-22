@@ -127,11 +127,18 @@ async fn generate_llm_summary(
         if text.is_empty() {
             continue;
         }
-        let role = if event.author == "user" { "User" } else { "Assistant" };
+        let role = if event.author == "user" {
+            "User"
+        } else {
+            "Assistant"
+        };
         history_text.push_str(&format!("{role}: {text}\n\n"));
     }
 
-    let prompt = format!("{}\n\nCONVERSATION TO SUMMARIZE:\n\n{}", SUMMARY_PROMPT, history_text);
+    let prompt = format!(
+        "{}\n\nCONVERSATION TO SUMMARIZE:\n\n{}",
+        SUMMARY_PROMPT, history_text
+    );
 
     // Create temporary session for summary generation
     let summary_session_id = format!("summary-{}", cfg.session_id);

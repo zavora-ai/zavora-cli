@@ -34,8 +34,8 @@ impl MemoryAgent {
     pub fn new(workspace: &Path) -> Result<Self> {
         let storage_path = workspace.join(".zavora").join("memory.json");
         let store = if storage_path.exists() {
-            let content = std::fs::read_to_string(&storage_path)
-                .context("failed to read memory storage")?;
+            let content =
+                std::fs::read_to_string(&storage_path).context("failed to read memory storage")?;
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             HashMap::new()
@@ -115,7 +115,10 @@ impl MemoryAgent {
 
         self.store.retain(|_, entry| {
             let text_match = entry.text.to_lowercase().contains(&selector_lower);
-            let tag_match = entry.tags.iter().any(|t| t.to_lowercase() == selector_lower);
+            let tag_match = entry
+                .tags
+                .iter()
+                .any(|t| t.to_lowercase() == selector_lower);
             !(text_match || tag_match)
         });
 
@@ -142,8 +145,8 @@ impl MemoryAgent {
         if let Some(parent) = self.storage_path.parent() {
             std::fs::create_dir_all(parent).context("failed to create memory directory")?;
         }
-        let json = serde_json::to_string_pretty(&self.store)
-            .context("failed to serialize memory")?;
+        let json =
+            serde_json::to_string_pretty(&self.store).context("failed to serialize memory")?;
         std::fs::write(&self.storage_path, json).context("failed to write memory storage")?;
         Ok(())
     }
@@ -179,7 +182,12 @@ mod tests {
         let mut agent = MemoryAgent::new(dir.path()).unwrap();
 
         agent
-            .remember("Test memory".to_string(), vec!["test".to_string()], 0.8, None)
+            .remember(
+                "Test memory".to_string(),
+                vec!["test".to_string()],
+                0.8,
+                None,
+            )
             .unwrap();
 
         let removed = agent.forget("test").unwrap();

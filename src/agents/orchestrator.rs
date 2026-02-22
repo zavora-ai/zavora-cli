@@ -43,7 +43,11 @@ impl Orchestrator {
     }
 
     /// Execute the full orchestration loop.
-    pub async fn execute(&mut self, goal: String, requirements: Vec<String>) -> Result<ExecutionResult> {
+    pub async fn execute(
+        &mut self,
+        goal: String,
+        requirements: Vec<String>,
+    ) -> Result<ExecutionResult> {
         // 1. Bootstrap: Time handshake + Memory recall
         let time_context = TimeAgent::handshake();
         let _memories = if let Some(memory) = &self.memory {
@@ -62,7 +66,12 @@ impl Orchestrator {
         // 3. Plan: Create structured plan
         let resource_paths = resources
             .as_ref()
-            .map(|r| r.key_files.iter().map(|(p, _)| p.display().to_string()).collect())
+            .map(|r| {
+                r.key_files
+                    .iter()
+                    .map(|(p, _)| p.display().to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let plan = self.sequential.make_plan(
@@ -85,15 +94,16 @@ impl Orchestrator {
 
         // 6. Repair loop: Fix issues if verification failed
         let repair_iteration = 0;
-        let final_verification = if !verification.pass && repair_iteration < self.config.max_repair_iterations {
-            // Create repair steps from issues
-            // Execute repair steps
-            // Re-verify
-            // For now, return original verification
-            verification.clone()
-        } else {
-            verification
-        };
+        let final_verification =
+            if !verification.pass && repair_iteration < self.config.max_repair_iterations {
+                // Create repair steps from issues
+                // Execute repair steps
+                // Re-verify
+                // For now, return original verification
+                verification.clone()
+            } else {
+                verification
+            };
 
         // 7. Commit: Store learnings in memory
         if let Some(memory) = &mut self.memory {
@@ -127,7 +137,6 @@ impl Orchestrator {
             resources,
         })
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,15 +161,15 @@ impl ExecutionResult {
         summary.push_str(&format!("**Goal:** {}\n\n", self.goal));
         summary.push_str(&format!("**Steps:** {}\n", self.plan.steps.len()));
         summary.push_str(&format!("**Artifacts:** {}\n", self.artifacts.len()));
-        summary.push_str(&format!("**Issues:** {}\n\n", self.verification.issues.len()));
+        summary.push_str(&format!(
+            "**Issues:** {}\n\n",
+            self.verification.issues.len()
+        ));
 
         if !self.verification.issues.is_empty() {
             summary.push_str("### Issues\n");
             for issue in &self.verification.issues {
-                summary.push_str(&format!(
-                    "- [{:?}] {}\n",
-                    issue.severity, issue.description
-                ));
+                summary.push_str(&format!("- [{:?}] {}\n", issue.severity, issue.description));
             }
         }
 

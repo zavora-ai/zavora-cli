@@ -115,10 +115,7 @@ impl SequentialAgent {
         for dep_id in &step.dependencies {
             if let Some(dep_result) = self.step_results.get(dep_id) {
                 if dep_result.status != StepStatus::Completed {
-                    return Err(anyhow::anyhow!(
-                        "Dependency step {} not completed",
-                        dep_id
-                    ));
+                    return Err(anyhow::anyhow!("Dependency step {} not completed", dep_id));
                 }
             } else {
                 return Err(anyhow::anyhow!("Dependency step {} not executed", dep_id));
