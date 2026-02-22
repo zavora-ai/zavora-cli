@@ -1,6 +1,6 @@
 {
   "name": "@zavora-ai/zavora-cli",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Installable binary wrapper for zavora-cli",
   "license": "MIT",
   "homepage": "https://github.com/zavora-ai/zavora-cli",
