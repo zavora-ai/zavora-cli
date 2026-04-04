@@ -139,7 +139,7 @@ pub fn print_startup_banner(provider: &str, model: &str) {
     draw_tip_box("💡 Tip", &tips[idx]);
 
     println!(
-        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/agent{RESET} {DIM}agent mode{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
+        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/agent{RESET} {DIM}agent mode{RESET}  {DIM}·{RESET}  {CYAN}/ralph{RESET} {DIM}dev pipeline{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
     );
     println!(
         "  {DIM}{}━{RESET}",
@@ -322,6 +322,107 @@ pub fn format_command_palette() -> String {
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Thinking verbs in languages from around the world.
+/// Each entry: (verb, language)
+const THINKING_VERBS: &[(&str, &str)] = &[
+    // African languages
+    ("Kufikiri", "Swahili"),
+    ("Kũtekereria", "Kikuyu"),
+    ("Kuganira", "Kinyarwanda"),
+    ("Okulowooza", "Luganda"),
+    ("Ero", "Yoruba"),
+    ("Iche echiche", "Igbo"),
+    ("Nagaani", "Somali"),
+    ("Maaloo", "Oromo"),
+    ("Mawazo", "Lingala"),
+    ("Ho nahana", "Sesotho"),
+    ("Ukucabanga", "Zulu"),
+    ("Ukucinga", "Xhosa"),
+    ("Go nagana", "Setswana"),
+    ("Kuganiza", "Chichewa"),
+    ("Kufunganya", "Shona"),
+    // European languages
+    ("Penser", "French"),
+    ("Denken", "German"),
+    ("Pensando", "Spanish"),
+    ("Pensare", "Italian"),
+    ("Pensar", "Portuguese"),
+    ("Думать", "Russian"),
+    ("Myślenie", "Polish"),
+    ("Gondolkodás", "Hungarian"),
+    ("Σκέψη", "Greek"),
+    ("Gândire", "Romanian"),
+    ("Tänkande", "Swedish"),
+    ("Tenkning", "Norwegian"),
+    ("Mõtlemine", "Estonian"),
+    ("Přemýšlení", "Czech"),
+    ("Myslenie", "Slovak"),
+    // Asian languages
+    ("考えている", "Japanese"),
+    ("생각하는 중", "Korean"),
+    ("思考中", "Chinese"),
+    ("सोच रहा हूँ", "Hindi"),
+    ("ভাবছি", "Bengali"),
+    ("คิด", "Thai"),
+    ("Suy nghĩ", "Vietnamese"),
+    ("Berfikir", "Malay"),
+    ("Berpikir", "Indonesian"),
+    ("Iniisip", "Filipino"),
+    ("සිතමින්", "Sinhala"),
+    ("யோசிக்கிறேன்", "Tamil"),
+    // Middle Eastern
+    ("أفكر", "Arabic"),
+    ("فکر کردن", "Persian"),
+    ("Düşünmek", "Turkish"),
+    ("חושב", "Hebrew"),
+    // Other
+    ("Whakaaro", "Māori"),
+    ("Thinking", "English"),
+    ("Cogitare", "Latin"),
+];
+
+/// Tips shown below the spinner after a delay.
+const SPINNER_TIPS: &[&str] = &[
+    "Use /compact to free up context when conversations get long",
+    "Use /allow <pattern> to auto-approve tools for this session",
+    "Use /delegate <task> to fork an isolated sub-agent",
+    "Use file_edit for surgical changes — it's faster than fs_write",
+    "Use glob and grep instead of shell find/grep — they're safer and structured",
+    "Use /agent to trust all tools for the session (agent mode)",
+    "Use /memory recall to check what the agent remembers from past sessions",
+    "Use /checkpoint save <label> to snapshot your session",
+    "Use /model to switch models mid-conversation",
+    "Read-only tools (fs_read, glob, grep) are auto-approved — no confirmation needed",
+];
+
+/// Pick a random thinking verb with its language.
+fn random_thinking_verb() -> (&'static str, &'static str) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    let idx = hasher.finish() as usize % THINKING_VERBS.len();
+    THINKING_VERBS[idx]
+}
+
+fn random_tip() -> &'static str {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    let idx = hasher.finish() as usize % SPINNER_TIPS.len();
+    SPINNER_TIPS[idx]
+}
+
 /// Global flag to pause the spinner (e.g. during tool confirmation prompts).
 static SPINNER_PAUSED: AtomicBool = AtomicBool::new(false);
 
@@ -347,24 +448,48 @@ pub struct Spinner {
 
 impl Spinner {
     /// Start a spinner with the given message (e.g. "Thinking...").
+    /// Picks a random multilingual verb and shows tips after 5 seconds.
     pub fn start(message: &str) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let msg = message.to_string();
+        let (verb, lang) = random_thinking_verb();
+        let verb = verb.to_string();
+        let lang = lang.to_string();
 
         let handle = std::thread::spawn(move || {
             let mut i = 0;
+            let start = std::time::Instant::now();
+            let tip = random_tip();
+            let mut tip_shown = false;
+
             while !stop_clone.load(Ordering::Relaxed) {
                 if !SPINNER_PAUSED.load(Ordering::Relaxed) {
                     let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
-                    eprint!("\r{DIM}{frame} {msg}{RESET}");
+                    let elapsed = start.elapsed().as_secs();
+
+                    // After 5s, show the multilingual verb + tip
+                    if elapsed >= 5 && !tip_shown {
+                        tip_shown = true;
+                    }
+
+                    if tip_shown {
+                        eprint!("\r\x1b[2K{DIM}{frame} {verb}... {RESET}{DIM}({lang}){RESET}");
+                        eprint!("\n\r\x1b[2K  {DIM}💡 {tip}{RESET}");
+                        eprint!("\x1b[1A"); // move cursor back up
+                    } else {
+                        eprint!("\r\x1b[2K{DIM}{frame} {msg}{RESET}");
+                    }
                     let _ = io::stderr().flush();
                 }
                 std::thread::sleep(std::time::Duration::from_millis(80));
                 i += 1;
             }
-            // Clear the spinner line
+            // Clear spinner lines
             eprint!("\r\x1b[2K");
+            if tip_shown {
+                eprint!("\n\r\x1b[2K\x1b[1A");
+            }
             let _ = io::stderr().flush();
         });
 
