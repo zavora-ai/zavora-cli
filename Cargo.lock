@@ -6979,6 +6979,7 @@ dependencies = [
  "adk-ralph",
  "adk-rust 0.5.0",
  "adk-session 0.5.0",
+ "adk-skill 0.5.0",
  "adk-tool 0.5.0",
  "anyhow",
  "async-trait",

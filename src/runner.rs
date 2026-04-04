@@ -565,16 +565,6 @@ pub async fn build_runner_with_session_service(
     let runner = builder.build()
         .context("failed to build ADK runner")?;
 
-    // Auto-discover and inject skills from .skills/ directory
-    let runner = if std::path::Path::new(".skills").is_dir() {
-        match runner.with_auto_skills(".", adk_skill::SkillInjectorConfig::default()) {
-            Ok(r) => { tracing::info!("Skills loaded from .skills/"); r }
-            Err(e) => { tracing::warn!("Skills parse error: {e}"); return Err(anyhow::anyhow!("skill error: {e}")); }
-        }
-    } else {
-        runner
-    };
-
     Ok(runner)
 }
 
