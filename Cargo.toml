@@ -28,6 +28,7 @@ adk-rust = { path = "../adk-rust/adk-rust", features = ["openai", "anthropic", "
 adk-session = { path = "../adk-rust/adk-session", features = ["database"] }
 adk-skill = { path = "../adk-rust/adk-skill" }
 adk-memory = { path = "../adk-rust/adk-memory", features = ["sqlite-memory"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 adk-telemetry = { path = "../adk-rust/adk-telemetry" }
 adk-guardrail = { path = "../adk-rust/adk-guardrail" }
 adk-plugin = { path = "../adk-rust/adk-plugin" }

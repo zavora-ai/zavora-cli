@@ -29,10 +29,11 @@ fn get_memory() -> Result<Arc<adk_memory::MemoryServiceAdapter>> {
 
 pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
     use adk_rust::Memory;
+    if query.trim().is_empty() {
+        return recall_all(limit).await;
+    }
     let mem = get_memory()?;
-    // FTS5 rejects empty queries — use wildcard to match all
-    let q = if query.trim().is_empty() { "*" } else { query };
-    let entries = mem.search(q).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let entries = mem.search(query).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(entries
         .into_iter()
         .take(limit)
@@ -43,6 +44,24 @@ pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
             })
         })
         .collect())
+}
+
+/// List all memories (bypasses FTS5 which can't match empty queries).
+async fn recall_all(limit: usize) -> Result<Vec<String>> {
+    std::fs::create_dir_all(".zavora").ok();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{DB_PATH}"))
+        .await
+        .context("failed to open memory db")?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT content_text FROM memory_entries WHERE app_name = ? AND user_id = ? ORDER BY timestamp DESC LIMIT ?",
+    )
+    .bind(APP_NAME)
+    .bind(USER_ID)
+    .bind(limit as i64)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("recall_all failed: {e}"))?;
+    Ok(rows.into_iter().map(|(t,)| t).collect())
 }
 
 pub async fn remember(text: &str) -> Result<()> {
