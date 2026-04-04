@@ -1,6 +1,7 @@
 //! MCP OAuth 2.0 with PKCE for authenticated MCP servers.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "oauth")]
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// OAuth config for an MCP server.
@@ -13,6 +14,7 @@ pub struct McpOAuthConfig {
 
 /// Stored OAuth tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "oauth"), allow(dead_code))]
 struct OAuthTokens {
     access_token: String,
     refresh_token: Option<String>,
@@ -168,6 +170,7 @@ async fn refresh_token(oauth: &McpOAuthConfig, refresh: &str) -> Result<OAuthTok
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[cfg_attr(not(feature = "oauth"), allow(dead_code))]
 struct AuthMetadata {
     authorization_endpoint: String,
     token_endpoint: String,

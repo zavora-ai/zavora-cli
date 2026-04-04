@@ -20,9 +20,9 @@ pub async fn build_session_service(cfg: &RuntimeConfig) -> Result<Arc<dyn Sessio
     }
 }
 
-pub async fn open_sqlite_session_service(db_url: &str) -> Result<DatabaseSessionService> {
+pub async fn open_sqlite_session_service(db_url: &str) -> Result<SqliteSessionService> {
     ensure_parent_dir_for_sqlite_url(db_url)?;
-    let service = DatabaseSessionService::new(db_url)
+    let service = SqliteSessionService::new(db_url)
         .await
         .context("failed to open sqlite session database")?;
     service

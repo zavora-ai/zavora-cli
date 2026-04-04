@@ -17,7 +17,7 @@ use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
 use crate::tool_policy::filter_tools_by_policy;
 use crate::tools::{
-    EXECUTE_BASH_TOOL_NAME, FS_READ_TOOL_NAME, FS_WRITE_TOOL_NAME, GITHUB_OPS_TOOL_NAME,
+
     build_builtin_tools,
 };
 
@@ -399,7 +399,7 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
 
     // Legacy approve_tool → always_allow, require_confirm_tool → always_ask
     let mut effective_allow: Vec<crate::tool_policy::ToolPattern> = rules.always_allow.clone();
-    let mut effective_deny: Vec<crate::tool_policy::ToolPattern> = rules.always_deny.clone();
+    let effective_deny: Vec<crate::tool_policy::ToolPattern> = rules.always_deny.clone();
     let mut effective_ask: Vec<crate::tool_policy::ToolPattern> = rules.always_ask.clone();
 
     for name in &cfg.approve_tool {

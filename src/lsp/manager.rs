@@ -77,6 +77,7 @@ pub struct LspConfig {
 struct ServerHandle {
     client: Arc<LspClient>,
     open_files: HashSet<PathBuf>,
+    #[allow(dead_code)]
     restart_count: u32,
 }
 
