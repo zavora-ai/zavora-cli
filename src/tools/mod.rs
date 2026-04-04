@@ -7,8 +7,14 @@ pub mod github_ops;
 pub mod glob;
 pub mod grep;
 pub mod bash_security;
+#[cfg(feature = "browser")]
+pub mod browser;
 #[cfg(feature = "lsp")]
 pub mod lsp;
+#[cfg(feature = "rag")]
+pub mod rag;
+#[cfg(feature = "sandbox")]
+pub mod sandbox;
 pub mod tool_search;
 #[cfg(feature = "web-fetch")]
 pub mod web_fetch;
@@ -174,7 +180,8 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
     let time_agent = crate::agents::tools::TimeAgentTool::new();
     let memory_agent = crate::agents::tools::MemoryAgentTool::new(workspace);
 
-    vec![
+    #[allow(unused_mut)]
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(current_time),
         Arc::new(release_template),
         Arc::new(fs_read),
@@ -191,7 +198,19 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(todo_list),
         Arc::new(time_agent),
         Arc::new(memory_agent),
-    ]
+    ];
+
+    // Feature-gated: sandbox code execution
+    #[cfg(feature = "sandbox")]
+    tools.push(sandbox::build_sandbox_tool());
+
+    // Feature-gated: RAG retrieval tool
+    #[cfg(feature = "rag")]
+    if let Ok(rag_tool) = rag::build_rag_tool() {
+        tools.push(rag_tool);
+    }
+
+    tools
 }
 
 fn todo_tool_response(args: &Value) -> Value {

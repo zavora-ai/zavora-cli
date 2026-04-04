@@ -135,6 +135,16 @@ pub enum SkillCommands {
     List,
 }
 
+#[cfg(feature = "rag")]
+#[derive(Debug, Subcommand)]
+pub enum RagCommands {
+    #[command(about = "Ingest documents into the RAG vector store")]
+    Ingest {
+        #[arg(help = "Path to file or directory to ingest")]
+        path: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum TelemetryCommands {
     #[command(about = "Summarize telemetry events from a JSONL stream")]
@@ -347,6 +357,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: SkillCommands,
     },
+    #[cfg(feature = "rag")]
+    #[command(about = "RAG document ingestion and retrieval")]
+    Rag {
+        #[command(subcommand)]
+        command: RagCommands,
+    },
     #[command(about = "Telemetry utilities and reporting")]
     Telemetry {
         #[command(subcommand)]
@@ -425,6 +441,10 @@ pub fn command_label(command: &Commands) -> String {
         },
         Commands::Skills { command } => match command {
             SkillCommands::List => "skills.list".to_string(),
+        },
+        #[cfg(feature = "rag")]
+        Commands::Rag { command } => match command {
+            RagCommands::Ingest { .. } => "rag.ingest".to_string(),
         },
         Commands::Eval { command } => match command {
             EvalCommands::Run { .. } => "eval.run".to_string(),

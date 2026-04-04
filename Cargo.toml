@@ -16,6 +16,9 @@ semantic-search = ["dep:strsim"]
 checkpoints = []
 web-fetch = ["dep:reqwest", "dep:htmd"]
 oauth = ["dep:keyring", "dep:reqwest", "dep:sha2", "dep:rand", "dep:base64", "dep:open", "dep:url"]
+browser = ["dep:adk-browser"]
+sandbox = ["dep:adk-sandbox"]
+rag = ["dep:adk-rag"]
 
 lsp = ["dep:lsp-types"]
 
@@ -28,6 +31,9 @@ adk-memory = { path = "../adk-rust/adk-memory", features = ["sqlite-memory"] }
 adk-telemetry = { path = "../adk-rust/adk-telemetry" }
 adk-guardrail = { path = "../adk-rust/adk-guardrail" }
 adk-plugin = { path = "../adk-rust/adk-plugin" }
+adk-browser = { path = "../adk-rust/adk-browser", optional = true }
+adk-sandbox = { path = "../adk-rust/adk-sandbox", optional = true }
+adk-rag = { path = "../adk-rust/adk-rag", optional = true }
 adk-tool = { path = "../adk-rust/adk-tool", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }

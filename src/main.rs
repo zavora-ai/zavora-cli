@@ -343,6 +343,13 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        #[cfg(feature = "rag")]
+        Commands::Rag { command } => match command {
+            RagCommands::Ingest { path } => {
+                run_rag_ingest(&path).await?;
+                Ok(())
+            }
+        },
         Commands::Eval { command } => match command {
             EvalCommands::Run {
                 dataset,
@@ -461,6 +468,43 @@ fn run_skills_list() -> Result<()> {
     println!("{} skill(s) discovered:\n", skills.len());
     for s in skills {
         println!("  {} — {}", s.name, s.description);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "rag")]
+async fn run_rag_ingest(path: &str) -> Result<()> {
+    let pipeline = zavora_cli::tools::rag::build_rag_pipeline()?;
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        let mut count = 0;
+        for entry in ignore::WalkBuilder::new(p).build().filter_map(|e| e.ok()) {
+            if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                    let doc = adk_rag::Document {
+                        id: entry.path().to_string_lossy().to_string(),
+                        text,
+                        metadata: Default::default(),
+                        source_uri: Some(entry.path().to_string_lossy().to_string()),
+                    };
+                    pipeline.ingest("default", &doc).await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    count += 1;
+                }
+            }
+        }
+        println!("Ingested {} files from {}", count, path);
+    } else {
+        let text = std::fs::read_to_string(p).context("failed to read file")?;
+        let doc = adk_rag::Document {
+            id: path.to_string(),
+            text,
+            metadata: Default::default(),
+            source_uri: Some(path.to_string()),
+        };
+        pipeline.ingest("default", &doc).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("Ingested {}", path);
     }
     Ok(())
 }

@@ -514,6 +514,16 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
         tools.push(Arc::new(search_tool));
     }
 
+    // Feature-gated: browser automation tools
+    #[cfg(feature = "browser")]
+    {
+        if let Ok(session) = crate::tools::browser::get_browser().await {
+            let browser_tools = crate::tools::browser::build_browser_tools(session);
+            tracing::info!(count = browser_tools.len(), "Browser tools loaded");
+            tools.extend(browser_tools);
+        }
+    }
+
     ResolvedRuntimeTools {
         tools,
         mcp_tool_names,
