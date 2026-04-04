@@ -26,23 +26,25 @@ use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
 fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
-    // OTLP: use adk-telemetry's full pipeline (it owns the subscriber)
-    if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
-        adk_telemetry::init_with_otlp("zavora-cli", &endpoint)
-            .map_err(|e| anyhow::anyhow!("OTLP init failed: {e}"))?;
-        return Ok(());
-    }
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    // Default: console-only tracing
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(log_filter)
-        .with_target(false);
+    let filter = tracing_subscriber::EnvFilter::try_new(log_filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // OTLP layer added first (on bare Registry) so the type parameter is Registry
+    let otlp_layer: Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>> =
+        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().and_then(|ep| {
+            adk_telemetry::build_otlp_layer("zavora-cli", &ep).ok()
+        });
+
     if use_stderr {
-        builder.with_writer(std::io::stderr).try_init()
+        let fmt = tracing_subscriber::fmt::layer().with_target(false).with_writer(std::io::stderr);
+        tracing_subscriber::registry().with(otlp_layer).with(filter).with(fmt).init();
     } else {
-        builder.try_init()
+        let fmt = tracing_subscriber::fmt::layer().with_target(false);
+        tracing_subscriber::registry().with(otlp_layer).with(filter).with(fmt).init();
     }
-    .map_err(|e| anyhow::anyhow!("tracing init failed: {e}"))
+    Ok(())
 }
 
 #[tokio::main]
@@ -70,6 +72,12 @@ async fn run_cli(cli: Cli) -> Result<()> {
         matches!(cli.command, Some(Commands::Mcp { command: McpCommands::Serve })),
     )?;
     let profiles = load_profiles(&cli.config_path)?;
+
+    // Initialize SQLite memory (eager, before any tool use)
+    if let Err(e) = zavora_cli::agents::memory::init().await {
+        tracing::warn!("Memory init failed: {e}");
+    }
+
     let agent_paths = default_agent_paths();
     let resolved_agents = load_resolved_agents(&agent_paths)?;
     let selected_agent_name = load_agent_selection(&agent_paths.selection_file)?;
