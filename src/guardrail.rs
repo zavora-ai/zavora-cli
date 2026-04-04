@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::Result;
 use serde_json::json;
 
@@ -19,10 +17,7 @@ pub const DEFAULT_GUARDRAIL_TERMS: &[&str] = &[
 ];
 
 pub fn default_guardrail_terms() -> Vec<String> {
-    DEFAULT_GUARDRAIL_TERMS
-        .iter()
-        .map(|term| term.to_string())
-        .collect::<Vec<String>>()
+    DEFAULT_GUARDRAIL_TERMS.iter().map(|t| t.to_string()).collect()
 }
 
 pub fn guardrail_mode_label(mode: GuardrailMode) -> &'static str {
@@ -34,51 +29,64 @@ pub fn guardrail_mode_label(mode: GuardrailMode) -> &'static str {
     }
 }
 
+/// Check text for guardrail term matches using adk-guardrail ContentFilter.
 pub fn contains_guardrail_terms(text: &str, terms: &[String]) -> Vec<String> {
-    let mut hits = BTreeSet::<String>::new();
-    let lower = text.to_ascii_lowercase();
-    for term in terms {
-        let normalized = term.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            continue;
+    let filter = adk_guardrail::ContentFilter::blocked_keywords(terms.to_vec());
+    let content = adk_rust::Content::new("user").with_text(text);
+    // Run synchronously — ContentFilter::validate is CPU-only (regex)
+    let rt = tokio::runtime::Handle::try_current();
+    let result = if let Ok(handle) = rt {
+        handle.block_on(adk_guardrail::Guardrail::validate(&filter, &content))
+    } else {
+        // Fallback for non-async context
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(adk_guardrail::Guardrail::validate(&filter, &content))
+    };
+    match result {
+        adk_guardrail::GuardrailResult::Fail { .. } => {
+            // Extract matched terms from the reason
+            terms
+                .iter()
+                .filter(|t| text.to_ascii_lowercase().contains(&t.to_ascii_lowercase()))
+                .cloned()
+                .collect()
         }
-        if lower.contains(&normalized) {
-            hits.insert(normalized);
-        }
+        _ => Vec::new(),
     }
-    hits.into_iter().collect::<Vec<String>>()
 }
 
-pub fn replace_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return input.to_string();
-    }
+/// Redact PII using adk-guardrail PiiRedactor + custom terms.
+pub fn redact_text(text: &str, terms: &[String], replacement: &str) -> String {
+    // First: PII redaction (emails, phones, SSNs, credit cards)
+    let pii = adk_guardrail::PiiRedactor::new();
+    let (redacted, _) = pii.redact(text);
 
+    // Then: custom term redaction
+    let mut result = redacted;
+    for term in terms {
+        if term.is_empty() { continue; }
+        result = replace_case_insensitive(&result, term, replacement);
+    }
+    result
+}
+
+fn replace_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() { return input.to_string(); }
     let input_lower = input.to_ascii_lowercase();
     let needle_lower = needle.to_ascii_lowercase();
     let mut out = String::new();
-    let mut last_idx = 0usize;
-    let mut search_idx = 0usize;
-
-    while let Some(relative) = input_lower[search_idx..].find(&needle_lower) {
-        let start = search_idx + relative;
+    let mut last = 0;
+    let mut search = 0;
+    while let Some(rel) = input_lower[search..].find(&needle_lower) {
+        let start = search + rel;
         let end = start + needle.len();
-        out.push_str(&input[last_idx..start]);
+        out.push_str(&input[last..start]);
         out.push_str(replacement);
-        last_idx = end;
-        search_idx = end;
+        last = end;
+        search = end;
     }
-
-    out.push_str(&input[last_idx..]);
+    out.push_str(&input[last..]);
     out
-}
-
-pub fn redact_guardrail_terms(text: &str, hits: &[String], replacement: &str) -> String {
-    let mut redacted = text.to_string();
-    for hit in hits {
-        redacted = replace_case_insensitive(&redacted, hit, replacement);
-    }
-    redacted
 }
 
 pub fn apply_guardrail(
@@ -98,53 +106,23 @@ pub fn apply_guardrail(
     }
 
     let mode_label = guardrail_mode_label(mode);
-    let hit_count = hits.len();
-    let telemetry_payload = json!({
-        "direction": direction,
-        "mode": mode_label,
-        "hits": hits.clone(),
-        "hit_count": hit_count
-    });
+    let payload = json!({"direction": direction, "mode": mode_label, "hits": &hits, "hit_count": hits.len()});
 
     match mode {
         GuardrailMode::Observe => {
-            tracing::warn!(
-                direction = direction,
-                mode = mode_label,
-                hit_count = hit_count,
-                "Guardrail observed content matches"
-            );
-            telemetry.emit(
-                &format!("guardrail.{direction}.observed"),
-                telemetry_payload,
-            );
+            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail observed");
+            telemetry.emit(&format!("guardrail.{direction}.observed"), payload);
             Ok(text.to_string())
         }
         GuardrailMode::Block => {
-            tracing::warn!(
-                direction = direction,
-                mode = mode_label,
-                hit_count = hit_count,
-                "Guardrail blocked content"
-            );
-            telemetry.emit(&format!("guardrail.{direction}.blocked"), telemetry_payload);
-            Err(anyhow::anyhow!(
-                "guardrail blocked {} content due to matched terms",
-                direction
-            ))
+            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail blocked");
+            telemetry.emit(&format!("guardrail.{direction}.blocked"), payload);
+            Err(anyhow::anyhow!("guardrail blocked {direction} content due to matched terms"))
         }
         GuardrailMode::Redact => {
-            let redacted = redact_guardrail_terms(text, &hits, &cfg.guardrail_redact_replacement);
-            tracing::warn!(
-                direction = direction,
-                mode = mode_label,
-                hit_count = hit_count,
-                "Guardrail redacted content"
-            );
-            telemetry.emit(
-                &format!("guardrail.{direction}.redacted"),
-                telemetry_payload,
-            );
+            let redacted = redact_text(text, &hits, &cfg.guardrail_redact_replacement);
+            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail redacted");
+            telemetry.emit(&format!("guardrail.{direction}.redacted"), payload);
             Ok(redacted)
         }
         GuardrailMode::Disabled => Ok(text.to_string()),
@@ -158,9 +136,8 @@ pub fn buffered_output_required(mode: GuardrailMode) -> bool {
 pub fn enforce_prompt_limit(prompt: &str, max_chars: usize) -> Result<()> {
     if max_chars > 0 && prompt.len() > max_chars {
         return Err(anyhow::anyhow!(
-            "prompt exceeds maximum length ({} chars > {} limit). Shorten the prompt or increase max_prompt_chars.",
-            prompt.len(),
-            max_chars
+            "prompt exceeds maximum length ({} chars > {} limit)",
+            prompt.len(), max_chars
         ));
     }
     Ok(())
