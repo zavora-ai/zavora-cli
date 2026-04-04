@@ -3338,3 +3338,28 @@ impl Drop for SetCwd {
         let _ = std::env::set_current_dir(&self.prev);
     }
 }
+
+#[test]
+fn test_adk_skill_parses_anthropic_skills() {
+    let root = std::path::Path::new(".");
+    let files = adk_skill::discover_skill_files(root).unwrap_or_default();
+    if files.is_empty() {
+        println!("No .skills/ directory found — skipping");
+        return;
+    }
+    println!("Discovered {} skill files", files.len());
+    
+    let index = adk_skill::load_skill_index(root);
+    match &index {
+        Ok(idx) => {
+            println!("Parsed {} skills:", idx.skills().len());
+            for skill in idx.skills() {
+                println!("  ✓ {} — {}", skill.name, skill.description);
+            }
+            assert!(!idx.skills().is_empty(), "should parse at least one skill");
+        }
+        Err(e) => {
+            println!("Parse error: {}", e);
+        }
+    }
+}

@@ -23,6 +23,7 @@ lsp = ["dep:lsp-types"]
 adk-ralph = "0.5.0"
 adk-rust = { path = "../adk-rust/adk-rust", features = ["openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
 adk-session = { path = "../adk-rust/adk-session", features = ["database"] }
+adk-skill = { path = "../adk-rust/adk-skill" }
 adk-tool = { path = "../adk-rust/adk-tool", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }
