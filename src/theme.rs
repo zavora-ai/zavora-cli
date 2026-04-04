@@ -493,11 +493,11 @@ impl Spinner {
                         }
                         1 => {
                             let stats = format_stats(secs, tokens);
-                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}({lang} · {stats}){RESET}");
+                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}");
                         }
                         _ => {
                             let stats = format_stats(secs, tokens);
-                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}({lang} · {stats}){RESET}");
+                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}");
                             eprint!("\n\r\x1b[2K  {DIM}💡 {tip}{RESET}");
                             eprint!("\x1b[1A");
                         }
