@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde_json::json;
-use tracing::level_filters::LevelFilter;
 
 use zavora_cli::agent_catalog::*;
 use zavora_cli::chat::*;
@@ -27,30 +26,23 @@ use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
 fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
-    // If OTLP endpoint is set, use adk-telemetry's full OTLP pipeline
+    // OTLP: use adk-telemetry's full pipeline (it owns the subscriber)
     if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
         adk_telemetry::init_with_otlp("zavora-cli", &endpoint)
-            .map_err(|e| anyhow::anyhow!("OTLP telemetry init failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("OTLP init failed: {e}"))?;
         return Ok(());
     }
 
-    let level = log_filter
-        .parse::<LevelFilter>()
-        .unwrap_or(LevelFilter::INFO);
+    // Default: console-only tracing
     let builder = tracing_subscriber::fmt()
-        .with_max_level(level)
         .with_env_filter(log_filter)
         .with_target(false);
     if use_stderr {
-        builder
-            .with_writer(std::io::stderr)
-            .try_init()
-            .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+        builder.with_writer(std::io::stderr).try_init()
     } else {
-        builder
-            .try_init()
-            .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+        builder.try_init()
     }
+    .map_err(|e| anyhow::anyhow!("tracing init failed: {e}"))
 }
 
 #[tokio::main]
