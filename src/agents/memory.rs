@@ -9,7 +9,7 @@ const DB_PATH: &str = ".zavora/memory.db";
 const APP_NAME: &str = "zavora-cli";
 const USER_ID: &str = "default";
 
-fn run_blocking<F, T>(f: F) -> Result<T>
+fn run_memory<F, T>(f: F) -> Result<T>
 where
     F: FnOnce(adk_memory::MemoryServiceAdapter) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>
         + Send
@@ -37,8 +37,9 @@ where
 
 pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
     let q = query.to_string();
-    tokio::task::spawn_blocking(move || {
-        run_blocking(move |mem| {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = run_memory(move |mem| {
             Box::pin(async move {
                 use adk_rust::Memory;
                 let entries = mem.search(&q).await.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -53,15 +54,17 @@ pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
                     })
                     .collect())
             })
-        })
-    })
-    .await?
+        });
+        let _ = tx.send(result);
+    });
+    rx.await.map_err(|_| anyhow::anyhow!("memory channel closed"))?
 }
 
 pub async fn remember(text: &str) -> Result<()> {
     let t = text.to_string();
-    tokio::task::spawn_blocking(move || {
-        run_blocking(move |mem| {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = run_memory(move |mem| {
             Box::pin(async move {
                 use adk_rust::Memory;
                 let entry = adk_rust::MemoryEntry {
@@ -73,27 +76,28 @@ pub async fn remember(text: &str) -> Result<()> {
                 };
                 mem.add(entry).await.map_err(|e| anyhow::anyhow!("{e}"))
             })
-        })
-    })
-    .await?
+        });
+        let _ = tx.send(result);
+    });
+    rx.await.map_err(|_| anyhow::anyhow!("memory channel closed"))?
 }
 
 pub async fn forget(query: &str) -> Result<u64> {
     let q = query.to_string();
-    tokio::task::spawn_blocking(move || {
-        run_blocking(move |mem| {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = run_memory(move |mem| {
             Box::pin(async move {
                 use adk_rust::Memory;
                 mem.delete(&q).await.map_err(|e| anyhow::anyhow!("{e}"))
             })
-        })
-    })
-    .await?
+        });
+        let _ = tx.send(result);
+    });
+    rx.await.map_err(|_| anyhow::anyhow!("memory channel closed"))?
 }
 
 #[cfg(test)]
 mod tests {
-    // Note: SQLite memory tests require a real filesystem and are tested
-    // via integration tests to avoid cwd pollution from set_current_dir.
-    // The module compiles and is validated by cargo check.
+    // SQLite memory tests require isolated cwd — tested via integration tests.
 }
