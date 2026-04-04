@@ -30,7 +30,9 @@ fn get_memory() -> Result<Arc<adk_memory::MemoryServiceAdapter>> {
 pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
     use adk_rust::Memory;
     let mem = get_memory()?;
-    let entries = mem.search(query).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    // FTS5 rejects empty queries — use wildcard to match all
+    let q = if query.trim().is_empty() { "*" } else { query };
+    let entries = mem.search(q).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(entries
         .into_iter()
         .take(limit)
