@@ -27,6 +27,13 @@ use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
 fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
+    // If OTLP endpoint is set, use adk-telemetry's full OTLP pipeline
+    if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        adk_telemetry::init_with_otlp("zavora-cli", &endpoint)
+            .map_err(|e| anyhow::anyhow!("OTLP telemetry init failed: {e}"))?;
+        return Ok(());
+    }
+
     let level = log_filter
         .parse::<LevelFilter>()
         .unwrap_or(LevelFilter::INFO);
@@ -57,9 +64,11 @@ async fn main() -> Result<()> {
             error = %render_error_message(&err, show_sensitive_config),
             "command failed"
         );
+        adk_telemetry::shutdown_telemetry();
         std::process::exit(1);
     }
 
+    adk_telemetry::shutdown_telemetry();
     Ok(())
 }
 
