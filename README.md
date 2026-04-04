@@ -47,6 +47,24 @@ cargo install --path .
 Requires Rust 1.85+ (`rustup`, `cargo`) for cargo/source builds.
 Maintainer distribution workflow: `docs/DISTRIBUTION.md`.
 
+### Optional Features
+
+Some tools require opt-in feature flags at build time:
+
+```bash
+# Web fetch (HTTP→markdown, requires reqwest + htmd)
+cargo install zavora-cli --features web-fetch
+
+# LSP code intelligence (requires lsp-types)
+cargo install zavora-cli --features lsp
+
+# MCP OAuth 2.0 (requires keyring + crypto deps)
+cargo install zavora-cli --features oauth
+
+# All optional features
+cargo install zavora-cli --features "web-fetch,lsp,oauth"
+```
+
 ## Quick Start
 
 1. Export an API key for any supported provider:
@@ -137,7 +155,10 @@ The LLM can call capability agents as tools, or you can use chat commands:
 | `/todos list` | List todo lists |
 | `/todos show <id>` | Show a todo list |
 | `/todos clear` | Remove finished todos |
-| `/delegate <task>` | Run isolated sub-agent prompt |
+| `/delegate <task>` | Fork isolated sub-agent (fresh context, 5-min timeout) |
+| `/allow <pattern>` | Auto-approve tool pattern for this session |
+| `/deny <pattern>` | Deny tool pattern for this session |
+| `/ralph <prompt>` | Run Ralph autonomous dev pipeline |
 | `/provider <name>` | Switch provider mid-session |
 | `/model [id]` | Switch model or open picker |
 | `/agent` | Trust all tools for the session (agent mode) |
@@ -253,12 +274,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 **As a server** — expose zavora's tools to any MCP client:
 
 ```bash
-zavora mcp serve   # stdio MCP server
+zavora-cli mcp serve   # stdio MCP server
 ```
 
 Claude Desktop / Kiro CLI config:
 ```json
-{ "zavora": { "command": "zavora", "args": ["mcp", "serve"] } }
+{ "zavora": { "command": "zavora-cli", "args": ["mcp", "serve"] } }
 ```
 
 ### Permission Rules
