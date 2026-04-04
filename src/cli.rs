@@ -130,6 +130,12 @@ pub enum SessionCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SkillCommands {
+    #[command(about = "List discovered skills from .skills/ and .claude/skills/")]
+    List,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum TelemetryCommands {
     #[command(about = "Summarize telemetry events from a JSONL stream")]
     Report {
@@ -336,6 +342,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    #[command(about = "Manage skills (.skills/ and .claude/skills/)")]
+    Skills {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
     #[command(about = "Telemetry utilities and reporting")]
     Telemetry {
         #[command(subcommand)]
@@ -411,6 +422,9 @@ pub fn command_label(command: &Commands) -> String {
         },
         Commands::Telemetry { command } => match command {
             TelemetryCommands::Report { .. } => "telemetry.report".to_string(),
+        },
+        Commands::Skills { command } => match command {
+            SkillCommands::List => "skills.list".to_string(),
         },
         Commands::Eval { command } => match command {
             EvalCommands::Run { .. } => "eval.run".to_string(),

@@ -3,7 +3,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::file_loop::{FileLoopAgent, FileLoopConfig, ResourceMap};
-use super::memory::MemoryAgent;
 use super::quality::{QualityAgent, VerificationReport};
 use super::sequential::{Artifact, Plan, SequentialAgent};
 use super::time::{TimeAgent, TimeContext};
@@ -27,16 +26,14 @@ impl Default for OrchestratorConfig {
 
 pub struct Orchestrator {
     config: OrchestratorConfig,
-    memory: Option<MemoryAgent>,
     sequential: SequentialAgent,
     file_loop: FileLoopAgent,
 }
 
 impl Orchestrator {
-    pub fn new(config: OrchestratorConfig, memory: Option<MemoryAgent>) -> Self {
+    pub fn new(config: OrchestratorConfig) -> Self {
         Self {
             config,
-            memory,
             sequential: SequentialAgent::new(),
             file_loop: FileLoopAgent::new(FileLoopConfig::default()),
         }
@@ -50,11 +47,7 @@ impl Orchestrator {
     ) -> Result<ExecutionResult> {
         // 1. Bootstrap: Time handshake + Memory recall
         let time_context = TimeAgent::handshake();
-        let _memories = if let Some(memory) = &self.memory {
-            memory.recall(&goal, &[], 5)
-        } else {
-            Vec::new()
-        };
+        let _memories = super::memory::recall(&goal, 5).await.unwrap_or_default();
 
         // 2. Gather: File discovery (if needed)
         let resources = if goal.contains("file") || goal.contains("code") {
@@ -106,26 +99,15 @@ impl Orchestrator {
             };
 
         // 7. Commit: Store learnings in memory
-        if let Some(memory) = &mut self.memory {
-            // Store high-signal learnings
-            if final_verification.pass {
-                memory.remember(
-                    format!("Successfully completed: {}", goal),
-                    vec!["success".to_string(), "decision".to_string()],
-                    0.9,
-                    None,
-                )?;
-            }
-
-            // Store plan structure if it worked
-            if final_verification.pass && plan.steps.len() > 2 {
-                memory.remember(
-                    format!("Effective plan for '{}': {} steps", goal, plan.steps.len()),
-                    vec!["plan".to_string(), "pattern".to_string()],
-                    0.8,
-                    None,
-                )?;
-            }
+        if final_verification.pass {
+            let _ = super::memory::remember(
+                &format!("Successfully completed: {}", goal),
+            ).await;
+        }
+        if final_verification.pass && plan.steps.len() > 2 {
+            let _ = super::memory::remember(
+                &format!("Effective plan for '{}': {} steps", goal, plan.steps.len()),
+            ).await;
         }
 
         Ok(ExecutionResult {

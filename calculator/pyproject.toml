@@ -1,0 +1,9 @@
+[project]
+name = "calculator"
+version = "0.1.0"
+description = "Simple calculator package"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+calculator = "calculator.cli:main"

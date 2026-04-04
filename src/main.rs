@@ -328,6 +328,12 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Skills { command } => match command {
+            SkillCommands::List => {
+                run_skills_list()?;
+                Ok(())
+            }
+        },
         Commands::Eval { command } => match command {
             EvalCommands::Run {
                 dataset,
@@ -432,4 +438,20 @@ async fn run_cli(cli: Cli) -> Result<()> {
     }
 
     execution
+}
+
+fn run_skills_list() -> Result<()> {
+    let root = std::path::Path::new(".");
+    let index = adk_skill::load_skill_index(root)
+        .map_err(|e| anyhow::anyhow!("skill discovery failed: {e}"))?;
+    let skills = index.skills();
+    if skills.is_empty() {
+        println!("No skills found. Add .md files to .skills/ or .claude/skills/");
+        return Ok(());
+    }
+    println!("{} skill(s) discovered:\n", skills.len());
+    for s in skills {
+        println!("  {} — {}", s.name, s.description);
+    }
+    Ok(())
 }
