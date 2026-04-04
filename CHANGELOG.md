@@ -8,6 +8,22 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- **adk-skill** integration — auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/`; `zavora skills list` CLI command; tested with 17 Anthropic skills
+- **adk-memory** integration — SQLite-backed semantic memory via `SqliteMemoryService`; auto-migrates from `memory.json` on first run; `/memory recall|remember|forget` commands use SQLite
+- **adk-telemetry** integration — OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `shutdown_telemetry()` on exit flushes spans
+- **adk-guardrail** integration — `PiiRedactor` (emails, phones, SSNs, credit cards) + `ContentFilter` (blocked keywords); redact mode chains PII then custom terms
+- **adk-plugin** dependency — plugin manager infrastructure for future hooks
+- **File history** — snapshots files before `fs_write` and `file_edit`; max 20 per file; `/undo` command restores last modified file
+
+### Changed
+
+- Memory backend migrated from hand-rolled JSON to `adk-memory` SQLite (FTS5-based search)
+- Guardrail implementation replaced with `adk-guardrail` PiiRedactor + ContentFilter
+- Runner uses `with_auto_skills_mut()` (borrow-safe, non-consuming)
+- Orchestrator uses async memory API instead of direct JSON I/O
+
+### Previous
+
 - **file_edit** tool — surgical `old_string → new_string` text replacement with unified diff output, closest-match hints on miss, line-ending preservation
 - **glob** tool — gitignore-aware file pattern search via `ignore` crate, structured output with truncation
 - **grep** tool — ripgrep wrapper with output modes (content/files_with_matches/count), context lines, pagination, `grep -rn` fallback

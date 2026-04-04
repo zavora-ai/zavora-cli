@@ -133,6 +133,30 @@ The LLM can call capability agents as tools, or you can use chat commands:
 - `/time [query]` — Get time context or parse dates
 - `/orchestrate <goal>` — Run full orchestration loop
 
+## ADK Crate Integrations
+
+| Crate | Purpose | Integration |
+|-------|---------|-------------|
+| `adk-skill` | Skill system | Auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/` |
+| `adk-memory` | Semantic memory | SQLite-backed via `SqliteMemoryService`, auto-migrates from JSON |
+| `adk-telemetry` | Observability | OTLP export via `OTEL_EXPORTER_OTLP_ENDPOINT`, console fallback |
+| `adk-guardrail` | Safety | `PiiRedactor` (email/phone/SSN/CC) + `ContentFilter` (blocked keywords) |
+| `adk-plugin` | Plugin system | File history snapshots before writes, `/undo` command |
+
+### Skills
+
+Place `.md` files with YAML frontmatter in `.skills/` or `.claude/skills/`:
+
+```yaml
+---
+name: my-skill
+description: When to use this skill
+---
+# Instructions here
+```
+
+List discovered skills: `zavora-cli skills list`
+
 ## Chat Commands
 
 | Command | Description |
@@ -158,6 +182,7 @@ The LLM can call capability agents as tools, or you can use chat commands:
 | `/delegate <task>` | Fork isolated sub-agent (fresh context, 5-min timeout) |
 | `/allow <pattern>` | Auto-approve tool pattern for this session |
 | `/deny <pattern>` | Deny tool pattern for this session |
+| `/undo` | Restore last modified file from snapshot |
 | `/ralph <prompt>` | Run Ralph autonomous dev pipeline |
 | `/provider <name>` | Switch provider mid-session |
 | `/model [id]` | Switch model or open picker |
