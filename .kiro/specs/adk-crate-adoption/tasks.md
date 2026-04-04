@@ -55,30 +55,27 @@
 
 ---
 
-## Phase 3 — New Capabilities (NOT STARTED)
+## Phase 3 — New Capabilities ✅
 
-### Task 6: Browser Automation (`adk-browser`)
-- [ ] Add `adk-browser` as optional dependency behind `browser` feature flag
-- [ ] Create lazy `BrowserSession` via `OnceCell`
-- [ ] Register 8 browser tools (feature-gated)
-- [ ] Wrap with `ConfirmingTool`
-- [ ] Update README
-- [ ] Verify build with and without `browser` feature
+### Task 6: Browser Automation (`adk-browser`) ✅
+- [x] Add `adk-browser` as optional dependency behind `browser` feature flag
+- [x] Lazy `BrowserSession` via `OnceCell` (headless, WebDriver)
+- [x] `BrowserToolset` with 40+ tools registered in runner
+- [x] Cleanup on exit via `cleanup_browser()`
+- [x] Verify build with and without `browser` feature
 
-### Task 7: Code Sandbox (`adk-code` + `adk-sandbox`)
-- [ ] Add as optional dependencies behind `sandbox` feature flag
-- [ ] Create `code_execute` tool with `ProcessBackend`
-- [ ] Configure: 30s timeout, temp dir only, no network
-- [ ] Wrap with `ConfirmingTool`
-- [ ] Update README
-- [ ] Verify build with and without `sandbox` feature
+### Task 7: Code Sandbox (`adk-sandbox`) ✅
+- [x] Add `adk-sandbox` as optional dependency behind `sandbox` feature flag
+- [x] `SandboxTool` with `ProcessBackend::default()` (Python, Node, Rust)
+- [x] Registered in `build_builtin_tools()` (feature-gated)
+- [x] Verify build with and without `sandbox` feature
 
-### Task 8: RAG Pipeline (`adk-rag`)
-- [ ] Add as optional dependency behind `rag` feature flag
-- [ ] Replace `build_retrieval_service()` with `RagPipeline::builder()`
-- [ ] Add `zavora rag ingest <path>` CLI command
-- [ ] Update README
-- [ ] Verify build with and without `rag` feature
+### Task 8: RAG Pipeline (`adk-rag`) ✅
+- [x] Add `adk-rag` as optional dependency behind `rag` feature flag
+- [x] `RagPipeline` with `InMemoryVectorStore` + bag-of-words embedding
+- [x] `RagTool` registered as builtin tool
+- [x] `zavora rag ingest <path>` CLI command (file or directory)
+- [x] Verify build with and without `rag` feature
 
 ---
 

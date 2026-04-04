@@ -142,6 +142,9 @@ The LLM can call capability agents as tools, or you can use chat commands:
 | `adk-telemetry` | Observability | OTLP export via `OTEL_EXPORTER_OTLP_ENDPOINT`, console fallback |
 | `adk-guardrail` | Safety | `PiiRedactor` (email/phone/SSN/CC) + `ContentFilter` (blocked keywords) |
 | `adk-plugin` | Plugin system | File history snapshots before writes, `/undo` command |
+| `adk-browser` | Browser automation | 40+ WebDriver tools (feature: `browser`) |
+| `adk-sandbox` | Code execution | Sandboxed Python/Node/Rust via ProcessBackend (feature: `sandbox`) |
+| `adk-rag` | RAG pipeline | InMemoryVectorStore + bag-of-words embedding (feature: `rag`) |
 
 ### Skills
 
@@ -156,6 +159,17 @@ description: When to use this skill
 ```
 
 List discovered skills: `zavora-cli skills list`
+
+### Feature Flags
+
+| Feature | Crate | What it enables |
+|---------|-------|----------------|
+| `browser` | `adk-browser` | 40+ browser automation tools via WebDriver |
+| `sandbox` | `adk-sandbox` | Sandboxed code execution (Python, Node.js, Rust) |
+| `rag` | `adk-rag` | RAG pipeline with `zavora rag ingest <path>` |
+| `web-fetch` | — | HTTP fetch with HTML→markdown |
+| `lsp` | — | Language Server Protocol integration |
+| `oauth` | — | MCP OAuth PKCE flow |
 
 ## Chat Commands
 

@@ -14,6 +14,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - **adk-guardrail** integration — `PiiRedactor` (emails, phones, SSNs, credit cards) + `ContentFilter` (blocked keywords); redact mode chains PII then custom terms
 - **adk-plugin** dependency — plugin manager infrastructure for future hooks
 - **File history** — snapshots files before `fs_write` and `file_edit`; max 20 per file; `/undo` command restores last modified file
+- **adk-browser** integration — 40+ browser automation tools via WebDriver (feature: `browser`); lazy headless session; navigate, click, type, extract, screenshot, JS eval, cookies, tabs
+- **adk-sandbox** integration — sandboxed code execution via ProcessBackend (feature: `sandbox`); Python, Node.js, Rust; 30s timeout
+- **adk-rag** integration — RAG pipeline with InMemoryVectorStore + bag-of-words embedding (feature: `rag`); `zavora rag ingest <path>` CLI command; RecursiveChunker (512/100)
 
 ### Changed
 
