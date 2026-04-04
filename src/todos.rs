@@ -215,46 +215,89 @@ pub async fn run_delegate(
     tool_confirmation: &ToolConfirmationSettings,
     telemetry: &TelemetrySink,
 ) -> DelegateResult {
+    fork_sub_agent(task, None, cfg, session_service, runtime_tools, tool_confirmation, telemetry).await
+}
+
+/// Fork a sub-agent with a fresh session, optional file context, and timeout.
+///
+/// The sub-agent gets a clean message history (no parent context pollution).
+/// The session is always cleaned up on completion or error.
+pub async fn fork_sub_agent(
+    task: &str,
+    file_context: Option<&str>,
+    cfg: &RuntimeConfig,
+    session_service: Arc<dyn SessionService>,
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
+) -> DelegateResult {
     let delegate_session_id = format!(
-        "delegate-{}",
+        "fork-{}-{}",
+        cfg.session_id,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
     );
 
-    // Build an isolated config with a separate session
     let mut delegate_cfg = cfg.clone();
     delegate_cfg.session_id = delegate_session_id.clone();
 
-    match build_single_runner_for_chat(
+    // Build prompt with optional file context
+    let prompt = match file_context {
+        Some(ctx) => format!("{}\n\n<context>\n{}\n</context>", task, ctx),
+        None => task.to_string(),
+    };
+
+    let timeout = std::time::Duration::from_secs(300); // 5 minutes
+
+    let result = match build_single_runner_for_chat(
         &delegate_cfg,
-        session_service,
+        session_service.clone(),
         runtime_tools,
         tool_confirmation,
         telemetry,
     )
     .await
     {
-        Ok((runner, _, _)) => match run_prompt(&runner, &delegate_cfg, task, telemetry).await {
-            Ok(output) => DelegateResult {
-                task: task.to_string(),
-                session_id: delegate_session_id,
-                output,
-                success: true,
-            },
-            Err(e) => DelegateResult {
-                task: task.to_string(),
-                session_id: delegate_session_id,
-                output: format!("Error: {e}"),
-                success: false,
-            },
-        },
+        Ok((runner, _, _)) => {
+            match tokio::time::timeout(timeout, run_prompt(&runner, &delegate_cfg, &prompt, telemetry)).await {
+                Ok(Ok(output)) => DelegateResult {
+                    task: task.to_string(),
+                    session_id: delegate_session_id.clone(),
+                    output,
+                    success: true,
+                },
+                Ok(Err(e)) => DelegateResult {
+                    task: task.to_string(),
+                    session_id: delegate_session_id.clone(),
+                    output: format!("Error: {e}"),
+                    success: false,
+                },
+                Err(_) => DelegateResult {
+                    task: task.to_string(),
+                    session_id: delegate_session_id.clone(),
+                    output: "Sub-agent timed out after 5 minutes".to_string(),
+                    success: false,
+                },
+            }
+        }
         Err(e) => DelegateResult {
             task: task.to_string(),
-            session_id: delegate_session_id,
-            output: format!("Failed to build delegate runner: {e}"),
+            session_id: delegate_session_id.clone(),
+            output: format!("Failed to build sub-agent: {e}"),
             success: false,
         },
-    }
+    };
+
+    // Always clean up the fork session
+    let _ = session_service
+        .delete(adk_session::DeleteRequest {
+            app_name: delegate_cfg.app_name.clone(),
+            user_id: delegate_cfg.user_id.clone(),
+            session_id: delegate_session_id,
+        })
+        .await;
+
+    result
 }

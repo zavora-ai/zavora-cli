@@ -65,6 +65,8 @@ fn base_cfg() -> RuntimeConfig {
         agent_deny_tools: Vec::new(),
         provider: Provider::Auto,
         model: None,
+        api_key: None,
+        ollama_host: None,
         app_name: "test-app".to_string(),
         user_id: "test-user".to_string(),
         session_id: "test-session".to_string(),
@@ -89,6 +91,7 @@ fn base_cfg() -> RuntimeConfig {
         guardrail_terms: vec!["secret".to_string(), "password".to_string()],
         guardrail_redact_replacement: "[REDACTED]".to_string(),
         mcp_servers: Vec::new(),
+        permission_rules: Default::default(),
         max_prompt_chars: 32_000,
         server_runner_cache_max: 64,
         auto_compact_enabled: true,
@@ -213,6 +216,8 @@ async fn list_session_ids(cfg: &RuntimeConfig) -> Vec<String> {
         .list(ListRequest {
             app_name: cfg.app_name.clone(),
             user_id: cfg.user_id.clone(),
+            limit: None,
+            offset: None,
         })
         .await
         .expect("sessions should list")
@@ -1444,6 +1449,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
         },
         McpServerConfig {
             name: "ops".to_string(),
@@ -1453,6 +1462,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
         },
         McpServerConfig {
             name: "analytics".to_string(),
@@ -1462,6 +1475,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
         },
     ];
 
@@ -1490,6 +1507,10 @@ fn resolve_mcp_auth_reports_missing_bearer_token_env() {
         auth_bearer_env: Some("__ZAVORA_TEST_MCP_TOKEN_MISSING__".to_string()),
         tool_allowlist: Vec::new(),
         tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
     };
 
     let err = resolve_mcp_auth(&server).expect_err("missing env should fail");
@@ -2310,6 +2331,10 @@ fn test_check_auth_hint_missing_env() {
         auth_bearer_env: Some("ZAVORA_TEST_NONEXISTENT_TOKEN_XYZ".to_string()),
         tool_allowlist: vec![],
         tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
     };
     let hint = check_auth_hint(&server);
     assert!(hint.is_some());
@@ -2326,6 +2351,10 @@ fn test_check_auth_hint_no_auth() {
         auth_bearer_env: None,
         tool_allowlist: vec![],
         tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
     };
     let hint = check_auth_hint(&server);
     assert!(hint.is_none());
@@ -2341,6 +2370,10 @@ async fn test_diagnose_mcp_server_auth_failure() {
         auth_bearer_env: Some("ZAVORA_TEST_NONEXISTENT_TOKEN_XYZ".to_string()),
         tool_allowlist: vec![],
         tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
     };
     let diag = diagnose_mcp_server(&server, 1, 100).await;
     assert_eq!(diag.name, "auth-fail");
@@ -2357,6 +2390,10 @@ async fn test_diagnose_mcp_server_unreachable() {
         auth_bearer_env: None,
         tool_allowlist: vec![],
         tool_aliases: HashMap::new(),
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+        oauth: None,
     };
     let diag = diagnose_mcp_server(&server, 1, 100).await;
     assert_eq!(diag.name, "bad-endpoint");
@@ -3113,4 +3150,191 @@ fn test_category_labels() {
         BenchmarkCategory::ContextManagement.label(),
         "Context Management"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests for new tools (Phase 1-4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_file_edit_basic_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("edit_test.txt");
+    std::fs::write(&file, "hello world\nfoo bar\n").unwrap();
+
+    // Must run from the temp dir so workspace policy passes
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::file_edit::file_edit_tool_response(&serde_json::json!({
+        "file_path": file.to_str().unwrap(),
+        "old_string": "foo bar",
+        "new_string": "baz qux"
+    }));
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["replacements"], 1);
+    assert!(result["diff"].as_str().unwrap().contains("-foo bar"));
+    assert!(result["diff"].as_str().unwrap().contains("+baz qux"));
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "hello world\nbaz qux\n");
+}
+
+#[test]
+fn test_file_edit_no_match_gives_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("hint_test.txt");
+    std::fs::write(&file, "hello world\n").unwrap();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::file_edit::file_edit_tool_response(&serde_json::json!({
+        "file_path": file.to_str().unwrap(),
+        "old_string": "helo wrld",
+        "new_string": "goodbye"
+    }));
+
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["code"], "no_match");
+}
+
+#[test]
+fn test_file_edit_ambiguous_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ambig_test.txt");
+    std::fs::write(&file, "foo\nfoo\nbar\n").unwrap();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::file_edit::file_edit_tool_response(&serde_json::json!({
+        "file_path": file.to_str().unwrap(),
+        "old_string": "foo",
+        "new_string": "baz"
+    }));
+
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["code"], "ambiguous_match");
+}
+
+#[test]
+fn test_file_edit_replace_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("replall_test.txt");
+    std::fs::write(&file, "foo\nfoo\nbar\n").unwrap();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::file_edit::file_edit_tool_response(&serde_json::json!({
+        "file_path": file.to_str().unwrap(),
+        "old_string": "foo",
+        "new_string": "baz",
+        "replace_all": true
+    }));
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["replacements"], 2);
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "baz\nbaz\nbar\n");
+}
+
+#[test]
+fn test_glob_finds_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "").unwrap();
+    std::fs::write(dir.path().join("c.txt"), "").unwrap();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::glob::glob_tool_response(&serde_json::json!({
+        "pattern": "*.rs"
+    }));
+
+    assert_eq!(result["numFiles"], 2);
+    assert_eq!(result["truncated"], false);
+    let filenames = result["filenames"].as_array().unwrap();
+    assert!(filenames.iter().any(|f| f.as_str().unwrap().ends_with("a.rs")));
+    assert!(filenames.iter().any(|f| f.as_str().unwrap().ends_with("b.rs")));
+}
+
+#[test]
+fn test_grep_finds_content() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("search.txt"), "hello world\nfoo bar\n").unwrap();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = crate::tools::grep::grep_tool_response(&serde_json::json!({
+        "pattern": "foo",
+        "output_mode": "content"
+    }));
+
+    // Should find the match (if rg or grep is available)
+    if result.get("status").and_then(|v| v.as_str()) != Some("error") {
+        assert!(result["numMatches"].as_u64().unwrap() >= 1);
+    }
+}
+
+#[test]
+fn test_tool_search_finds_by_keyword() {
+    let tools = crate::tools::build_builtin_tools();
+    let result = crate::tools::tool_search::tool_search_response("file read", &tools);
+    assert!(result["matches"].as_u64().unwrap() >= 1);
+    let tool_names: Vec<&str> = result["tools"].as_array().unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(tool_names.contains(&"fs_read"));
+}
+
+#[test]
+fn test_tool_search_empty_query() {
+    let tools = crate::tools::build_builtin_tools();
+    let result = crate::tools::tool_search::tool_search_response("", &tools);
+    assert_eq!(result["status"], "error");
+}
+
+#[test]
+fn test_permission_rules_evaluate() {
+    use crate::tool_policy::{PermissionRules, ToolPattern, PermissionDecision};
+
+    let rules = PermissionRules {
+        always_allow: vec![ToolPattern("fs_read:*".to_string())],
+        always_deny: vec![ToolPattern("execute_bash:rm -rf *".to_string())],
+        always_ask: vec![ToolPattern("web_fetch:*".to_string())],
+    };
+
+    assert_eq!(rules.evaluate("fs_read", Some("/any/path")), PermissionDecision::Allow);
+    assert_eq!(rules.evaluate("execute_bash", Some("rm -rf /")), PermissionDecision::Deny);
+    assert_eq!(rules.evaluate("web_fetch", Some("https://example.com")), PermissionDecision::Ask);
+    assert_eq!(rules.evaluate("todo_list", None), PermissionDecision::NoMatch);
+}
+
+#[test]
+fn test_permission_rules_deny_takes_precedence() {
+    use crate::tool_policy::{PermissionRules, ToolPattern, PermissionDecision};
+
+    let rules = PermissionRules {
+        always_allow: vec![ToolPattern("execute_bash:*".to_string())],
+        always_deny: vec![ToolPattern("execute_bash:rm *".to_string())],
+        always_ask: vec![],
+    };
+
+    // Deny takes precedence over allow
+    assert_eq!(rules.evaluate("execute_bash", Some("rm -rf /")), PermissionDecision::Deny);
+    assert_eq!(rules.evaluate("execute_bash", Some("ls -la")), PermissionDecision::Allow);
+}
+
+// Helper to temporarily change cwd for tests
+struct SetCwd {
+    prev: std::path::PathBuf,
+}
+
+impl SetCwd {
+    fn new(path: &std::path::Path) -> Self {
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+        Self { prev }
+    }
+}
+
+impl Drop for SetCwd {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prev);
+    }
 }

@@ -1,8 +1,17 @@
 pub mod confirming;
 pub mod execute_bash;
+pub mod file_edit;
 pub mod fs_read;
 pub mod fs_write;
 pub mod github_ops;
+pub mod glob;
+pub mod grep;
+pub mod bash_security;
+#[cfg(feature = "lsp")]
+pub mod lsp;
+pub mod tool_search;
+#[cfg(feature = "web-fetch")]
+pub mod web_fetch;
 
 use std::sync::Arc;
 
@@ -13,8 +22,11 @@ use crate::todos;
 
 pub const FS_READ_TOOL_NAME: &str = "fs_read";
 pub const FS_WRITE_TOOL_NAME: &str = "fs_write";
+pub const FILE_EDIT_TOOL_NAME: &str = "file_edit";
 pub const EXECUTE_BASH_TOOL_NAME: &str = "execute_bash";
 pub const GITHUB_OPS_TOOL_NAME: &str = "github_ops";
+pub const GLOB_TOOL_NAME: &str = "glob";
+pub const GREP_TOOL_NAME: &str = "grep";
 pub const TODO_TOOL_NAME: &str = "todo_list";
 
 pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
@@ -28,7 +40,9 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
                 .as_secs();
             Ok(json!({ "unix_utc_seconds": now }))
         },
-    );
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
 
     let release_template = FunctionTool::new(
         "release_template",
@@ -46,14 +60,18 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
                 ]
             }))
         },
-    );
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
 
     let fs_read = FunctionTool::new(
         "fs_read",
         "Reads file content or directory entries within the workspace using path policy checks. \
          Args: path (required), start_line, max_lines, max_bytes, max_entries.",
         |_ctx, args| async move { Ok(fs_read::fs_read_tool_response(&args)) },
-    );
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
 
     let fs_write = FunctionTool::new(
         "fs_write",
@@ -61,6 +79,61 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          Args: path (required), mode=create|overwrite|append|patch, content, patch={find,replace,replace_all}.",
         |_ctx, args| async move { Ok(fs_write::fs_write_tool_response(&args)) },
     );
+
+    let file_edit = FunctionTool::new(
+        "file_edit",
+        "Makes surgical text replacements in files. Preferred over fs_write for editing existing files. \
+         Args: file_path (required), old_string (required, exact text to find), \
+         new_string (required, replacement text), replace_all (optional bool, default false). \
+         Returns a unified diff of the change. Fails if old_string is not found or matches multiple locations (unless replace_all=true).",
+        |_ctx, args| async move { Ok(file_edit::file_edit_tool_response(&args)) },
+    );
+
+    let glob_tool = FunctionTool::new(
+        "glob",
+        "Finds files matching a glob pattern. Respects .gitignore. \
+         Args: pattern (required, e.g. '**/*.rs', 'src/**/*.{ts,tsx}'), path (optional search root, default cwd). \
+         Returns { numFiles, filenames, truncated, durationMs }. Max 100 results.",
+        |_ctx, args| async move { Ok(glob::glob_tool_response(&args)) },
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
+
+    let grep_tool = FunctionTool::new(
+        "grep",
+        "Searches file contents using regex patterns (ripgrep). \
+         Args: pattern (required regex), path (optional search root), glob (file filter e.g. '*.rs'), \
+         output_mode ('content'|'files_with_matches'|'count', default 'files_with_matches'), \
+         -i (case insensitive), -B/-A/-C (context lines, content mode), \
+         file_type (e.g. 'rust','py'), multiline (bool), head_limit (default 250), offset. \
+         Falls back to grep -rn if rg is not installed.",
+        |_ctx, args| async move { Ok(grep::grep_tool_response(&args)) },
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
+
+    #[cfg(feature = "web-fetch")]
+    let web_fetch_tool = FunctionTool::new(
+        "web_fetch",
+        "Fetches a URL and returns content as markdown. Requires confirmation. \
+         Args: url (required), prompt (required, instruction for processing the content). \
+         Converts HTML to markdown, pretty-prints JSON, passes text through. \
+         Blocks localhost/private IPs/metadata endpoints. Max 100KB. \
+         Returns { url, code, codeText, bytes, result, prompt, durationMs }.",
+        |_ctx, args| async move { Ok(web_fetch::web_fetch_tool_response(&args).await) },
+    );
+
+    #[cfg(feature = "lsp")]
+    let lsp_tool = FunctionTool::new(
+        "lsp",
+        "Semantic code intelligence via Language Server Protocol. \
+         Args: operation (required: goToDefinition|findReferences|hover|documentSymbol|workspaceSymbol|goToImplementation|prepareCallHierarchy|incomingCalls|outgoingCalls), \
+         filePath (required), line (1-based), character (1-based). \
+         Requires `zavora lsp init` to configure language servers.",
+        |_ctx, args| async move { Ok(lsp::lsp_tool_response(&args).await) },
+    )
+    .with_read_only(true)
+    .with_concurrency_safe(true);
 
     let execute_bash = FunctionTool::new(
         "execute_bash",
@@ -106,6 +179,13 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(release_template),
         Arc::new(fs_read),
         Arc::new(fs_write),
+        Arc::new(file_edit),
+        Arc::new(glob_tool),
+        Arc::new(grep_tool),
+        #[cfg(feature = "web-fetch")]
+        Arc::new(web_fetch_tool),
+        #[cfg(feature = "lsp")]
+        Arc::new(lsp_tool),
         Arc::new(execute_bash),
         Arc::new(github_ops),
         Arc::new(todo_list),

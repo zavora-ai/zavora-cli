@@ -124,6 +124,8 @@ pub async fn run_sessions_list(cfg: &RuntimeConfig) -> Result<()> {
         .list(ListRequest {
             app_name: cfg.app_name.clone(),
             user_id: cfg.user_id.clone(),
+            limit: None,
+            offset: None,
         })
         .await
         .with_context(|| {
@@ -249,6 +251,8 @@ pub async fn run_sessions_prune(
         .list(ListRequest {
             app_name: cfg.app_name.clone(),
             user_id: cfg.user_id.clone(),
+            limit: None,
+            offset: None,
         })
         .await
         .with_context(|| {

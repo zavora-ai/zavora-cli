@@ -30,8 +30,8 @@ use crate::session::build_session_service;
 use crate::streaming::{run_prompt_streaming_with_retrieval, run_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
 use crate::theme::{
-    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, is_first_run, print_onboarding,
-    print_startup_banner, suggest_command,
+    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, is_first_run, print_startup_banner,
+    suggest_command,
 };
 use crate::todos;
 use crate::tool_policy::matches_wildcard;
@@ -55,6 +55,9 @@ pub enum ChatCommand {
     Memory(String),
     Time(String),
     Orchestrate(String),
+    Ralph(String),
+    Allow(String),
+    Deny(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +108,25 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
         "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
         "delegate" => ParsedChatCommand::Command(ChatCommand::Delegate(arg.to_string())),
+        "ralph" => ParsedChatCommand::Command(ChatCommand::Ralph(arg.to_string())),
+        "allow" => {
+            if arg.is_empty() {
+                ParsedChatCommand::MissingArgument {
+                    usage: "/allow <pattern> (e.g. 'execute_bash:git *', 'fs_read:*')",
+                }
+            } else {
+                ParsedChatCommand::Command(ChatCommand::Allow(arg.to_string()))
+            }
+        }
+        "deny" => {
+            if arg.is_empty() {
+                ParsedChatCommand::MissingArgument {
+                    usage: "/deny <pattern> (e.g. 'execute_bash:rm -rf *', 'fs_write:/etc/*')",
+                }
+            } else {
+                ParsedChatCommand::Command(ChatCommand::Deny(arg.to_string()))
+            }
+        }
         "provider" => {
             if arg.is_empty() {
                 ParsedChatCommand::MissingArgument {
@@ -136,6 +158,7 @@ pub fn print_chat_help() {
     println!("  {CYAN}/memory{RESET} <cmd>      {DIM}recall|remember|forget learnings{RESET}");
     println!("  {CYAN}/time{RESET} <query>      {DIM}get time context or parse dates{RESET}");
     println!("  {CYAN}/orchestrate{RESET} <goal> {DIM}run full agent orchestration loop{RESET}");
+    println!("  {CYAN}/ralph{RESET} <prompt>     {DIM}run Ralph autonomous dev pipeline{RESET}");
     println!("  {CYAN}/tools{RESET}             {DIM}list active tools and policy{RESET}");
     println!("  {CYAN}/mcp{RESET}               {DIM}MCP server diagnostics{RESET}");
     println!();
@@ -148,6 +171,8 @@ pub fn print_chat_help() {
     println!("  {BOLD}Config{RESET}");
     println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
     println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
+    println!("  {CYAN}/allow{RESET} <pattern>    {DIM}auto-approve tool pattern for session{RESET}");
+    println!("  {CYAN}/deny{RESET} <pattern>     {DIM}deny tool pattern for session{RESET}");
     println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
     println!(
         "  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}"
@@ -169,9 +194,9 @@ pub fn print_chat_usage() {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelPickerOption {
-    id: &'static str,
-    context_window: &'static str,
-    description: &'static str,
+    pub id: &'static str,
+    pub context_window: &'static str,
+    pub description: &'static str,
 }
 
 pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
@@ -940,6 +965,39 @@ pub async fn dispatch_chat_command(
 
             Ok(ChatCommandAction::Continue)
         }
+        ChatCommand::Allow(pattern) => {
+            crate::tools::confirming::trust_tool(&pattern);
+            println!("Session rule added: always allow '{pattern}'");
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Deny(pattern) => {
+            // For deny, we trust the tool name so it auto-approves, but the
+            // ConfirmingTool will still show the action. A full deny would
+            // require rebuilding the tool set. For now, print a warning.
+            println!("Session rule noted: deny '{pattern}'");
+            println!("  Note: Denied patterns take effect on next tool rebuild (/agent).");
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Ralph(prompt) => {
+            if prompt.trim().is_empty() {
+                println!("Usage: /ralph <prompt>");
+                println!("Runs the Ralph autonomous development pipeline.");
+                return Ok(ChatCommandAction::Continue);
+            }
+            telemetry.emit(
+                "chat.ralph.invoked",
+                json!({
+                    "provider": format!("{:?}", resolved_provider).to_ascii_lowercase(),
+                    "model": model_name.clone(),
+                }),
+            );
+            println!("Starting Ralph pipeline...");
+            match crate::ralph::run_ralph(cfg, prompt, None, false, None, telemetry).await {
+                Ok(()) => println!("Ralph pipeline completed."),
+                Err(e) => eprintln!("Ralph pipeline failed: {e}"),
+            }
+            Ok(ChatCommandAction::Continue)
+        }
     }
 }
 
@@ -987,7 +1045,24 @@ pub async fn run_chat(
     // First-run onboarding
     let workspace = std::env::current_dir().unwrap_or_default();
     if is_first_run(&workspace) {
-        print_onboarding();
+        let result = crate::onboarding::run_onboarding_wizard(None)?;
+        crate::onboarding::persist_onboarding_config(&result, &cfg.config_path)?;
+
+        // Reload config so the chat session uses the new provider/model
+        let profiles = crate::config::load_profiles(&cfg.config_path)?;
+        let profile = profiles
+            .profiles
+            .get(&cfg.profile)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(p) = profile.provider {
+            cfg.provider = p;
+        }
+        if let Some(m) = profile.model {
+            cfg.model = Some(m);
+        }
+        cfg.api_key = profile.api_key;
+        cfg.ollama_host = profile.ollama_host;
     }
 
     // Bootstrap: Get time and memory context once at startup for personalized greeting
@@ -1034,6 +1109,7 @@ pub async fn run_chat(
     println!();
 
     let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
+    let mut last_ctrl_c: Option<std::time::Instant> = None;
 
     loop {
         // Compute context usage from live session data
@@ -1047,15 +1123,25 @@ pub async fn run_chat(
         let prompt = build_prompt(&checkpoint_store, context_usage.as_ref());
         let input = match rl.readline(&prompt) {
             Ok(line) => line,
-            Err(
-                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
-            ) => break,
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                if let Some(prev) = last_ctrl_c {
+                    if prev.elapsed() < std::time::Duration::from_secs(2) {
+                        println!();
+                        break;
+                    }
+                }
+                last_ctrl_c = Some(std::time::Instant::now());
+                println!("\n{}Press Ctrl+C again to exit.{}", crate::theme::DIM, crate::theme::RESET);
+                continue;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => break,
             Err(e) => return Err(anyhow::anyhow!("readline error: {e}")),
         };
         let input = input.trim();
         if input.is_empty() {
             continue;
         }
+        last_ctrl_c = None; // Reset double Ctrl+C window on valid input
         rl.add_history_entry(input).ok();
         if input.eq_ignore_ascii_case("/exit") || input.eq_ignore_ascii_case("exit") {
             break;

@@ -14,8 +14,10 @@ use zavora_cli::error::*;
 use zavora_cli::eval::*;
 use zavora_cli::guardrail::*;
 use zavora_cli::mcp::*;
+use zavora_cli::onboarding::{persist_onboarding_config, run_onboarding_wizard};
 use zavora_cli::profiles::*;
 use zavora_cli::provider::*;
+use zavora_cli::ralph::run_ralph;
 use zavora_cli::retrieval::*;
 use zavora_cli::runner::*;
 use zavora_cli::server::*;
@@ -24,16 +26,24 @@ use zavora_cli::streaming::*;
 use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
-fn init_tracing(log_filter: &str) -> Result<()> {
+fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
     let level = log_filter
         .parse::<LevelFilter>()
         .unwrap_or(LevelFilter::INFO);
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_max_level(level)
         .with_env_filter(log_filter)
-        .with_target(false)
-        .try_init()
-        .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+        .with_target(false);
+    if use_stderr {
+        builder
+            .with_writer(std::io::stderr)
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+    } else {
+        builder
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+    }
 }
 
 #[tokio::main]
@@ -54,7 +64,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_cli(cli: Cli) -> Result<()> {
-    init_tracing(&cli.log_filter)?;
+    init_tracing(
+        &cli.log_filter,
+        matches!(cli.command, Some(Commands::Mcp { command: McpCommands::Serve })),
+    )?;
     let profiles = load_profiles(&cli.config_path)?;
     let agent_paths = default_agent_paths();
     let resolved_agents = load_resolved_agents(&agent_paths)?;
@@ -282,6 +295,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 run_mcp_discover(&cfg, server).await?;
                 Ok(())
             }
+            McpCommands::Serve => {
+                zavora_cli::mcp_server::run_mcp_server().await?;
+                Ok(())
+            }
         },
         Commands::Sessions { command } => match command {
             SessionCommands::List => {
@@ -338,6 +355,64 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Ralph {
+            prompt,
+            phase,
+            resume,
+            output_dir,
+        } => {
+            let prompt = prompt.join(" ");
+            if !resume {
+                enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+            }
+            telemetry.emit(
+                "model.resolved",
+                json!({
+                    "provider": format!("{:?}", cfg.provider).to_ascii_lowercase(),
+                    "model": cfg.model.clone().unwrap_or_default(),
+                    "path": "ralph"
+                }),
+            );
+            run_ralph(&cfg, prompt, phase, resume, output_dir, &telemetry).await?;
+            Ok(())
+        }
+        Commands::Setup => {
+            let existing_profile = profiles.profiles.get("default");
+            let result = run_onboarding_wizard(existing_profile)?;
+            persist_onboarding_config(&result, &cli.config_path)?;
+            if result.skipped {
+                println!("Minimal configuration saved. Set your provider via environment variables or edit the config file.");
+            } else {
+                println!("Configuration saved! You can start chatting with `zavora`.");
+            }
+            Ok(())
+        }
+        Commands::LspInit => {
+            #[cfg(feature = "lsp")]
+            {
+                let config = zavora_cli::lsp::manager::generate_default_config();
+                if config.servers.is_empty() {
+                    println!("No language servers found in PATH.");
+                    println!("Install one: rust-analyzer, typescript-language-server, pylsp, gopls, clangd");
+                } else {
+                    let path = ".zavora/lsp.json";
+                    std::fs::create_dir_all(".zavora")?;
+                    let json = serde_json::to_string_pretty(&config)?;
+                    std::fs::write(path, &json)?;
+                    println!("LSP config written to {path}:");
+                    for (lang, srv) in &config.servers {
+                        println!("  {lang}: {} {}", srv.command, srv.args.join(" "));
+                    }
+                    println!("\nLSP code intelligence is now enabled.");
+                }
+                Ok(())
+            }
+            #[cfg(not(feature = "lsp"))]
+            {
+                println!("LSP support not compiled. Rebuild with: cargo build --features lsp");
+                Ok(())
+            }
+        }
     };
 
     let duration_ms = started_at.elapsed().as_millis();

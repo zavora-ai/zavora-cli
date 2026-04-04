@@ -254,9 +254,9 @@ pub async fn run_prompt(
     telemetry: &TelemetrySink,
 ) -> Result<String> {
     let mut stream = runner
-        .run(
-            cfg.user_id.clone(),
-            cfg.session_id.clone(),
+        .run_str(
+            &cfg.user_id,
+            &cfg.session_id,
             Content::new("user").with_text(prompt),
         )
         .await
@@ -324,9 +324,9 @@ pub async fn run_prompt_streaming(
     telemetry: &TelemetrySink,
 ) -> Result<String> {
     let mut stream = runner
-        .run(
-            cfg.user_id.clone(),
-            cfg.session_id.clone(),
+        .run_str(
+            &cfg.user_id,
+            &cfg.session_id,
             Content::new("user").with_text(prompt),
         )
         .await
@@ -344,7 +344,18 @@ pub async fn run_prompt_streaming(
     let mut md_state = ParseState::new();
     let mut stdout = io::stdout();
 
-    while let Some(event_result) = stream.next().await {
+    while let Some(event_result) = tokio::select! {
+        event = stream.next() => event,
+        _ = tokio::signal::ctrl_c() => {
+            drop(spinner);
+            eprintln!("\n{}  ⏹ Cancelled{}", crate::theme::DIM, crate::theme::RESET);
+            println!();
+            let partial = tracker
+                .resolve_text()
+                .unwrap_or_default();
+            return Ok(if partial.is_empty() { "(cancelled)".to_string() } else { partial });
+        }
+    } {
         let event = match event_result {
             Ok(e) => e,
             Err(e) => {

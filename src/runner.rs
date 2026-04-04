@@ -30,6 +30,7 @@ CAPABILITY AGENTS (call as tools when you need their unique skills):
 
 SUBAGENTS (automatically available when conditions met):
 - search_agent: For news, current events, and web searches (enabled only with --provider gemini)
+- ralph_agent: For greenfield projects and multi-phase development (enabled only in agent mode)
 
 WORKFLOW AGENTS (use for complex multi-step work):
 - file_search_agent: Comprehensive file discovery with saturation detection
@@ -38,6 +39,7 @@ WORKFLOW AGENTS (use for complex multi-step work):
 
 RULES:
 - For news/web searches: delegate to search_agent
+- For greenfield projects, multi-file scaffolding, or multi-phase development: delegate to ralph_agent (agent mode only)
 - memory_agent is ONLY for user preferences/decisions, NOT for facts or general knowledge
 - For simple tasks, use your built-in tools directly
 - For complex multi-step tasks, use sequential_agent
@@ -62,6 +64,24 @@ pub fn build_single_agent_with_tools(
     tool_confirmation_policy: ToolConfirmationPolicy,
     tool_timeout: Duration,
     runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    build_single_agent_with_tools_and_telemetry(
+        model,
+        tools,
+        tool_confirmation_policy,
+        tool_timeout,
+        runtime_cfg,
+        None,
+    )
+}
+
+pub fn build_single_agent_with_tools_and_telemetry(
+    model: Arc<dyn Llm>,
+    tools: &[Arc<dyn Tool>],
+    tool_confirmation_policy: ToolConfirmationPolicy,
+    tool_timeout: Duration,
+    runtime_cfg: Option<&RuntimeConfig>,
+    telemetry: Option<&TelemetrySink>,
 ) -> Result<Arc<dyn Agent>> {
     let instruction = if let Some(cfg) = runtime_cfg {
         let os_name = std::env::consts::OS;
@@ -126,6 +146,11 @@ pub fn build_single_agent_with_tools(
              \n\
              <tool_guidelines>\n\
              - Use fs_read to examine files before modifying them\n\
+             - Use file_edit for surgical text replacements in existing files (preferred over fs_write for edits)\n\
+             - Use fs_write only for creating new files or full rewrites\n\
+             - Use glob to find files by name pattern (e.g. '**/*.rs') — faster and safer than shell find\n\
+             - Use grep to search file contents by regex — faster and safer than shell grep\n\
+             - Use web_fetch to read web pages or API docs (requires confirmation since it makes network requests)\n\
              - When editing files, show only the minimal diff needed\n\
              - For shell commands, prefer simple composable commands over complex one-liners\n\
              - Consider the operating system when providing paths and commands\n\
@@ -203,12 +228,17 @@ pub fn build_single_agent_with_tools(
     // runs with --provider gemini. Auto-detected provider mode does not attach it.
     let search_subagent = build_search_subagent_for_provider(runtime_cfg, model.clone());
 
+    // Ralph sub-agent is only attached when agent mode is active.
+    let ralph_subagent =
+        build_ralph_subagent_if_agent_mode(runtime_cfg, model.clone(), telemetry);
+
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
         .instruction(instruction)
         .model(model)
         .tool_confirmation_policy(tool_confirmation_policy)
         .tool_timeout(tool_timeout)
+        .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto)
         .before_model_callback(Box::new(|_ctx, mut request| {
             Box::pin(async move {
                 // Fix tool response roles: conversation_history() maps all non-user
@@ -236,6 +266,11 @@ pub fn build_single_agent_with_tools(
         builder = builder.sub_agent(search_agent);
     }
 
+    // Add ralph subagent if available (agent mode only)
+    if let Some(ralph_agent) = ralph_subagent {
+        builder = builder.sub_agent(ralph_agent);
+    }
+
     Ok(Arc::new(builder.build()?))
 }
 
@@ -252,6 +287,33 @@ fn build_search_subagent_for_provider(
         Ok(agent) => Some(agent),
         Err(err) => {
             tracing::warn!("failed to build search sub-agent: {}", err);
+            None
+        }
+    }
+}
+
+fn build_ralph_subagent_if_agent_mode(
+    runtime_cfg: Option<&RuntimeConfig>,
+    model: Arc<dyn Llm>,
+    telemetry: Option<&TelemetrySink>,
+) -> Option<Arc<dyn Agent>> {
+    use crate::tools::confirming::is_agent_mode;
+
+    if !is_agent_mode() {
+        return None;
+    }
+
+    let cfg = runtime_cfg?;
+    let telemetry = telemetry?;
+
+    match crate::agents::ralph_agent::build_ralph_agent(
+        model,
+        Arc::new(cfg.clone()),
+        Arc::new(telemetry.clone()),
+    ) {
+        Ok(agent) => Some(agent),
+        Err(err) => {
+            tracing::warn!("failed to build ralph sub-agent: {}", err);
             None
         }
     }
@@ -318,6 +380,7 @@ pub fn resolve_tool_confirmation_settings(
 
 pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
     use crate::tools::confirming::ConfirmingTool;
+    use crate::tool_policy::is_read_only_tool;
 
     let mut tools = build_builtin_tools();
     let built_in_count = tools.len();
@@ -331,68 +394,86 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
 
     tools = filter_tools_by_policy(tools, &cfg.agent_allow_tools, &cfg.agent_deny_tools);
 
-    // Determine which tools need interactive confirmation
-    let approved: BTreeSet<String> = cfg
-        .approve_tool
-        .iter()
-        .map(|s| s.trim().to_string())
-        .collect();
-    let mut confirm_names = BTreeSet::<String>::new();
+    // Build effective permission rules: profile rules + backward-compat mapping
+    let rules = &cfg.permission_rules;
 
-    // Guarded built-in tools always require confirmation (unless pre-approved)
-    for name in [
-        FS_WRITE_TOOL_NAME,
-        EXECUTE_BASH_TOOL_NAME,
-        GITHUB_OPS_TOOL_NAME,
-    ] {
-        if !approved.contains(name) {
-            confirm_names.insert(name.to_string());
+    // Legacy approve_tool → always_allow, require_confirm_tool → always_ask
+    let mut effective_allow: Vec<crate::tool_policy::ToolPattern> = rules.always_allow.clone();
+    let mut effective_deny: Vec<crate::tool_policy::ToolPattern> = rules.always_deny.clone();
+    let mut effective_ask: Vec<crate::tool_policy::ToolPattern> = rules.always_ask.clone();
+
+    for name in &cfg.approve_tool {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            effective_allow.push(crate::tool_policy::ToolPattern(trimmed.to_string()));
         }
     }
-
-    // fs_read is display-only (shows path, auto-approves) unless explicitly pre-approved
-    let mut display_only_names = BTreeSet::<String>::new();
-    if !approved.contains(FS_READ_TOOL_NAME) {
-        display_only_names.insert(FS_READ_TOOL_NAME.to_string());
-    }
-
-    match cfg.tool_confirmation_mode {
-        ToolConfirmationMode::Always => {
-            for tool in &tools {
-                if !approved.contains(tool.name()) {
-                    confirm_names.insert(tool.name().to_string());
-                }
-            }
-        }
-        ToolConfirmationMode::McpOnly => {
-            for name in &discovered_mcp_tool_names {
-                if !approved.contains(name.as_str()) {
-                    confirm_names.insert(name.clone());
-                }
-            }
-        }
-        ToolConfirmationMode::Never => {
-            // Only guarded built-ins (already added above)
-        }
-    }
-
     for name in &cfg.require_confirm_tool {
         let trimmed = name.trim();
-        if !trimmed.is_empty() && !approved.contains(trimmed) {
-            confirm_names.insert(trimmed.to_string());
+        if !trimmed.is_empty() {
+            effective_ask.push(crate::tool_policy::ToolPattern(trimmed.to_string()));
         }
     }
 
-    // Wrap tools that need confirmation or display-only
+    let effective_rules = crate::tool_policy::PermissionRules {
+        always_allow: effective_allow,
+        always_deny: effective_deny,
+        always_ask: effective_ask,
+    };
+
+    // Determine wrapping per tool using layered rules
     tools = tools
         .into_iter()
         .map(|tool| {
-            if confirm_names.contains(tool.name()) {
-                ConfirmingTool::wrap(tool)
-            } else if display_only_names.contains(tool.name()) {
-                ConfirmingTool::wrap_display_only(tool)
-            } else {
-                tool
+            let name = tool.name();
+            let decision = effective_rules.evaluate(name, None);
+
+            match decision {
+                crate::tool_policy::PermissionDecision::Allow => {
+                    // Explicitly allowed — no confirmation, but show display for reads
+                    if is_read_only_tool(name) {
+                        ConfirmingTool::wrap_display_only(tool)
+                    } else {
+                        tool
+                    }
+                }
+                crate::tool_policy::PermissionDecision::Deny => {
+                    // Denied tools are already filtered by filter_tools_by_policy,
+                    // but if a deny rule targets content patterns, the tool stays
+                    // and ConfirmingTool handles per-call denial at runtime.
+                    ConfirmingTool::wrap(tool)
+                }
+                crate::tool_policy::PermissionDecision::Ask => {
+                    ConfirmingTool::wrap(tool)
+                }
+                crate::tool_policy::PermissionDecision::NoMatch => {
+                    // Default behavior: read-only tools auto-approve (display-only),
+                    // guarded built-ins and MCP tools require confirmation
+                    if is_read_only_tool(name) {
+                        ConfirmingTool::wrap_display_only(tool)
+                    } else {
+                        match cfg.tool_confirmation_mode {
+                            ToolConfirmationMode::Always => ConfirmingTool::wrap(tool),
+                            ToolConfirmationMode::McpOnly => {
+                                if discovered_mcp_tool_names.contains(name)
+                                    || matches!(name, "fs_write" | "file_edit" | "execute_bash" | "github_ops")
+                                {
+                                    ConfirmingTool::wrap(tool)
+                                } else {
+                                    tool
+                                }
+                            }
+                            ToolConfirmationMode::Never => {
+                                // Still wrap guarded built-ins
+                                if matches!(name, "fs_write" | "file_edit" | "execute_bash" | "github_ops") {
+                                    ConfirmingTool::wrap(tool)
+                                } else {
+                                    tool
+                                }
+                            }
+                        }
+                    }
+                }
             }
         })
         .collect();
@@ -411,6 +492,27 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
         agent_deny_tools = cfg.agent_deny_tools.len(),
         "Resolved runtime toolset"
     );
+
+    // Add tool_search if total tools exceed threshold (gives LLM discovery for large tool sets)
+    if tools.len() > 15 {
+        let all_tools_for_search = tools.clone();
+        let search_tool = FunctionTool::new(
+            "tool_search",
+            "Search available tools by keyword. Use when you need a tool that isn't in your current set. \
+             Args: query (required, space-separated keywords to match against tool names and descriptions). \
+             Returns matching tool names, descriptions, and parameter schemas.",
+            move |_ctx, args| {
+                let tools_ref = all_tools_for_search.clone();
+                async move {
+                    let query = args.get("query").and_then(serde_json::Value::as_str).unwrap_or("");
+                    Ok(crate::tools::tool_search::tool_search_response(query, &tools_ref))
+                }
+            },
+        )
+        .with_read_only(true)
+        .with_concurrency_safe(true);
+        tools.push(Arc::new(search_tool));
+    }
 
     ResolvedRuntimeTools {
         tools,
@@ -449,16 +551,18 @@ pub async fn build_runner_with_session_service(
         None
     };
 
-    Runner::new(RunnerConfig {
-        app_name: cfg.app_name.clone(),
-        agent,
-        session_service,
-        artifact_service: Some(artifact_service),
-        memory_service: None,
-        plugin_manager: None,
-        run_config,
-        compaction_config,
-    })
+    let mut builder = Runner::builder()
+        .app_name(cfg.app_name.clone())
+        .agent(agent)
+        .session_service(session_service)
+        .artifact_service(artifact_service)
+        .run_config(run_config.unwrap_or_default());
+
+    if let Some(cc) = compaction_config {
+        builder = builder.compaction_config(cc);
+    }
+
+    builder.build()
     .context("failed to build ADK runner")
 }
 
@@ -478,12 +582,13 @@ pub async fn build_single_runner_for_chat(
             "path": "chat"
         }),
     );
-    let agent = build_single_agent_with_tools(
+    let agent = build_single_agent_with_tools_and_telemetry(
         model,
         &runtime_tools.tools,
         tool_confirmation.policy.clone(),
         Duration::from_secs(cfg.tool_timeout_secs),
         Some(cfg),
+        Some(telemetry),
     )?;
     let runner = build_runner_with_session_service(
         agent,

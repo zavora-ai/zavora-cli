@@ -92,7 +92,7 @@ impl Tool for MemoryAgentTool {
 
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
         let mut memory = MemoryAgent::new(&self.workspace)
-            .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
+            .map_err(|e| adk_rust::AdkError::tool(e.to_string()))?;
         let action = args
             .get("action")
             .and_then(Value::as_str)
@@ -148,7 +148,7 @@ impl Tool for MemoryAgentTool {
 
                 memory
                     .remember(text.to_string(), tags.clone(), confidence, None)
-                    .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
+                    .map_err(|e| adk_rust::AdkError::tool(e.to_string()))?;
                 Ok(json!({
                     "status": "stored",
                     "text": text,
@@ -164,7 +164,7 @@ impl Tool for MemoryAgentTool {
 
                 let removed = memory
                     .forget(selector)
-                    .map_err(|e| adk_rust::AdkError::Tool(e.to_string()))?;
+                    .map_err(|e| adk_rust::AdkError::tool(e.to_string()))?;
                 Ok(json!({
                     "status": "removed",
                     "count": removed,

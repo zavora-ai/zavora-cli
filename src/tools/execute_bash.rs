@@ -355,6 +355,45 @@ pub fn matched_denied_pattern(command: &str) -> Option<&'static str> {
 pub fn evaluate_execute_bash_policy(
     request: &ExecuteBashRequest,
 ) -> Result<ExecuteBashPolicyDecision, ExecuteBashToolError> {
+    // Run security validation pipeline first
+    match super::bash_security::validate_bash_command(&request.command) {
+        super::bash_security::SecurityResult::Deny(reason) => {
+            if !request.allow_dangerous {
+                return Err(ExecuteBashToolError::new(
+                    "denied_command",
+                    format!(
+                        "execute_bash denied: {}. Set allow_dangerous=true and approved=true to override.",
+                        reason
+                    ),
+                ));
+            }
+            if !request.approved {
+                return Err(ExecuteBashToolError::new(
+                    "approval_required",
+                    format!("execute_bash requires approved=true: {}", reason),
+                ));
+            }
+            return Ok(ExecuteBashPolicyDecision {
+                read_only_auto_allow: false,
+            });
+        }
+        super::bash_security::SecurityResult::Ask(reason) => {
+            if !request.approved {
+                return Err(ExecuteBashToolError::new(
+                    "approval_required",
+                    format!("execute_bash requires approval: {}", reason),
+                ));
+            }
+        }
+        super::bash_security::SecurityResult::Allow(_) => {
+            return Ok(ExecuteBashPolicyDecision {
+                read_only_auto_allow: true,
+            });
+        }
+        super::bash_security::SecurityResult::Passthrough => {}
+    }
+
+    // Legacy denied patterns (kept for backward compat, catches rm -rf etc.)
     if let Some(pattern) = matched_denied_pattern(&request.command) {
         if !request.allow_dangerous {
             return Err(ExecuteBashToolError::new(

@@ -14,11 +14,16 @@ categories = ["command-line-utilities"]
 default = []
 semantic-search = ["dep:strsim"]
 checkpoints = []
+web-fetch = ["dep:reqwest", "dep:htmd"]
+oauth = ["dep:keyring", "dep:reqwest", "dep:sha2", "dep:rand", "dep:base64", "dep:open", "dep:url"]
+
+lsp = ["dep:lsp-types"]
 
 [dependencies]
-adk-rust = { version = "0.3.0", features = ["openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
-adk-session = { version = "0.3.0", features = ["database"] }
-adk-tool = { version = "0.3.0", features = ["http-transport"] }
+adk-ralph = "0.5.0"
+adk-rust = { path = "../adk-rust/adk-rust", features = ["openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
+adk-session = { path = "../adk-rust/adk-session", features = ["database"] }
+adk-tool = { path = "../adk-rust/adk-tool", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }
 chrono = "0.4"
@@ -28,6 +33,15 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 shlex = "1.3"
 strsim = { version = "0.11.1", optional = true }
+lsp-types = { version = "0.97", optional = true }
+reqwest = { version = "0.12", features = ["rustls-tls"], optional = true }
+htmd = { version = "0.1", optional = true }
+keyring = { version = "3", optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.9", optional = true }
+base64 = { version = "0.22", optional = true }
+open = { version = "5", optional = true }
+url = { version = "2", optional = true }
 toml = "0.8.19"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tracing = "0.1.44"
@@ -37,6 +51,12 @@ crossterm = "0.28"
 rustyline = "15"
 similar = "2.7"
 winnow = "0.7"
+ignore = "0.4"
+rmcp = { version = "1.3", features = ["transport-io"] }
+schemars = "0.8"
 
 [dev-dependencies]
 tempfile = "3.25.0"
+
+[profile.dev]
+debug = 1  # line tables only (vs full debug = 2)

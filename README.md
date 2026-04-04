@@ -149,11 +149,17 @@ The LLM can call capability agents as tools, or you can use chat commands:
 |------|---------|
 | `fs_read` | Read files and directories with workspace path policy |
 | `fs_write` | Create, overwrite, append, or patch files (confirmation required) |
-| `execute_bash` | Run shell commands with safety policy (read-only commands auto-approved) |
+| `file_edit` | Surgical `old_string → new_string` replacement with diff output (preferred for edits) |
+| `execute_bash` | Run shell commands with 20-check security pipeline (read-only commands auto-approved) |
+| `glob` | Find files by glob pattern, respects `.gitignore` (max 100 results) |
+| `grep` | Search file contents via ripgrep with context lines, pagination, output modes |
 | `github_ops` | GitHub operations via `gh` CLI (issues, PRs, projects) |
 | `todo_list` | Create/complete/view/list/delete task lists (persisted to `.zavora/todos/`) |
 | `time_agent` | Current time context and relative date parsing |
 | `memory_agent` | Persistent learnings storage and recall |
+| `web_fetch` | Fetch URLs as markdown with SSRF protection (feature: `web-fetch`) |
+| `lsp` | Code intelligence: definitions, references, hover, symbols (feature: `lsp`) |
+| `tool_search` | Keyword discovery of available tools (auto-enabled when >15 tools) |
 
 ## Context Management
 
@@ -161,7 +167,9 @@ The LLM can call capability agents as tools, or you can use chat commands:
 - Prompt shows ⚠ (>80%) or 🔴 (>90%) when approaching context limits
 - `/compact` manually summarizes history to reclaim space
 - `/autocompact` toggles automatic compaction (default: enabled at 75% → 10%)
-- Auto-compaction uses LLM-generated structured summaries
+- Auto-compaction uses snip-first strategy (removes stale tool results) then LLM summary fallback
+- Snip deduplicates file reads (keeps most recent per path) and removes large/failed tool results
+- `/delegate <task>` forks an isolated sub-agent with fresh context and 5-minute timeout
 
 ## Configuration
 
@@ -224,15 +232,59 @@ message = "Destructive rm blocked by hook policy"
 
 ### MCP Integration
 
+**As a client** — connect to HTTP or stdio MCP servers:
+
 ```toml
+# HTTP server
 [[profiles.ops.mcp_servers]]
 name = "ops-tools"
 endpoint = "https://mcp.example.com/ops"
-enabled = true
 timeout_secs = 15
 auth_bearer_env = "OPS_MCP_TOKEN"
 tool_allowlist = ["search_incidents", "get_runbook"]
+
+# Stdio server (local process)
+[[profiles.ops.mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 ```
+
+**As a server** — expose zavora's tools to any MCP client:
+
+```bash
+zavora mcp serve   # stdio MCP server
+```
+
+Claude Desktop / Kiro CLI config:
+```json
+{ "zavora": { "command": "zavora", "args": ["mcp", "serve"] } }
+```
+
+### Permission Rules
+
+```toml
+[profiles.default.permission_rules]
+always_allow = ["fs_read:*", "glob:*", "grep:*", "execute_bash:git status*"]
+always_deny = ["execute_bash:rm -rf *", "fs_write:/etc/*"]
+always_ask = ["web_fetch:*", "github_ops:*"]
+```
+
+Session-level: `/allow execute_bash:cargo *` and `/deny fs_write:*.env`
+
+### MCP OAuth (feature: `oauth`)
+
+```toml
+[[profiles.default.mcp_servers]]
+name = "github-mcp"
+endpoint = "https://mcp.github.com"
+[profiles.default.mcp_servers.oauth]
+client_id = "abc123"
+callback_port = 8912
+auth_server_metadata_url = "https://mcp.github.com/.well-known/oauth-authorization-server"
+```
+
+Tokens are stored in the OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager) with file fallback to `.zavora/tokens/`.
 
 ### Guardrails
 

@@ -157,9 +157,9 @@ async fn generate_llm_summary(
     // Generate summary using streaming
     use adk_rust::futures::StreamExt;
     let mut stream = runner
-        .run(
-            summary_cfg.user_id.clone(),
-            summary_cfg.session_id.clone(),
+        .run_str(
+            &summary_cfg.user_id,
+            &summary_cfg.session_id,
             Content::new("user").with_text(&prompt),
         )
         .await?;
@@ -397,5 +397,173 @@ pub async fn compact_to_target(
         };
 
         compact_session(session_service, cfg, &strategy).await?;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snip compaction: remove stale/large/duplicate tool results without summarizing
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+/// Identify event indices to snip (remove without summarizing).
+/// Removes: large tool results older than `max_age`, failed tool results, duplicate file reads.
+pub fn snip_stale_tool_results(events: &[Event], max_age_events: usize) -> Vec<usize> {
+    let mut to_remove = Vec::new();
+    let mut seen_file_reads: HashMap<String, usize> = HashMap::new();
+
+    for (i, event) in events.iter().enumerate() {
+        let age = events.len().saturating_sub(i);
+        let is_tool = event.author == "tool" || event.author == "function";
+
+        if !is_tool {
+            continue;
+        }
+
+        let text = extract_event_text(event);
+
+        // Dedup: for file read results, keep only the most recent per path
+        if let Some(path) = extract_file_read_path(event) {
+            if let Some(prev_idx) = seen_file_reads.insert(path, i) {
+                to_remove.push(prev_idx);
+            }
+        }
+
+        // Snip: large or failed results older than threshold
+        let is_large = text.len() > 2048;
+        let is_failed = text.contains("\"status\":\"error\"") || event.llm_response.content.is_none();
+        if age > max_age_events && (is_large || is_failed) {
+            to_remove.push(i);
+        }
+    }
+
+    to_remove.sort();
+    to_remove.dedup();
+    to_remove
+}
+
+/// Try to extract a file path from a tool result event (for dedup).
+fn extract_file_read_path(event: &Event) -> Option<String> {
+    let text = extract_event_text(event);
+    // Look for fs_read-style path in JSON output
+    if text.contains("\"kind\":\"file\"") || text.contains("\"kind\":\"directory\"") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+            return val.get("path").and_then(|v| v.as_str()).map(String::from);
+        }
+    }
+    None
+}
+
+/// Apply snip compaction: remove identified events from the session.
+pub async fn apply_snip(
+    session_service: &Arc<dyn SessionService>,
+    cfg: &RuntimeConfig,
+    indices_to_remove: &[usize],
+) -> Result<usize> {
+    if indices_to_remove.is_empty() {
+        return Ok(0);
+    }
+
+    let session = session_service
+        .get(adk_session::GetRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+            session_id: cfg.session_id.clone(),
+            num_recent_events: None,
+            after: None,
+        })
+        .await
+        .context("failed to load session for snip")?;
+
+    let events = session.events().all();
+    let remove_set: std::collections::HashSet<usize> = indices_to_remove.iter().copied().collect();
+    let kept: Vec<Event> = events
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !remove_set.contains(i))
+        .map(|(_, e)| e.clone())
+        .collect();
+
+    let removed_count = events.len() - kept.len();
+
+    // Delete and recreate with kept events
+    session_service
+        .delete(adk_session::DeleteRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+            session_id: cfg.session_id.clone(),
+        })
+        .await?;
+
+    ensure_session_exists(session_service, cfg).await?;
+
+    for event in kept {
+        session_service
+            .append_event(&cfg.session_id, event)
+            .await?;
+    }
+
+    Ok(removed_count)
+}
+
+// ---------------------------------------------------------------------------
+// Auto compaction: snip first, then summary if still over threshold
+// ---------------------------------------------------------------------------
+
+/// Auto-compact using snip-first strategy, falling back to LLM summary.
+pub async fn auto_compact(
+    session_service: &Arc<dyn SessionService>,
+    cfg: &RuntimeConfig,
+) -> Result<String> {
+    use crate::context::compute_context_usage;
+
+    let provider_str = format!("{:?}", cfg.provider).to_ascii_lowercase();
+    let model_name = cfg.model.as_deref().unwrap_or("unknown");
+
+    // Load session and check utilization
+    let session = session_service
+        .get(adk_session::GetRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+            session_id: cfg.session_id.clone(),
+            num_recent_events: None,
+            after: None,
+        })
+        .await?;
+
+    let events = session.events().all();
+    let usage = compute_context_usage(&events, &provider_str, model_name);
+
+    if usage.utilization() <= cfg.compaction_threshold {
+        return Ok(format!("No compaction needed ({:.0}%)", usage.utilization() * 100.0));
+    }
+
+    // Step 1: Try snip (cheap, no LLM call)
+    let snip_indices = snip_stale_tool_results(&events, 10);
+    if !snip_indices.is_empty() {
+        let removed = apply_snip(session_service, cfg, &snip_indices).await?;
+
+        // Re-check utilization
+        let session = session_service
+            .get(adk_session::GetRequest {
+                app_name: cfg.app_name.clone(),
+                user_id: cfg.user_id.clone(),
+                session_id: cfg.session_id.clone(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await?;
+        let events = session.events().all();
+        let usage = compute_context_usage(&events, &provider_str, model_name);
+
+        if usage.utilization() <= cfg.compaction_target {
+            return Ok(format!("Snipped {} events → {:.0}%", removed, usage.utilization() * 100.0));
+        }
+    }
+
+    // Step 2: Fall back to LLM summary compaction
+    match compact_session(session_service, cfg, &CompactStrategy::default()).await? {
+        Some(msg) => Ok(format!("Snip + summary: {}", msg)),
+        None => Ok("Session too short to compact".to_string()),
     }
 }

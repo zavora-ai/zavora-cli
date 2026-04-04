@@ -163,4 +163,101 @@ pub fn filter_tools_by_policy(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Permission rules (layered permission system)
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+
+/// A permission rule pattern in the form "tool_name:content_pattern" or just "tool_name".
+/// Examples: "fs_read:*", "execute_bash:git status*", "fs_write:/etc/*"
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ToolPattern(pub String);
+
+impl ToolPattern {
+    /// Check if this pattern matches a tool call.
+    /// Pattern format: "tool_glob" or "tool_glob:content_glob"
+    pub fn matches(&self, tool_name: &str, content: Option<&str>) -> bool {
+        if let Some((tool_pat, content_pat)) = self.0.split_once(':') {
+            matches_wildcard(tool_pat, tool_name)
+                && content
+                    .map(|c| matches_wildcard(content_pat, c))
+                    .unwrap_or(false)
+        } else {
+            matches_wildcard(&self.0, tool_name)
+        }
+    }
+}
+
+/// Permission decision from rule matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+    Ask,
+    /// No rule matched — fall through to default behavior.
+    NoMatch,
+}
+
+/// Layered permission rules. First match wins across always_deny → always_allow → always_ask.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PermissionRules {
+    #[serde(default)]
+    pub always_allow: Vec<ToolPattern>,
+    #[serde(default)]
+    pub always_deny: Vec<ToolPattern>,
+    #[serde(default)]
+    pub always_ask: Vec<ToolPattern>,
+}
+
+impl PermissionRules {
+    pub fn is_empty(&self) -> bool {
+        self.always_allow.is_empty() && self.always_deny.is_empty() && self.always_ask.is_empty()
+    }
+
+    /// Evaluate rules for a tool call. Returns the first matching decision.
+    /// Check order: deny → allow → ask (deny takes precedence).
+    pub fn evaluate(&self, tool_name: &str, content: Option<&str>) -> PermissionDecision {
+        // Deny first (highest priority)
+        if self.always_deny.iter().any(|p| p.matches(tool_name, content)) {
+            return PermissionDecision::Deny;
+        }
+        // Allow
+        if self.always_allow.iter().any(|p| p.matches(tool_name, content)) {
+            return PermissionDecision::Allow;
+        }
+        // Ask
+        if self.always_ask.iter().any(|p| p.matches(tool_name, content)) {
+            return PermissionDecision::Ask;
+        }
+        PermissionDecision::NoMatch
+    }
+
+    /// Merge another set of rules (overlay takes precedence by being checked first).
+    pub fn merge_overlay(&self, overlay: &PermissionRules) -> PermissionRules {
+        let mut merged = overlay.clone();
+        merged.always_allow.extend(self.always_allow.iter().cloned());
+        merged.always_deny.extend(self.always_deny.iter().cloned());
+        merged.always_ask.extend(self.always_ask.iter().cloned());
+        merged
+    }
+}
+
+/// Read-only tools that should be auto-approved by default.
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "fs_read",
+    "glob",
+    "grep",
+    "current_unix_time",
+    "release_template",
+    "todo_list",
+    "lsp",
+];
+
+/// Check if a tool is read-only by name.
+pub fn is_read_only_tool(name: &str) -> bool {
+    READ_ONLY_TOOLS.iter().any(|&ro| ro == name)
+}
+
 // StubTool moved to tests.rs — not needed in production code.

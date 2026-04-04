@@ -6,6 +6,7 @@ use adk_rust::prelude::*;
 use adk_tool::mcp::RefreshConfig;
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 
 use crate::config::{McpServerConfig, RuntimeConfig};
 use crate::tool_policy::apply_tool_aliases;
@@ -134,7 +135,7 @@ pub async fn diagnose_mcp_server(
     if let Some(hint) = check_auth_hint(server) {
         return McpServerDiagnostic {
             name: server.name.clone(),
-            endpoint: server.endpoint.clone(),
+            endpoint: server.display_target().to_string(),
             state: McpServerState::AuthFailure { hint },
         };
     }
@@ -143,7 +144,7 @@ pub async fn diagnose_mcp_server(
     match discover_mcp_tools_for_server(server, retry_attempts, retry_delay_ms).await {
         Ok(tools) => McpServerDiagnostic {
             name: server.name.clone(),
-            endpoint: server.endpoint.clone(),
+            endpoint: server.display_target().to_string(),
             state: McpServerState::Reachable {
                 tool_count: tools.len(),
                 latency_ms: start.elapsed().as_millis() as u64,
@@ -160,7 +161,7 @@ pub async fn diagnose_mcp_server(
             };
             McpServerDiagnostic {
                 name: server.name.clone(),
-                endpoint: server.endpoint.clone(),
+                endpoint: server.display_target().to_string(),
                 state,
             }
         }
@@ -168,6 +169,18 @@ pub async fn diagnose_mcp_server(
 }
 
 pub async fn discover_mcp_tools_for_server(
+    server: &McpServerConfig,
+    retry_attempts: u32,
+    retry_delay_ms: u64,
+) -> Result<Vec<Arc<dyn Tool>>> {
+    if server.is_stdio() {
+        discover_stdio_mcp_tools(server).await
+    } else {
+        discover_http_mcp_tools(server, retry_attempts, retry_delay_ms).await
+    }
+}
+
+async fn discover_http_mcp_tools(
     server: &McpServerConfig,
     retry_attempts: u32,
     retry_delay_ms: u64,
@@ -211,6 +224,131 @@ pub async fn discover_mcp_tools_for_server(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Stdio MCP client
+// ---------------------------------------------------------------------------
+
+async fn discover_stdio_mcp_tools(server: &McpServerConfig) -> Result<Vec<Arc<dyn Tool>>> {
+    use rmcp::ServiceExt;
+    use tokio::process::Command;
+
+    let cmd = server.command.as_deref().unwrap_or("echo");
+    let mut child = Command::new(cmd)
+        .args(&server.args)
+        .envs(&server.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn MCP server '{}' ({})", server.name, cmd))?;
+
+    let child_stdin = child.stdin.take().context("failed to open stdin for MCP child")?;
+    let child_stdout = child.stdout.take().context("failed to open stdout for MCP child")?;
+
+    let client = ()
+        .serve((child_stdout, child_stdin))
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to connect to stdio MCP server '{}': {:?}", server.name, e))?;
+
+    let peer = client.peer().clone();
+    let tools_result = peer
+        .list_tools(None)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to list tools from '{}': {:?}", server.name, e))?;
+
+    let allowlist = &server.tool_allowlist;
+    let server_name = server.name.clone();
+
+    let tools: Vec<Arc<dyn Tool>> = tools_result
+        .tools
+        .into_iter()
+        .filter(|t| allowlist.is_empty() || allowlist.iter().any(|a| a == t.name.as_ref()))
+        .map(|mcp_tool| {
+            let tool: Arc<dyn Tool> = Arc::new(StdioMcpTool {
+                name: format!("mcp:{}:{}", server_name, mcp_tool.name),
+                description: mcp_tool
+                    .description
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_string(),
+                schema: mcp_tool.input_schema.as_ref().clone().into_iter().collect(),
+                original_name: mcp_tool.name.to_string(),
+                peer: peer.clone(),
+            });
+            tool
+        })
+        .collect();
+
+    Ok(tools)
+}
+
+/// ADK Tool wrapper around a single tool from a stdio MCP server.
+struct StdioMcpTool {
+    name: String,
+    description: String,
+    schema: serde_json::Map<String, serde_json::Value>,
+    original_name: String,
+    peer: rmcp::service::Peer<rmcp::RoleClient>,
+}
+
+#[async_trait]
+impl adk_rust::Tool for StdioMcpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::Value::Object(self.schema.clone()))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: Arc<dyn adk_rust::ToolContext>,
+        args: serde_json::Value,
+    ) -> adk_rust::Result<serde_json::Value> {
+        let arguments = match args {
+            serde_json::Value::Object(map) => Some(map.into_iter().collect()),
+            _ => None,
+        };
+        let mut params = rmcp::model::CallToolRequestParams::new(self.original_name.clone());
+        params.arguments = arguments;
+
+        let result = self
+            .peer
+            .call_tool(params)
+            .await
+            .map_err(|e| adk_rust::AdkError::tool(format!("MCP call failed: {:?}", e)))?;
+
+        if result.is_error == Some(true) {
+            let msg = result
+                .content
+                .first()
+                .and_then(|c| match &c.raw {
+                    rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "MCP tool error".to_string());
+            return Err(adk_rust::AdkError::tool(msg));
+        }
+
+        let text = result
+            .content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(serde_json::json!({ "result": text }))
+    }
+}
+
 pub async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
     let mut all_tools = Vec::<Arc<dyn Tool>>::new();
     let servers = match select_mcp_servers(cfg, None) {
@@ -233,7 +371,7 @@ pub async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
                 tools = apply_tool_aliases(tools, &server.tool_aliases);
                 tracing::info!(
                     server = %server.name,
-                    endpoint = %server.endpoint,
+                    target = %server.display_target(),
                     tools = tools.len(),
                     aliases = server.tool_aliases.len(),
                     "MCP tools discovered"
@@ -243,7 +381,7 @@ pub async fn discover_mcp_tools(cfg: &RuntimeConfig) -> Vec<Arc<dyn Tool>> {
             Err(err) => {
                 tracing::warn!(
                     server = %server.name,
-                    endpoint = %server.endpoint,
+                    target = %server.display_target(),
                     error = %err,
                     "MCP server unavailable; continuing without its tools"
                 );
@@ -287,10 +425,12 @@ pub async fn run_mcp_list(cfg: &RuntimeConfig) -> Result<()> {
         } else {
             format!(" aliases={}", server.tool_aliases.len())
         };
+        let transport_label = if server.is_stdio() { "stdio" } else { "http" };
         println!(
-            "- {} endpoint={} timeout={}s auth_env={}{} allowlist={}{}",
+            "- {} transport={} target={} timeout={}s auth_env={}{} allowlist={}{}",
             server.name,
-            server.endpoint,
+            transport_label,
+            server.display_target(),
             server.timeout_secs.unwrap_or(15),
             auth,
             auth_status,

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Auto,
@@ -22,14 +22,14 @@ pub enum WorkflowMode {
     Graph,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionBackend {
     Memory,
     Sqlite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RetrievalBackend {
     Disabled,
@@ -37,7 +37,7 @@ pub enum RetrievalBackend {
     Semantic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolConfirmationMode {
     Never,
@@ -45,13 +45,20 @@ pub enum ToolConfirmationMode {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GuardrailMode {
     Disabled,
     Observe,
     Block,
     Redact,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RalphPhase {
+    Prd,
+    Architect,
+    Loop,
 }
 
 #[derive(Debug, Subcommand)]
@@ -87,6 +94,8 @@ pub enum McpCommands {
         #[arg(long)]
         server: Option<String>,
     },
+    #[command(about = "Run as an MCP server over stdio, exposing built-in tools")]
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -342,6 +351,24 @@ pub enum Commands {
         #[command(subcommand)]
         command: ServerCommands,
     },
+    #[command(about = "Run the Ralph autonomous development pipeline")]
+    Ralph {
+        #[arg(required_unless_present = "resume")]
+        prompt: Vec<String>,
+
+        #[arg(long, value_enum)]
+        phase: Option<RalphPhase>,
+
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+
+        #[arg(long)]
+        output_dir: Option<String>,
+    },
+    #[command(about = "Run the interactive provider setup wizard")]
+    Setup,
+    #[command(about = "Initialize LSP configuration for code intelligence")]
+    LspInit,
 }
 
 pub fn workflow_mode_label(mode: WorkflowMode) -> &'static str {
@@ -374,6 +401,7 @@ pub fn command_label(command: &Commands) -> String {
         Commands::Mcp { command } => match command {
             McpCommands::List => "mcp.list".to_string(),
             McpCommands::Discover { .. } => "mcp.discover".to_string(),
+            McpCommands::Serve => "mcp.serve".to_string(),
         },
         Commands::Sessions { command } => match command {
             SessionCommands::List => "sessions.list".to_string(),
@@ -391,5 +419,8 @@ pub fn command_label(command: &Commands) -> String {
             ServerCommands::Serve { .. } => "server.serve".to_string(),
             ServerCommands::A2aSmoke => "server.a2a-smoke".to_string(),
         },
+        Commands::Setup => "setup".to_string(),
+        Commands::LspInit => "lsp.init".to_string(),
+        Commands::Ralph { .. } => "ralph".to_string(),
     }
 }

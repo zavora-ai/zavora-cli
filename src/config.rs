@@ -20,6 +20,8 @@ pub struct RuntimeConfig {
     pub agent_deny_tools: Vec<String>,
     pub provider: Provider,
     pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub ollama_host: Option<String>,
     pub app_name: String,
     pub user_id: String,
     pub session_id: String,
@@ -44,6 +46,7 @@ pub struct RuntimeConfig {
     pub guardrail_terms: Vec<String>,
     pub guardrail_redact_replacement: String,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub permission_rules: crate::tool_policy::PermissionRules,
     pub max_prompt_chars: usize,
     pub server_runner_cache_max: usize,
     pub auto_compact_enabled: bool,
@@ -53,18 +56,20 @@ pub struct RuntimeConfig {
     pub compaction_target: f64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfilesFile {
     #[serde(default)]
     pub profiles: HashMap<String, ProfileConfig>,
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     pub provider: Option<Provider>,
     pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub ollama_host: Option<String>,
     pub app_name: Option<String>,
     pub user_id: Option<String>,
     pub session_id: Option<String>,
@@ -92,6 +97,8 @@ pub struct ProfileConfig {
     pub guardrail_redact_replacement: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub permission_rules: crate::tool_policy::PermissionRules,
     pub compaction_threshold: Option<f64>,
     pub compaction_target: Option<f64>,
 }
@@ -160,11 +167,20 @@ pub struct AgentPaths {
     pub selection_file: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
     pub name: String,
+    /// HTTP endpoint URL. Required for HTTP transport, omit for stdio.
+    #[serde(default)]
     pub endpoint: String,
+    /// Command to spawn for stdio transport. If set, uses stdio instead of HTTP.
+    pub command: Option<String>,
+    /// Arguments for the stdio command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables for the stdio command.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     pub enabled: Option<bool>,
     pub timeout_secs: Option<u64>,
     pub auth_bearer_env: Option<String>,
@@ -172,6 +188,24 @@ pub struct McpServerConfig {
     pub tool_allowlist: Vec<String>,
     #[serde(default)]
     pub tool_aliases: HashMap<String, String>,
+    /// OAuth 2.0 config for authenticated MCP servers (feature: oauth).
+    pub oauth: Option<crate::mcp_auth::McpOAuthConfig>,
+}
+
+impl McpServerConfig {
+    /// Returns true if this server uses stdio transport.
+    pub fn is_stdio(&self) -> bool {
+        self.command.is_some()
+    }
+
+    /// Display string for the server's connection target.
+    pub fn display_target(&self) -> &str {
+        if let Some(cmd) = &self.command {
+            cmd.as_str()
+        } else {
+            &self.endpoint
+        }
+    }
 }
 
 pub fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
@@ -260,6 +294,26 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
             source: AgentSource::Implicit,
             config: AgentFileConfig {
                 description: Some("Built-in default assistant".to_string()),
+                instruction: None,
+                provider: None,
+                model: None,
+                tool_confirmation_mode: None,
+                resource_paths: Vec::new(),
+                allow_tools: Vec::new(),
+                deny_tools: Vec::new(),
+                hooks: HashMap::new(),
+            },
+        },
+    );
+    resolved.insert(
+        "ralph".to_string(),
+        ResolvedAgent {
+            name: "ralph".to_string(),
+            source: AgentSource::Implicit,
+            config: AgentFileConfig {
+                description: Some(
+                    "Ralph autonomous development pipeline (PRD → Architect → Loop)".to_string(),
+                ),
                 instruction: None,
                 provider: None,
                 model: None,
@@ -442,6 +496,8 @@ pub fn resolve_runtime_config_with_agents(
             .clone()
             .or(active_agent.config.model.clone())
             .or(profile.model),
+        api_key: profile.api_key,
+        ollama_host: profile.ollama_host,
         app_name: cli
             .app_name
             .clone()
@@ -534,6 +590,7 @@ pub fn resolve_runtime_config_with_agents(
             .or(profile.guardrail_redact_replacement)
             .unwrap_or_else(|| "[REDACTED]".to_string()),
         mcp_servers,
+        permission_rules: profile.permission_rules.clone(),
         max_prompt_chars: 32_000,
         server_runner_cache_max: 64,
         auto_compact_enabled: true,

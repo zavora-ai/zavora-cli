@@ -6,6 +6,33 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- **file_edit** tool — surgical `old_string → new_string` text replacement with unified diff output, closest-match hints on miss, line-ending preservation
+- **glob** tool — gitignore-aware file pattern search via `ignore` crate, structured output with truncation
+- **grep** tool — ripgrep wrapper with output modes (content/files_with_matches/count), context lines, pagination, `grep -rn` fallback
+- **web_fetch** tool — HTTP fetch with HTML→markdown conversion, domain blocklist (SSRF protection), JSON pretty-print (feature-gated: `web-fetch`)
+- **lsp** tool — Language Server Protocol integration with 9 operations (goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls), lazy server lifecycle, 7 language support (feature-gated: `lsp`)
+- **MCP server mode** — `zavora mcp serve` exposes all built-in tools as an MCP server over stdio via `rmcp`
+- **MCP stdio client** — connect to local MCP servers via stdio transport (`command`/`args`/`env` config), alongside existing HTTP
+- **Layered permission system** — `PermissionRules` with `always_allow`/`always_deny`/`always_ask` glob patterns, content-aware matching (`execute_bash:git status*`), `/allow` and `/deny` slash commands
+- **Bash security pipeline** — 20 validation checks replacing flat denied-patterns: command substitution, shell metacharacters, dangerous variables, unicode whitespace, brace expansion, proc/environ access, IFS injection, Zsh dangerous commands, and more
+- **Parallel tool execution** — `ToolExecutionStrategy::Auto` runs read-only tools concurrently via ADK ergonomics
+- **Fork sub-agents** — `fork_sub_agent()` with fresh session, 5-minute timeout, optional file context, automatic session cleanup
+- **Multi-strategy compaction** — snip (remove stale/large/duplicate tool results without LLM), auto mode (snip first → summary fallback), file-read dedup
+- **MCP OAuth 2.0** — Authorization Code with PKCE flow, OS keychain token storage via `keyring`, automatic refresh, browser-based authorization (feature-gated: `oauth`)
+- **Tool search** — keyword-based tool discovery for large tool sets (auto-enabled when >15 tools); searches names and descriptions, returns matching schemas
+- `zavora lsp-init` command to auto-detect and configure language servers
+
+### Changed
+
+- ADK-Rust upgraded from 0.3.2 to 0.5.0 (local path deps for ergonomics fixes)
+- Runner uses `Runner::builder()` instead of struct literal (future-proof against new fields)
+- Streaming uses `run_str()` instead of `UserId`/`SessionId` newtype conversions
+- MCP server uses `SimpleToolContext` instead of 40-line boilerplate
+- Tools declare `is_read_only()` and `is_concurrency_safe()` via `FunctionTool` builders
+- System prompt updated with tool guidelines for file_edit, glob, grep, web_fetch
+
 ## [1.1.3] — 2026-02-15
 
 ### Added
