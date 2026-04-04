@@ -27,6 +27,7 @@ adk-skill = { path = "../adk-rust/adk-skill" }
 adk-memory = { path = "../adk-rust/adk-memory", features = ["sqlite-memory"] }
 adk-telemetry = { path = "../adk-rust/adk-telemetry" }
 adk-guardrail = { path = "../adk-rust/adk-guardrail" }
+adk-plugin = { path = "../adk-rust/adk-plugin" }
 adk-tool = { path = "../adk-rust/adk-tool", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }

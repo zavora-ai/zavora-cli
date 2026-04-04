@@ -278,6 +278,7 @@ pub fn fs_write_tool_response_with_root(args: &Value, workspace_root: &Path) -> 
             }
         }
         FsWriteMode::Overwrite => {
+            let _ = crate::file_history::snapshot_file(&resolved);
             if let Some(parent) = resolved.parent()
                 && std::fs::create_dir_all(parent).is_err()
             {
@@ -297,6 +298,7 @@ pub fn fs_write_tool_response_with_root(args: &Value, workspace_root: &Path) -> 
                 })
         }
         FsWriteMode::Append => {
+            let _ = crate::file_history::snapshot_file(&resolved);
             if let Some(parent) = resolved.parent()
                 && std::fs::create_dir_all(parent).is_err()
             {

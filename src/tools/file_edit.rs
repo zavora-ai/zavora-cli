@@ -97,6 +97,9 @@ pub fn file_edit_tool_response(args: &Value) -> Value {
     // Preserve line endings
     let updated = preserve_line_endings(&original, &updated);
 
+    // Snapshot before write (for /undo)
+    let _ = crate::file_history::snapshot_file(&resolved);
+
     // Write
     if std::fs::write(&resolved, updated.as_bytes()).is_err() {
         return error_payload(file_path, "io_error", format!("failed to write '{}'", file_path));

@@ -56,6 +56,7 @@ pub enum ChatCommand {
     Ralph(String),
     Allow(String),
     Deny(String),
+    Undo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,7 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
                 ParsedChatCommand::Command(ChatCommand::Deny(arg.to_string()))
             }
         }
+        "undo" => ParsedChatCommand::Command(ChatCommand::Undo),
         "provider" => {
             if arg.is_empty() {
                 ParsedChatCommand::MissingArgument {
@@ -171,6 +173,7 @@ pub fn print_chat_help() {
     println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
     println!("  {CYAN}/allow{RESET} <pattern>    {DIM}auto-approve tool pattern for session{RESET}");
     println!("  {CYAN}/deny{RESET} <pattern>     {DIM}deny tool pattern for session{RESET}");
+    println!("  {CYAN}/undo{RESET}              {DIM}restore last modified file{RESET}");
     println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
     println!(
         "  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}"
@@ -963,11 +966,15 @@ pub async fn dispatch_chat_command(
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Deny(pattern) => {
-            // For deny, we trust the tool name so it auto-approves, but the
-            // ConfirmingTool will still show the action. A full deny would
-            // require rebuilding the tool set. For now, print a warning.
             println!("Session rule noted: deny '{pattern}'");
             println!("  Note: Denied patterns take effect on next tool rebuild (/agent).");
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Undo => {
+            match crate::file_history::undo_last() {
+                Ok(msg) => println!("✓ {msg}"),
+                Err(e) => println!("Cannot undo: {e}"),
+            }
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Ralph(prompt) => {

@@ -10,6 +10,7 @@ pub mod context;
 pub mod doctor;
 pub mod error;
 pub mod eval;
+pub mod file_history;
 pub mod guardrail;
 pub mod hooks;
 pub mod lsp;

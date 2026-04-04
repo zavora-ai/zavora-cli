@@ -6979,6 +6979,7 @@ version = "1.1.5"
 dependencies = [
  "adk-guardrail 0.5.0",
  "adk-memory 0.5.0",
+ "adk-plugin 0.5.0",
  "adk-ralph",
  "adk-rust 0.5.0",
  "adk-session 0.5.0",
