@@ -5,7 +5,7 @@
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::checkpoint::CheckpointStore;
 use crate::context::{BudgetLevel, ContextUsage};
@@ -444,14 +444,20 @@ pub fn resume_spinner() {
 pub struct Spinner {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    token_count: Arc<AtomicU64>,
 }
 
 impl Spinner {
     /// Start a spinner with the given message (e.g. "Thinking...").
     /// Picks a random multilingual verb and shows tips after 5 seconds.
+    /// Displays elapsed time and token count in Claude Code style:
+    ///   ✦ Kufikiri… (thought for 12s · 847 tokens)
+    ///     💡 Use /compact to free up context
     pub fn start(message: &str) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let token_count = Arc::new(AtomicU64::new(0));
+        let token_clone = token_count.clone();
         let msg = message.to_string();
         let (verb, lang) = random_thinking_verb();
         let verb = verb.to_string();
@@ -461,24 +467,40 @@ impl Spinner {
             let mut i = 0;
             let start = std::time::Instant::now();
             let tip = random_tip();
-            let mut tip_shown = false;
+            let mut phase = 0u8; // 0=initial, 1=verb+stats, 2=verb+stats+tip
 
             while !stop_clone.load(Ordering::Relaxed) {
                 if !SPINNER_PAUSED.load(Ordering::Relaxed) {
                     let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
-                    let elapsed = start.elapsed().as_secs();
+                    let elapsed = start.elapsed();
+                    let secs = elapsed.as_secs();
+                    let tokens = token_clone.load(Ordering::Relaxed);
 
-                    // After 5s, show the multilingual verb + tip
-                    if elapsed >= 5 && !tip_shown {
-                        tip_shown = true;
+                    let new_phase = if secs >= 8 { 2 } else if secs >= 3 { 1 } else { 0 };
+
+                    // Clear previous lines when transitioning
+                    if new_phase > phase {
+                        if phase >= 1 {
+                            // Clear tip line if it existed
+                            eprint!("\n\r\x1b[2K\x1b[1A");
+                        }
+                        phase = new_phase;
                     }
 
-                    if tip_shown {
-                        eprint!("\r\x1b[2K{DIM}{frame} {verb}... {RESET}{DIM}({lang}){RESET}");
-                        eprint!("\n\r\x1b[2K  {DIM}💡 {tip}{RESET}");
-                        eprint!("\x1b[1A"); // move cursor back up
-                    } else {
-                        eprint!("\r\x1b[2K{DIM}{frame} {msg}{RESET}");
+                    match phase {
+                        0 => {
+                            eprint!("\r\x1b[2K{DIM}{frame} {msg}{RESET}");
+                        }
+                        1 => {
+                            let stats = format_stats(secs, tokens);
+                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}({lang} · {stats}){RESET}");
+                        }
+                        _ => {
+                            let stats = format_stats(secs, tokens);
+                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}({lang} · {stats}){RESET}");
+                            eprint!("\n\r\x1b[2K  {DIM}💡 {tip}{RESET}");
+                            eprint!("\x1b[1A");
+                        }
                     }
                     let _ = io::stderr().flush();
                 }
@@ -487,7 +509,7 @@ impl Spinner {
             }
             // Clear spinner lines
             eprint!("\r\x1b[2K");
-            if tip_shown {
+            if phase >= 2 {
                 eprint!("\n\r\x1b[2K\x1b[1A");
             }
             let _ = io::stderr().flush();
@@ -496,7 +518,18 @@ impl Spinner {
         Self {
             stop,
             handle: Some(handle),
+            token_count,
         }
+    }
+
+    /// Update the token count displayed by the spinner.
+    pub fn set_tokens(&self, count: u64) {
+        self.token_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Add to the token count.
+    pub fn add_tokens(&self, delta: u64) {
+        self.token_count.fetch_add(delta, Ordering::Relaxed);
     }
 
     /// Stop the spinner and clear the line.
@@ -505,6 +538,19 @@ impl Spinner {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+fn format_stats(secs: u64, tokens: u64) -> String {
+    let time = if secs < 60 {
+        format!("{}s", secs)
+    } else {
+        format!("{}m{}s", secs / 60, secs % 60)
+    };
+    if tokens > 0 {
+        format!("{} · {} tokens", time, tokens)
+    } else {
+        time
     }
 }
 

@@ -337,6 +337,7 @@ pub async fn run_prompt_streaming(
     let mut printed_any_output = false;
     let mut spinner = Some(Spinner::start("Thinking..."));
     let mut current_author = String::new();
+    let mut total_response_chars: u64 = 0;
 
     // Winnow streaming markdown state
     let mut md_buf = String::new();
@@ -372,6 +373,14 @@ pub async fn run_prompt_streaming(
         }
 
         emit_tool_lifecycle_events(&event, telemetry);
+
+        // Track token count on spinner (~4 chars per token estimate)
+        if !text.is_empty() {
+            total_response_chars += text.len() as u64;
+            if let Some(ref s) = spinner {
+                s.set_tokens(total_response_chars / 4);
+            }
+        }
 
         // Show agent transfers and tool calls
         if event.author != "user" && event.author != current_author && !current_author.is_empty() {
