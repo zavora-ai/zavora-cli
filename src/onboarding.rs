@@ -1,8 +1,39 @@
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+
+/// Create `.skills/` with a sample skill if it doesn't exist.
+pub fn ensure_skills_dir() {
+    let skills_dir = Path::new(".skills");
+    if skills_dir.exists() {
+        return;
+    }
+    if std::fs::create_dir_all(skills_dir).is_err() {
+        return;
+    }
+    let sample = r#"---
+name: sample-skill
+description: A sample skill. Edit this file or add new .md files to .skills/ to teach Zavora new capabilities.
+---
+
+# Sample Skill
+
+This is a placeholder skill. Replace this with instructions for your use case.
+
+Skills are automatically discovered and injected into the agent's context
+when their description matches the user's request.
+
+## Format
+
+- `name`: short identifier (lowercase, hyphens)
+- `description`: when the agent should use this skill (trigger conditions)
+- Body: markdown instructions the agent follows
+"#;
+    let _ = std::fs::write(skills_dir.join("sample-skill.md"), sample);
+}
 
 use crate::chat::ModelPickerOption;
 use crate::cli::Provider;

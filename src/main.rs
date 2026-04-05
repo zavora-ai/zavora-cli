@@ -71,11 +71,30 @@ async fn run_cli(cli: Cli) -> Result<()> {
         &cli.log_filter,
         matches!(cli.command, Some(Commands::Mcp { command: McpCommands::Serve })),
     )?;
-    let profiles = load_profiles(&cli.config_path)?;
+    let mut profiles = load_profiles(&cli.config_path)?;
 
     // Initialize SQLite memory (eager, before any tool use)
     if let Err(e) = zavora_cli::agents::memory::init().await {
         tracing::warn!("Memory init failed: {e}");
+    }
+
+    // Auto-setup: scaffold .skills/ with sample on first run
+    zavora_cli::onboarding::ensure_skills_dir();
+
+    // Auto-setup: trigger onboarding wizard for commands that need a provider
+    let needs_provider = matches!(
+        cli.command,
+        None | Some(Commands::Ask { .. }) | Some(Commands::Chat)
+            | Some(Commands::Workflow { .. }) | Some(Commands::ReleasePlan { .. })
+            | Some(Commands::Ralph { .. })
+    );
+    if needs_provider {
+        let workspace = std::env::current_dir().unwrap_or_default();
+        if zavora_cli::theme::is_first_run(&workspace) && !profiles.profiles.contains_key("default") {
+            let result = run_onboarding_wizard(None)?;
+            persist_onboarding_config(&result, &cli.config_path)?;
+            profiles = load_profiles(&cli.config_path)?;
+        }
     }
 
     let agent_paths = default_agent_paths();

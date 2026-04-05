@@ -28,7 +28,7 @@ use crate::session::build_session_service;
 use crate::streaming::{run_prompt_streaming_with_retrieval, run_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
 use crate::theme::{
-    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, is_first_run, print_startup_banner,
+    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, print_startup_banner,
     suggest_command,
 };
 use crate::todos;
@@ -1040,29 +1040,7 @@ pub async fn run_chat(
         println!();
     }
     let mut rl = rustyline::DefaultEditor::new().context("failed to initialize readline")?;
-
-    // First-run onboarding
     let workspace = std::env::current_dir().unwrap_or_default();
-    if is_first_run(&workspace) {
-        let result = crate::onboarding::run_onboarding_wizard(None)?;
-        crate::onboarding::persist_onboarding_config(&result, &cfg.config_path)?;
-
-        // Reload config so the chat session uses the new provider/model
-        let profiles = crate::config::load_profiles(&cfg.config_path)?;
-        let profile = profiles
-            .profiles
-            .get(&cfg.profile)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(p) = profile.provider {
-            cfg.provider = p;
-        }
-        if let Some(m) = profile.model {
-            cfg.model = Some(m);
-        }
-        cfg.api_key = profile.api_key;
-        cfg.ollama_host = profile.ollama_host;
-    }
 
     // Bootstrap: Get time and memory context once at startup for personalized greeting
     let time_context = TimeAgent::handshake();

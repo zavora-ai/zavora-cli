@@ -36,8 +36,9 @@ pub fn validate_model_for_provider(provider: Provider, model_name: &str) -> Resu
 pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, String)> {
     let provider = match cfg.provider {
         Provider::Auto => detect_provider().context(
-            "no provider could be auto-detected. Set one of GOOGLE_API_KEY, OPENAI_API_KEY, \
-             ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY, or use --provider ollama",
+            "no provider could be auto-detected. Run 'zavora-cli setup' or set one of \
+             GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY, \
+             or use --provider ollama",
         )?,
         p => p,
     };
@@ -45,7 +46,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
     match provider {
         Provider::Gemini => {
             let api_key = std::env::var("GOOGLE_API_KEY")
-                .context("GOOGLE_API_KEY is required for Gemini provider")?;
+                .context("GOOGLE_API_KEY is required for Gemini. Run 'zavora-cli setup' to configure.")?;
             let model_name = cfg
                 .model
                 .clone()
@@ -56,7 +57,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
         }
         Provider::Openai => {
             let api_key = std::env::var("OPENAI_API_KEY")
-                .context("OPENAI_API_KEY is required for OpenAI provider")?;
+                .context("OPENAI_API_KEY is required for OpenAI. Run 'zavora-cli setup' to configure.")?;
             let model_name = cfg
                 .model
                 .clone()
@@ -67,7 +68,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
         }
         Provider::Anthropic => {
             let api_key = std::env::var("ANTHROPIC_API_KEY")
-                .context("ANTHROPIC_API_KEY is required for Anthropic provider")?;
+                .context("ANTHROPIC_API_KEY is required for Anthropic. Run 'zavora-cli setup' to configure.")?;
             let model_name = cfg
                 .model
                 .clone()
@@ -78,7 +79,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
         }
         Provider::Deepseek => {
             let api_key = std::env::var("DEEPSEEK_API_KEY")
-                .context("DEEPSEEK_API_KEY is required for DeepSeek provider")?;
+                .context("DEEPSEEK_API_KEY is required for DeepSeek. Run 'zavora-cli setup' to configure.")?;
             let model_name = cfg
                 .model
                 .clone()
@@ -89,7 +90,7 @@ pub fn resolve_model(cfg: &RuntimeConfig) -> Result<(Arc<dyn Llm>, Provider, Str
         }
         Provider::Groq => {
             let api_key = std::env::var("GROQ_API_KEY")
-                .context("GROQ_API_KEY is required for Groq provider")?;
+                .context("GROQ_API_KEY is required for Groq. Run 'zavora-cli setup' to configure.")?;
             let model_name = cfg
                 .model
                 .clone()
