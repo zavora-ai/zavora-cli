@@ -1281,5 +1281,9 @@ pub async fn run_chat(
         }
     }
 
+    // Cleanup browser session if started
+    #[cfg(feature = "browser")]
+    crate::tools::browser::cleanup_browser().await;
+
     Ok(())
 }

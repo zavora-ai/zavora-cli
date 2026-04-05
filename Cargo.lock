@@ -7105,7 +7105,6 @@ dependencies = [
  "adk-browser",
  "adk-guardrail 0.5.0",
  "adk-memory 0.5.0",
- "adk-plugin 0.5.0",
  "adk-rag",
  "adk-ralph",
  "adk-rust 0.5.0",

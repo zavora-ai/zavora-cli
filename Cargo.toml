@@ -31,7 +31,6 @@ adk-memory = { path = "../adk-rust/adk-memory", features = ["sqlite-memory"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 adk-telemetry = { path = "../adk-rust/adk-telemetry" }
 adk-guardrail = { path = "../adk-rust/adk-guardrail" }
-adk-plugin = { path = "../adk-rust/adk-plugin" }
 adk-browser = { path = "../adk-rust/adk-browser", optional = true }
 adk-sandbox = { path = "../adk-rust/adk-sandbox", optional = true }
 adk-rag = { path = "../adk-rust/adk-rag", optional = true }

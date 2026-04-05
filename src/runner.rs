@@ -568,6 +568,11 @@ pub async fn build_runner_with_session_service(
         .artifact_service(artifact_service)
         .run_config(run_config.unwrap_or_default());
 
+    // Wire shared memory singleton (initialized in main.rs)
+    if let Some(mem) = crate::agents::memory::adapter() {
+        builder = builder.memory_service(mem);
+    }
+
     if let Some(cc) = compaction_config {
         builder = builder.compaction_config(cc);
     }

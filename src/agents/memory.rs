@@ -27,6 +27,11 @@ fn get_memory() -> Result<Arc<adk_memory::MemoryServiceAdapter>> {
     MEMORY.get().cloned().context("memory not initialized — call memory::init() first")
 }
 
+/// Get the shared memory adapter for wiring into Runner.
+pub fn adapter() -> Option<Arc<dyn adk_rust::Memory>> {
+    MEMORY.get().map(|m| m.clone() as Arc<dyn adk_rust::Memory>)
+}
+
 pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
     use adk_rust::Memory;
     if query.trim().is_empty() {
@@ -48,11 +53,11 @@ pub async fn recall(query: &str, limit: usize) -> Result<Vec<String>> {
 
 /// List all memories (bypasses FTS5 which can't match empty queries).
 async fn recall_all(limit: usize) -> Result<Vec<String>> {
-    std::fs::create_dir_all(".zavora").ok();
+    use sqlx::Row;
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{DB_PATH}"))
         .await
         .context("failed to open memory db")?;
-    let rows: Vec<(String,)> = sqlx::query_as(
+    let rows = sqlx::query(
         "SELECT content_text FROM memory_entries WHERE app_name = ? AND user_id = ? ORDER BY timestamp DESC LIMIT ?",
     )
     .bind(APP_NAME)
@@ -61,7 +66,7 @@ async fn recall_all(limit: usize) -> Result<Vec<String>> {
     .fetch_all(&pool)
     .await
     .map_err(|e| anyhow::anyhow!("recall_all failed: {e}"))?;
-    Ok(rows.into_iter().map(|(t,)| t).collect())
+    Ok(rows.iter().map(|r| r.get::<String, _>("content_text")).collect())
 }
 
 pub async fn remember(text: &str) -> Result<()> {
