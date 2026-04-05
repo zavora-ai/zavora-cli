@@ -8,22 +8,23 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- **adk-skill** integration — auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/`; `zavora skills list` CLI command; tested with 17 Anthropic skills
-- **adk-memory** integration — SQLite-backed semantic memory via `SqliteMemoryService`; auto-migrates from `memory.json` on first run; `/memory recall|remember|forget` commands use SQLite
-- **adk-telemetry** integration — OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `shutdown_telemetry()` on exit flushes spans
-- **adk-guardrail** integration — `PiiRedactor` (emails, phones, SSNs, credit cards) + `ContentFilter` (blocked keywords); redact mode chains PII then custom terms
-- **adk-plugin** dependency — plugin manager infrastructure for future hooks
-- **File history** — snapshots files before `fs_write` and `file_edit`; max 20 per file; `/undo` command restores last modified file
-- **adk-browser** integration — 40+ browser automation tools via WebDriver (feature: `browser`); lazy headless session; navigate, click, type, extract, screenshot, JS eval, cookies, tabs
-- **adk-sandbox** integration — sandboxed code execution via ProcessBackend (feature: `sandbox`); Python, Node.js, Rust; 30s timeout
-- **adk-rag** integration — RAG pipeline with InMemoryVectorStore + bag-of-words embedding (feature: `rag`); `zavora rag ingest <path>` CLI command; RecursiveChunker (512/100)
+- **adk-skill** — auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/`; `zavora skills list` CLI; tested with 17 Anthropic skills
+- **adk-memory** — SQLite FTS5 semantic memory via `SqliteMemoryService`; shared singleton for Runner + chat commands; `/memory recall` (empty = list all), `/memory remember`, `/memory forget`
+- **adk-telemetry** — composable OTLP layer via `build_otlp_layer()` + console tracing on same subscriber; `shutdown_telemetry()` on exit
+- **adk-guardrail** — `PiiRedactor` (emails, phones, SSNs, credit cards) + `ContentFilter` (blocked keywords); redact mode chains PII then custom terms
+- **File history** — snapshots files before `fs_write` and `file_edit` (direct hooks); max 20 per file; `/undo` command restores last modified file
+- **adk-browser** — 40+ browser automation tools via WebDriver (feature: `browser`); lazy headless session; cleanup on chat exit
+- **adk-sandbox** — sandboxed code execution via ProcessBackend (feature: `sandbox`); Python, Node.js, Rust
+- **adk-rag** — RAG pipeline with InMemoryVectorStore + bag-of-words embedding (feature: `rag`); `zavora rag ingest <path>` CLI; RecursiveChunker (512/100)
 
 ### Changed
 
-- Memory backend migrated from hand-rolled JSON to `adk-memory` SQLite (FTS5-based search)
-- Guardrail implementation replaced with `adk-guardrail` PiiRedactor + ContentFilter
-- Runner uses `with_auto_skills_mut()` (borrow-safe, non-consuming)
-- Orchestrator uses async memory API instead of direct JSON I/O
+- Memory: single `OnceLock` singleton initialized in `main.rs`, shared by Runner (`.memory_service()`) and chat/tool commands — replaces hand-rolled JSON
+- Guardrail: `adk-guardrail` PiiRedactor + ContentFilter replaces hand-rolled regex
+- Runner: `with_auto_skills_mut()` (borrow-safe) for skill injection
+- Telemetry: `build_otlp_layer()` composes with existing subscriber (no takeover)
+- Orchestrator: async memory API instead of direct JSON I/O
+- Architecture: memory singleton wired into Runner, browser cleanup on exit, removed unused adk-plugin dep
 
 ### Previous
 

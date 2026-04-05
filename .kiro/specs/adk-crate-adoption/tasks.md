@@ -79,12 +79,15 @@
 
 ---
 
+## Architecture Alignment (post-Phase 3)
+
+- [x] Memory singleton wired into Runner via `.memory_service(adapter())`
+- [x] Removed `adk-plugin` dep (zero code usage; file history uses direct hooks)
+- [x] Browser cleanup wired at end of chat loop (feature-gated)
+- [x] Confirmed retrieval.rs (prompt enrichment) and rag.rs (LLM tool) serve different purposes — both kept
+
 ## Feedback Filed
 
-- Issue #260: Skill + memory improvements (7 items) → **RESOLVED** by adk-rust team
-- Issue #262: Phase 1-2 integration feedback (5 items) → **OPEN**
-  1. SQLx async_trait lifetime issues (HIGH)
-  2. init_telemetry() subscriber conflict (MEDIUM)
-  3. BeforeToolCallback missing tool name/args (MEDIUM)
-  4. harmful_content() false positives for dev terms (LOW)
-  5. PluginBuilder documentation (LOW)
+- Issue #260: Skill + memory improvements (7 items) → **RESOLVED** → adopted
+- Issue #262: Phase 1-2 integration feedback (5 items) → **RESOLVED** → adopted
+- Issue #264: Follow-up (adapter clone, composable OTLP) → **RESOLVED** → adopted

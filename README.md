@@ -45,33 +45,14 @@ cargo install --path .
 ```
 
 Requires Rust 1.85+ (`rustup`, `cargo`) for cargo/source builds.
-Maintainer distribution workflow: `docs/DISTRIBUTION.md`.
-
-### Optional Features
-
-Some tools require opt-in feature flags at build time:
-
-```bash
-# Web fetch (HTTP→markdown, requires reqwest + htmd)
-cargo install zavora-cli --features web-fetch
-
-# LSP code intelligence (requires lsp-types)
-cargo install zavora-cli --features lsp
-
-# MCP OAuth 2.0 (requires keyring + crypto deps)
-cargo install zavora-cli --features oauth
-
-# All optional features
-cargo install zavora-cli --features "web-fetch,lsp,oauth"
-```
 
 ## Quick Start
 
 1. Export an API key for any supported provider:
 
 ```bash
-export OPENAI_API_KEY="sk-..."
-# or: GOOGLE_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY
+export GOOGLE_API_KEY="..."
+# or: OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY
 ```
 
 Or use Ollama locally with no key needed:
@@ -89,28 +70,65 @@ zavora-cli chat
 ## Usage
 
 ```bash
-# Ask a one-shot question
+# Interactive chat (default when no subcommand)
+zavora-cli chat
+zavora-cli                          # same as above
+
+# One-shot question
 zavora-cli ask "Explain Rust ownership"
 
-# Interactive chat with a specific model
-zavora-cli --provider openai --model gpt-4.1 chat
+# Specific provider/model
+zavora-cli --provider gemini --model gemini-2.5-flash chat
 
 # Workflows
 zavora-cli workflow sequential "Plan an MVP rollout"
 zavora-cli workflow graph "Draft a release plan with risks"
 
-# Health check
+# Skills
+zavora-cli skills list              # list discovered skills
+
+# RAG (requires --features rag)
+zavora-cli rag ingest ./docs/       # ingest documents
+
+# Ralph autonomous dev pipeline
+zavora-cli ralph "Build a REST API for user management"
+
+# Management
+zavora-cli profiles list
+zavora-cli agents list
+zavora-cli sessions list
+zavora-cli mcp list
 zavora-cli doctor
+```
+
+## Architecture
+
+```
+main.rs
+  ├── init_tracing()              console + optional OTLP layer (composable)
+  ├── memory::init()              single SQLite pool, OnceLock singleton
+  ├── resolve_runtime_tools()     builtin + MCP + browser (feature-gated)
+  └── build_runner()
+        ├── .memory_service()     ← shared memory singleton
+        ├── .with_auto_skills_mut()  .skills/ + .claude/skills/
+        └── .compaction_config()
+
+Memory (single source of truth):
+  main.rs::init() → OnceLock<Arc<MemoryServiceAdapter>>
+       ↓                          ↓
+  Runner (.memory_service)    /memory commands + memory_agent tool
+
+Two retrieval layers:
+  retrieval.rs    auto prompt enrichment (before LLM call)
+  tools/rag.rs    LLM-callable on-demand retrieval (feature-gated)
 ```
 
 ## Multi-Agent Orchestration
 
-The assistant uses a **capability + workflow** agent architecture by default:
-
 **Capability Agents** (callable as tools):
 - **time_agent** — Current time context, parse relative dates ("next Friday", "in 2 days")
-- **memory_agent** — Persistent learnings across sessions (stored in `.zavora/memory.json`)
-- **search_agent** — Web search via Gemini's Google Search (requires Gemini model)
+- **memory_agent** — Persistent learnings across sessions (SQLite-backed, FTS5 search)
+- **search_agent** — Web search via Gemini's Google Search (requires Gemini provider)
 
 **Workflow Agents** (execution patterns):
 - **file_search_agent** — Iterative file discovery with saturation detection
@@ -122,26 +140,14 @@ The assistant uses a **capability + workflow** agent architecture by default:
 Bootstrap (time + memory) → Gather (search/files) → Plan → Execute → Verify → Commit
 ```
 
-The orchestrator automatically:
-- Recalls relevant memories at the start of tasks
-- Uses time context for time-sensitive work
-- Delegates to workflow agents for complex multi-step tasks
-- Stores high-signal learnings after successful completions
-
-The LLM can call capability agents as tools, or you can use chat commands:
-- `/memory recall|remember|forget` — Manage persistent learnings
-- `/time [query]` — Get time context or parse dates
-- `/orchestrate <goal>` — Run full orchestration loop
-
 ## ADK Crate Integrations
 
 | Crate | Purpose | Integration |
 |-------|---------|-------------|
 | `adk-skill` | Skill system | Auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/` |
-| `adk-memory` | Semantic memory | SQLite-backed via `SqliteMemoryService`, auto-migrates from JSON |
-| `adk-telemetry` | Observability | OTLP export via `OTEL_EXPORTER_OTLP_ENDPOINT`, console fallback |
+| `adk-memory` | Semantic memory | SQLite FTS5 via `SqliteMemoryService`; shared singleton for Runner + chat |
+| `adk-telemetry` | Observability | Composable OTLP layer via `OTEL_EXPORTER_OTLP_ENDPOINT`; console fallback |
 | `adk-guardrail` | Safety | `PiiRedactor` (email/phone/SSN/CC) + `ContentFilter` (blocked keywords) |
-| `adk-plugin` | Plugin system | File history snapshots before writes, `/undo` command |
 | `adk-browser` | Browser automation | 40+ WebDriver tools (feature: `browser`) |
 | `adk-sandbox` | Code execution | Sandboxed Python/Node/Rust via ProcessBackend (feature: `sandbox`) |
 | `adk-rag` | RAG pipeline | InMemoryVectorStore + bag-of-words embedding (feature: `rag`) |
@@ -158,18 +164,27 @@ description: When to use this skill
 # Instructions here
 ```
 
-List discovered skills: `zavora-cli skills list`
+Compatible with [Anthropic's skills](https://github.com/anthropics/skills) format.
 
-### Feature Flags
+### File History and /undo
 
-| Feature | Crate | What it enables |
-|---------|-------|----------------|
-| `browser` | `adk-browser` | 40+ browser automation tools via WebDriver |
-| `sandbox` | `adk-sandbox` | Sandboxed code execution (Python, Node.js, Rust) |
-| `rag` | `adk-rag` | RAG pipeline with `zavora rag ingest <path>` |
-| `web-fetch` | — | HTTP fetch with HTML→markdown |
-| `lsp` | — | Language Server Protocol integration |
-| `oauth` | — | MCP OAuth PKCE flow |
+Every `fs_write` (overwrite/append) and `file_edit` automatically snapshots the file before modification. Snapshots are stored in `.zavora/file_history/` (max 20 per file, oldest pruned). Use `/undo` in chat to restore the last modified file.
+
+## Feature Flags
+
+| Feature | What it enables |
+|---------|----------------|
+| `browser` | 40+ browser automation tools via WebDriver (`adk-browser`) |
+| `sandbox` | Sandboxed code execution: Python, Node.js, Rust (`adk-sandbox`) |
+| `rag` | RAG pipeline with `zavora rag ingest <path>` (`adk-rag`) |
+| `web-fetch` | HTTP fetch with HTML→markdown conversion |
+| `lsp` | Language Server Protocol: definitions, references, hover, symbols |
+| `oauth` | MCP OAuth 2.0 PKCE flow with OS keychain storage |
+
+```bash
+# Build with all optional features
+cargo install zavora-cli --features "web-fetch,lsp,oauth,browser,sandbox,rag"
+```
 
 ## Chat Commands
 
@@ -180,7 +195,9 @@ List discovered skills: `zavora-cli skills list`
 | `/usage` | Context window usage breakdown by author |
 | `/compact` | Compact session history to reclaim context |
 | `/autocompact` | Toggle automatic compaction (threshold-based) |
-| `/memory <cmd>` | recall\|remember\|forget persistent learnings |
+| `/memory recall [query]` | Search memories (empty = list all) |
+| `/memory remember <text>` | Store a persistent memory |
+| `/memory forget <query>` | Delete matching memories |
 | `/time [query]` | Get time context or parse relative dates |
 | `/orchestrate <goal>` | Run full agent orchestration loop |
 | `/tools` | List active built-in and MCP tools |
@@ -205,21 +222,26 @@ List discovered skills: `zavora-cli skills list`
 
 ## Built-in Tools
 
-| Tool | Purpose |
-|------|---------|
-| `fs_read` | Read files and directories with workspace path policy |
-| `fs_write` | Create, overwrite, append, or patch files (confirmation required) |
-| `file_edit` | Surgical `old_string → new_string` replacement with diff output (preferred for edits) |
-| `execute_bash` | Run shell commands with 20-check security pipeline (read-only commands auto-approved) |
-| `glob` | Find files by glob pattern, respects `.gitignore` (max 100 results) |
-| `grep` | Search file contents via ripgrep with context lines, pagination, output modes |
-| `github_ops` | GitHub operations via `gh` CLI (issues, PRs, projects) |
-| `todo_list` | Create/complete/view/list/delete task lists (persisted to `.zavora/todos/`) |
-| `time_agent` | Current time context and relative date parsing |
-| `memory_agent` | Persistent learnings storage and recall |
-| `web_fetch` | Fetch URLs as markdown with SSRF protection (feature: `web-fetch`) |
-| `lsp` | Code intelligence: definitions, references, hover, symbols (feature: `lsp`) |
-| `tool_search` | Keyword discovery of available tools (auto-enabled when >15 tools) |
+| Tool | Purpose | Read-only |
+|------|---------|-----------|
+| `current_unix_time` | Current UTC timestamp | ✅ |
+| `fs_read` | Read files and directories with workspace path policy | ✅ |
+| `fs_write` | Create, overwrite, append, or patch files | ❌ |
+| `file_edit` | Surgical `old_string → new_string` replacement with diff output | ❌ |
+| `execute_bash` | Run shell commands with 20-check security pipeline | ❌ |
+| `glob` | Find files by glob pattern, respects `.gitignore` | ✅ |
+| `grep` | Search file contents via ripgrep with context lines | ✅ |
+| `github_ops` | GitHub operations via `gh` CLI | ❌ |
+| `todo_list` | Create/complete/view/list/delete task lists | ❌ |
+| `time_agent` | Current time context and relative date parsing | ✅ |
+| `memory_agent` | Persistent learnings: recall, remember, forget | ❌ |
+| `release_template` | Agile release checklist skeleton | ✅ |
+| `tool_search` | Keyword discovery of available tools (auto-enabled >15 tools) | ✅ |
+| `web_fetch` | Fetch URLs as markdown (feature: `web-fetch`) | ✅ |
+| `lsp` | Code intelligence: 9 operations, 7 languages (feature: `lsp`) | ✅ |
+| `code_execute` | Sandboxed code execution (feature: `sandbox`) | ❌ |
+| `rag_search` | RAG retrieval from ingested documents (feature: `rag`) | ✅ |
+| `browser_*` | 40+ browser automation tools (feature: `browser`) | ❌ |
 
 ## Context Management
 
@@ -228,7 +250,6 @@ List discovered skills: `zavora-cli skills list`
 - `/compact` manually summarizes history to reclaim space
 - `/autocompact` toggles automatic compaction (default: enabled at 75% → 10%)
 - Auto-compaction uses snip-first strategy (removes stale tool results) then LLM summary fallback
-- Snip deduplicates file reads (keeps most recent per path) and removes large/failed tool results
 - `/delegate <task>` forks an isolated sub-agent with fresh context and 5-minute timeout
 
 ## Configuration
@@ -237,8 +258,8 @@ Runtime defaults live in `.zavora/config.toml`:
 
 ```toml
 [profiles.default]
-provider = "openai"
-model = "gpt-4.1"
+provider = "gemini"
+model = "gemini-2.5-flash"
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/sessions.db"
 retrieval_backend = "disabled"
@@ -249,45 +270,20 @@ compaction_target = 0.10
 telemetry_enabled = true
 ```
 
-```bash
-zavora-cli profiles list
-zavora-cli --profile ops profiles show
-```
+### Telemetry
 
-### Agent Catalogs
-
-Configure agent personas separately from profiles. Precedence: implicit `default` → global `~/.zavora/agents.toml` → local `.zavora/agents.toml`.
-
-```toml
-[agents.coder]
-description = "Code-focused assistant"
-provider = "openai"
-model = "gpt-4.1"
-tool_confirmation_mode = "always"
-allow_tools = ["fs_read", "fs_write", "execute_bash"]
-```
+Console tracing is always active. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable OpenTelemetry export to Jaeger, Datadog, etc. Both layers compose on the same subscriber — no conflict.
 
 ```bash
-zavora-cli agents list
-zavora-cli --agent reviewer ask "Review this patch"
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 zavora-cli chat
 ```
 
-## Advanced Features
+### Guardrails
 
-### Tool Policy and Hooks
+PII redaction (emails, phones, SSNs, credit cards) is automatic in redact mode. Custom blocked keywords are configurable.
 
-```toml
-[profiles.default]
-tool_confirmation_mode = "mcp-only"  # never | mcp-only | always
-tool_timeout_secs = 45
-tool_retry_attempts = 2
-
-[[profiles.default.hooks.pre_tool]]
-name = "block-rm"
-match_tool = "execute_bash"
-match_args = "rm -rf"
-action = "block"
-message = "Destructive rm blocked by hook policy"
+```bash
+zavora-cli --guardrail-input-mode block --guardrail-output-mode redact ask "Summarize this"
 ```
 
 ### MCP Integration
@@ -295,15 +291,6 @@ message = "Destructive rm blocked by hook policy"
 **As a client** — connect to HTTP or stdio MCP servers:
 
 ```toml
-# HTTP server
-[[profiles.ops.mcp_servers]]
-name = "ops-tools"
-endpoint = "https://mcp.example.com/ops"
-timeout_secs = 15
-auth_bearer_env = "OPS_MCP_TOKEN"
-tool_allowlist = ["search_incidents", "get_runbook"]
-
-# Stdio server (local process)
 [[profiles.ops.mcp_servers]]
 name = "filesystem"
 command = "npx"
@@ -313,12 +300,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 **As a server** — expose zavora's tools to any MCP client:
 
 ```bash
-zavora-cli mcp serve   # stdio MCP server
-```
-
-Claude Desktop / Kiro CLI config:
-```json
-{ "zavora": { "command": "zavora-cli", "args": ["mcp", "serve"] } }
+zavora-cli mcp serve
 ```
 
 ### Permission Rules
@@ -332,35 +314,7 @@ always_ask = ["web_fetch:*", "github_ops:*"]
 
 Session-level: `/allow execute_bash:cargo *` and `/deny fs_write:*.env`
 
-### MCP OAuth (feature: `oauth`)
-
-```toml
-[[profiles.default.mcp_servers]]
-name = "github-mcp"
-endpoint = "https://mcp.github.com"
-[profiles.default.mcp_servers.oauth]
-client_id = "abc123"
-callback_port = 8912
-auth_server_metadata_url = "https://mcp.github.com/.well-known/oauth-authorization-server"
-```
-
-Tokens are stored in the OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager) with file fallback to `.zavora/tokens/`.
-
-### Guardrails
-
-Independent input/output content policy (`disabled` | `observe` | `block` | `redact`):
-
-```bash
-zavora-cli --guardrail-input-mode block --guardrail-output-mode redact ask "Summarize this"
-```
-
-### Retrieval
-
-```bash
-zavora-cli --retrieval-backend local --retrieval-doc-path ./docs/knowledge.md ask "What are our standards?"
-```
-
-### Server Mode and A2A
+### Server Mode
 
 ```bash
 zavora-cli server serve --host 127.0.0.1 --port 8787
@@ -371,11 +325,9 @@ Endpoints: `GET /healthz`, `POST /v1/ask`, `POST /v1/a2a/ping`.
 ## Development
 
 ```bash
-make fmt          # format
-make check        # cargo check
-make lint         # clippy
-make test         # unit tests
-make ci           # full CI pipeline
+cargo check                         # type check
+cargo test -- --test-threads=1      # 210 tests
+cargo check --features "browser,sandbox,rag,lsp,web-fetch,oauth"  # all features
 ```
 
 ## License
