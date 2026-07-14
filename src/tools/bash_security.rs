@@ -33,11 +33,7 @@ pub struct ValidationContext {
 
 pub fn build_context(command: &str) -> ValidationContext {
     let original = command.to_string();
-    let base_command = command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let base_command = command.split_whitespace().next().unwrap_or("").to_string();
     let extraction = extract_quoted_content(command);
     let fully_unquoted_pre_strip = extraction.fully_unquoted.clone();
     let fully_unquoted = strip_safe_redirections(&extraction.fully_unquoted);
@@ -68,14 +64,24 @@ fn extract_quoted_content(command: &str) -> QuoteExtraction {
     for ch in command.chars() {
         if escaped {
             escaped = false;
-            if !in_single { single_stripped.push(ch); }
-            if !in_single && !in_double { fully_unquoted.push(ch); keep_quote_chars.push(ch); }
+            if !in_single {
+                single_stripped.push(ch);
+            }
+            if !in_single && !in_double {
+                fully_unquoted.push(ch);
+                keep_quote_chars.push(ch);
+            }
             continue;
         }
         if ch == '\\' && !in_single {
             escaped = true;
-            if !in_single { single_stripped.push(ch); }
-            if !in_single && !in_double { fully_unquoted.push(ch); keep_quote_chars.push(ch); }
+            if !in_single {
+                single_stripped.push(ch);
+            }
+            if !in_single && !in_double {
+                fully_unquoted.push(ch);
+                keep_quote_chars.push(ch);
+            }
             continue;
         }
         if ch == '\'' && !in_double {
@@ -88,11 +94,20 @@ fn extract_quoted_content(command: &str) -> QuoteExtraction {
             keep_quote_chars.push(ch);
             continue;
         }
-        if !in_single { single_stripped.push(ch); }
-        if !in_single && !in_double { fully_unquoted.push(ch); keep_quote_chars.push(ch); }
+        if !in_single {
+            single_stripped.push(ch);
+        }
+        if !in_single && !in_double {
+            fully_unquoted.push(ch);
+            keep_quote_chars.push(ch);
+        }
     }
 
-    QuoteExtraction { single_stripped, fully_unquoted, keep_quote_chars }
+    QuoteExtraction {
+        single_stripped,
+        fully_unquoted,
+        keep_quote_chars,
+    }
 }
 
 /// Strip safe redirections: 2>&1, N>/dev/null, </dev/null.
@@ -114,7 +129,12 @@ fn regex_replace(input: &str, pattern: &str, replacement: &str) -> String {
         while let Some(pos) = result.find(&pat) {
             let end = pos + pat.len();
             // Check trailing boundary: must be at end or followed by whitespace
-            if end >= result.len() || result.as_bytes().get(end).map_or(true, |b| b.is_ascii_whitespace()) {
+            if end >= result.len()
+                || result
+                    .as_bytes()
+                    .get(end)
+                    .is_none_or(|b| b.is_ascii_whitespace())
+            {
                 result = format!("{}{}{}", &result[..pos], replacement, &result[end..]);
             } else {
                 break;
@@ -227,9 +247,9 @@ fn validate_incomplete_commands(ctx: &ValidationContext) -> SecurityResult {
 }
 
 const ZSH_DANGEROUS: &[&str] = &[
-    "zmodload", "emulate", "sysopen", "sysread", "syswrite", "sysseek",
-    "zpty", "ztcp", "zsocket", "mapfile",
-    "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp",
+    "zmodload", "emulate", "sysopen", "sysread", "syswrite", "sysseek", "zpty", "ztcp", "zsocket",
+    "mapfile", "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir",
+    "zf_chgrp",
 ];
 
 fn validate_zsh_dangerous_commands(ctx: &ValidationContext) -> SecurityResult {
@@ -321,10 +341,13 @@ fn validate_redirections(ctx: &ValidationContext) -> SecurityResult {
 fn validate_obfuscated_flags(ctx: &ValidationContext) -> SecurityResult {
     // Check for flag-like tokens with non-ASCII or shell metacharacters
     for word in ctx.fully_unquoted.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 {
-            if word.chars().any(|c| !c.is_ascii() || matches!(c, '|' | '&' | ';' | '$' | '`')) {
-                return SecurityResult::Deny(format!("obfuscated flag: {}", word));
-            }
+        if word.starts_with('-')
+            && word.len() > 1
+            && word
+                .chars()
+                .any(|c| !c.is_ascii() || matches!(c, '|' | '&' | ';' | '$' | '`'))
+        {
+            return SecurityResult::Deny(format!("obfuscated flag: {}", word));
         }
     }
     SecurityResult::Passthrough
@@ -337,12 +360,19 @@ fn validate_brace_expansion(ctx: &ValidationContext) -> SecurityResult {
     let mut has_comma = false;
     for ch in content.chars() {
         match ch {
-            '{' => { depth += 1; has_comma = false; }
+            '{' => {
+                depth += 1;
+                has_comma = false;
+            }
             '}' if depth > 0 => {
-                if has_comma { return SecurityResult::Deny("brace expansion {a,b}".into()); }
+                if has_comma {
+                    return SecurityResult::Deny("brace expansion {a,b}".into());
+                }
                 depth -= 1;
             }
-            ',' if depth > 0 => { has_comma = true; }
+            ',' if depth > 0 => {
+                has_comma = true;
+            }
             _ => {}
         }
     }
@@ -350,12 +380,12 @@ fn validate_brace_expansion(ctx: &ValidationContext) -> SecurityResult {
     if content.contains("..") {
         let bytes = content.as_bytes();
         for i in 0..bytes.len().saturating_sub(3) {
-            if bytes[i] == b'{' {
-                if let Some(end) = content[i..].find('}') {
-                    let inner = &content[i + 1..i + end];
-                    if inner.contains("..") && inner.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                        return SecurityResult::Deny("brace range expansion {N..M}".into());
-                    }
+            if bytes[i] == b'{'
+                && let Some(end) = content[i..].find('}')
+            {
+                let inner = &content[i + 1..i + end];
+                if inner.contains("..") && inner.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return SecurityResult::Deny("brace range expansion {N..M}".into());
                 }
             }
         }
@@ -365,10 +395,16 @@ fn validate_brace_expansion(ctx: &ValidationContext) -> SecurityResult {
 
 fn validate_unicode_whitespace(ctx: &ValidationContext) -> SecurityResult {
     for ch in ctx.original.chars() {
-        if matches!(ch,
-            '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200F}' |
-            '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' |
-            '\u{3000}' | '\u{FEFF}'
+        if matches!(
+            ch,
+            '\u{00A0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200F}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202F}'
+                    | '\u{205F}'
+                    | '\u{3000}'
+                    | '\u{FEFF}'
         ) {
             return SecurityResult::Deny(format!("non-ASCII whitespace U+{:04X}", ch as u32));
         }
@@ -515,103 +551,187 @@ mod tests {
 
     #[test]
     fn empty_command_allowed() {
-        assert!(matches!(validate_bash_command(""), SecurityResult::Allow(_)));
-        assert!(matches!(validate_bash_command("  "), SecurityResult::Allow(_)));
+        assert!(matches!(
+            validate_bash_command(""),
+            SecurityResult::Allow(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("  "),
+            SecurityResult::Allow(_)
+        ));
     }
 
     #[test]
     fn safe_commands_pass_through() {
-        assert!(matches!(validate_bash_command("ls -la"), SecurityResult::Passthrough));
-        assert!(matches!(validate_bash_command("cat foo.txt"), SecurityResult::Passthrough));
-        assert!(matches!(validate_bash_command("git status"), SecurityResult::Passthrough));
+        assert!(matches!(
+            validate_bash_command("ls -la"),
+            SecurityResult::Passthrough
+        ));
+        assert!(matches!(
+            validate_bash_command("cat foo.txt"),
+            SecurityResult::Passthrough
+        ));
+        assert!(matches!(
+            validate_bash_command("git status"),
+            SecurityResult::Passthrough
+        ));
     }
 
     #[test]
     fn command_substitution_denied() {
-        assert!(matches!(validate_bash_command("echo $(whoami)"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("echo `whoami`"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo $(whoami)"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("echo `whoami`"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn dangerous_variables_denied() {
-        assert!(matches!(validate_bash_command("IFS=: read a b"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("PATH=/tmp:$PATH cmd"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("LD_PRELOAD=/tmp/evil.so cmd"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("IFS=: read a b"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("PATH=/tmp:$PATH cmd"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("LD_PRELOAD=/tmp/evil.so cmd"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn newlines_denied() {
-        assert!(matches!(validate_bash_command("echo hello\nrm -rf /"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo hello\nrm -rf /"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn carriage_return_denied() {
-        assert!(matches!(validate_bash_command("echo hello\rmalicious"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo hello\rmalicious"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn unicode_whitespace_denied() {
-        assert!(matches!(validate_bash_command("echo\u{00A0}hello"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo\u{00A0}hello"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn zsh_dangerous_denied() {
-        assert!(matches!(validate_bash_command("zmodload zsh/system"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("zpty cmd ls"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("zmodload zsh/system"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("zpty cmd ls"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn brace_expansion_denied() {
-        assert!(matches!(validate_bash_command("echo {a,b,c}"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("echo {1..10}"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo {a,b,c}"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("echo {1..10}"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn proc_environ_denied() {
-        assert!(matches!(validate_bash_command("cat /proc/self/environ"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("cat /proc/self/environ"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn pipe_asks() {
-        assert!(matches!(validate_bash_command("ls | grep foo"), SecurityResult::Ask(_)));
+        assert!(matches!(
+            validate_bash_command("ls | grep foo"),
+            SecurityResult::Ask(_)
+        ));
     }
 
     #[test]
     fn semicolon_asks() {
-        assert!(matches!(validate_bash_command("echo a; echo b"), SecurityResult::Ask(_)));
+        assert!(matches!(
+            validate_bash_command("echo a; echo b"),
+            SecurityResult::Ask(_)
+        ));
     }
 
     #[test]
     fn quoted_content_safe() {
         // Command substitution inside quotes should be stripped
-        assert!(matches!(validate_bash_command("echo 'hello world'"), SecurityResult::Passthrough));
+        assert!(matches!(
+            validate_bash_command("echo 'hello world'"),
+            SecurityResult::Passthrough
+        ));
     }
 
     #[test]
     fn jq_system_denied() {
-        assert!(matches!(validate_bash_command("jq '.[] | system(\"ls\")'"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("jq '.[] | system(\"ls\")'"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn ansi_c_quoting_denied() {
-        assert!(matches!(validate_bash_command("echo $'\\x41'"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo $'\\x41'"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn comment_quote_desync_denied() {
-        assert!(matches!(validate_bash_command("echo 'x'#comment"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo 'x'#comment"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn incomplete_commands_denied() {
-        assert!(matches!(validate_bash_command("\t-flag"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("-flag"), SecurityResult::Deny(_)));
-        assert!(matches!(validate_bash_command("&& echo hi"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("\t-flag"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("-flag"),
+            SecurityResult::Deny(_)
+        ));
+        assert!(matches!(
+            validate_bash_command("&& echo hi"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]
     fn backslash_escaped_operators_denied() {
-        assert!(matches!(validate_bash_command("echo \\| cat"), SecurityResult::Deny(_)));
+        assert!(matches!(
+            validate_bash_command("echo \\| cat"),
+            SecurityResult::Deny(_)
+        ));
     }
 
     #[test]

@@ -1,311 +1,121 @@
-# Quick Start: Multi-Agent Features
+# Zavora CLI v2 quickstart
 
-## Memory Agent
+## 1. Install and configure
 
-### Store Learnings
+Zavora CLI v2 requires Rust 1.94+ when installed from source.
+
 ```bash
-$ zavora-cli chat
-> /memory remember "I prefer dark mode for all UIs"
-Stored: I prefer dark mode for all UIs
-
-> /memory remember "Use TypeScript for new projects"
-Stored: Use TypeScript for new projects
+cargo install zavora-cli
+zavora-cli setup
 ```
 
-### Recall Learnings
+Setup defaults to OpenAI and stores the API key in the operating-system credential vault. You can use an environment variable instead:
+
 ```bash
-> /memory recall preferences
-Found 2 memories:
-  [0.9] I prefer dark mode for all UIs
-    tags: manual
-  [0.9] Use TypeScript for new projects
-    tags: manual
+export OPENAI_API_KEY="..."
 ```
 
-### LLM Uses Memory
+## 2. Inspect model routing
+
 ```bash
-> What are my coding preferences?
-[Agent calls memory_agent tool to recall]
-
-Based on your stored preferences:
-- You prefer dark mode for all UIs
-- You use TypeScript for new projects
+zavora-cli models
 ```
 
-### Forget Learnings
+The default worker, `gpt-5.4-mini-2026-03-17`, handles normal conversation, code, and tools. The stronger `gpt-5.6-sol` planner is exposed to the worker as the bounded `plan_work` agent tool. It is intended for multi-file changes, architectural decisions, and material replanning, with a default maximum of four calls per process.
+
+## 3. Start in a project
+
 ```bash
-> /memory forget "dark mode"
-Removed 1 memories
+cd your-project
+zavora-cli
 ```
 
----
+Try:
 
-## Time Agent
+```text
+Explain this workspace and show me its main execution path.
+Add validation to the user registration endpoint and run the relevant tests.
+Plan the database migration first, then wait for my approval.
+```
 
-### Current Time
+Zavora streams Markdown and tool activity as it works. File writes, shell commands, GitHub changes, and external MCP tools are subject to the configured permission and confirmation rules.
+
+## 4. Control the two roles
+
+Inside chat:
+
+```text
+/status
+/models
+/worker gpt-5.4-mini-2026-03-17
+/planner gpt-5.6-sol
+/planner-provider openai
+```
+
+From the shell:
+
 ```bash
-> /time
-Current time: 2026-02-16T20:10:00+03:00
-Timezone: UTC
-Weekday: Monday
-Date: 2026-02-16
+zavora-cli \
+  --worker-provider openai \
+  --worker-model gpt-5.4-mini-2026-03-17 \
+  --planner-provider openai \
+  --planner-model gpt-5.6-sol \
+  --planner-call-budget 2 \
+  chat
 ```
 
-### Parse Relative Dates
-```bash
-> /time next Friday
-next Friday → 2026-02-21T20:10:00+03:00
+Provider and model switches preserve the current session. Other supported providers are OpenAI, Anthropic, Gemini, DeepSeek, Groq, and Ollama.
 
-> /time in 3 days
-in 3 days → 2026-02-19T20:10:00+03:00
+## 5. Preserve context
 
-> /time tomorrow
-tomorrow → 2026-02-17T20:10:00+03:00
+Useful controls during a longer session:
+
+```text
+/usage                       inspect context consumption
+/compact                     compact older conversation events
+/checkpoint save before-api  save a restorable point
+/checkpoint list             list checkpoints
+/tangent                     explore without losing the main thread
+/memory remember <text>      retain a useful project fact
 ```
 
-### LLM Uses Time
-```bash
-> Schedule a meeting for next Friday at 2pm
-[Agent calls time_agent to parse "next Friday"]
+Use SQLite when conversations must survive restarts:
 
-I'll schedule the meeting for Friday, February 21, 2026 at 2:00 PM.
-
-> What day is it in 5 days?
-[Agent calls time_agent]
-
-In 5 days it will be Saturday, February 21, 2026.
-```
-
----
-
-## Auto-Compaction
-
-### Check Status
-```bash
-> /usage
-Context  45000/128000 tokens (35%)
-
-  User:      12000 tokens
-  Assistant: 28000 tokens
-  Tools:      3000 tokens
-  System:     2000 tokens
-```
-
-### Toggle Auto-Compaction
-```bash
-> /autocompact
-Auto-compaction disabled (threshold=75%, target=10%)
-
-> /autocompact
-Auto-compaction enabled (threshold=75%, target=10%)
-```
-
-### Manual Compaction
-```bash
-> /compact
-Compacting conversation...
-Compacted 15 events into ~2500 tokens. Kept 2 recent messages.
-```
-
-### How It Works
-- Monitors token usage after each response
-- Triggers at 75% context usage
-- Uses LLM to create structured summary
-- Compacts down to 10% usage
-- Preserves recent messages
-
----
-
-## Orchestration
-
-### Run Full Loop
-```bash
-> /orchestrate Create a REST API with user authentication
-
-Starting orchestration...
-
-## Execution Result: ✓ PASSED
-
-**Goal:** Create a REST API with user authentication
-
-**Steps:** 5
-**Artifacts:** 8
-**Issues:** 0
-
-### Plan
-1. Design API endpoints
-2. Implement authentication
-3. Create user model
-4. Add tests
-5. Document API
-
-### Artifacts
-- File: src/api/auth.rs
-- File: src/models/user.rs
-- File: tests/auth_test.rs
-- Summary: API implementation complete
-```
-
-### Orchestration Pattern
-```
-1. Bootstrap
-   ├─ Time handshake (current context)
-   └─ Memory recall (relevant learnings)
-
-2. Gather
-   ├─ Search agent (if needed)
-   └─ File loop agent (discover resources)
-
-3. Plan
-   └─ Sequential agent creates structured plan
-
-4. Execute
-   └─ Sequential agent runs steps one-by-one
-
-5. Verify
-   └─ Quality agent checks against criteria
-
-6. Repair (if needed)
-   └─ Fix issues and re-verify
-
-7. Commit
-   └─ Memory agent stores learnings
-```
-
----
-
-## Configuration
-
-### Enable Features
 ```toml
-# .zavora/config.toml
 [profiles.default]
-provider = "openai"
-model = "gpt-4.1"
-
-# Auto-compaction (default: enabled)
-auto_compact_enabled = true
-compaction_threshold = 0.75  # Trigger at 75%
-compaction_target = 0.10     # Compact to 10%
-
-# Session persistence
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/sessions.db"
 ```
 
-### Memory Storage
-```bash
-# Stored in workspace
-.zavora/
-├── memory.json      # Persistent learnings
-├── sessions.db      # Conversation history
-└── todos/          # Task lists
+## 6. Connect MCP capabilities
+
+Configure a local stdio server:
+
+```toml
+[[profiles.default.mcp_servers]]
+name = "project-tools"
+command = "path/to/server"
+args = []
+enabled = true
 ```
 
----
-
-## Tips
-
-### Memory Best Practices
-- Store high-signal information only
-- Use descriptive text
-- Add relevant tags
-- Set confidence scores
+Then inspect it:
 
 ```bash
-> /memory remember "Project uses React 18 with TypeScript" 
-# Good: Specific, actionable
-
-> /memory remember "I like React"
-# Bad: Too vague
+zavora-cli mcp list
+zavora-cli mcp discover --server project-tools
 ```
 
-### Time Queries
-Supported formats:
-- `now`, `today`, `tomorrow`, `yesterday`
-- `next Friday`, `next Monday`
-- `in 2 days`, `in 3 hours`, `in 1 week`
+Zavora can also expose its own tools as an MCP server with `zavora-cli mcp serve`.
 
-### Orchestration
-Best for:
-- Multi-step implementations
-- Features requiring tests
-- Complex refactoring
-- Structured planning
+## 7. Verify an installation
 
-Not needed for:
-- Simple questions
-- Single file changes
-- Quick fixes
+These commands do not call a paid model:
 
----
-
-## Troubleshooting
-
-### Memory Not Persisting
 ```bash
-# Check file exists
-ls .zavora/memory.json
-
-# Check permissions
-chmod 644 .zavora/memory.json
+zavora-cli --help
+zavora-cli models
+zavora-cli doctor
 ```
 
-### Time Parsing Fails
-```bash
-# Use simpler expressions
-> /time next Friday  # ✓ Works
-> /time Friday       # ✗ Ambiguous
-```
-
-### Compaction Issues
-```bash
-# Check usage first
-> /usage
-
-# Manual compact if needed
-> /compact
-
-# Disable auto-compact if problematic
-> /autocompact
-```
-
----
-
-## Examples
-
-### Complete Workflow
-```bash
-# 1. Store preference
-> /memory remember "Use Rust for CLI tools"
-
-# 2. Check time
-> /time
-Current time: 2026-02-16T20:10:00+03:00
-
-# 3. Orchestrate work
-> /orchestrate Build a CLI tool for file processing
-
-# 4. Agent uses memory
-[Recalls: "Use Rust for CLI tools"]
-[Creates Rust project]
-
-# 5. Store learning
-[Commits: "Built CLI tool with clap + tokio"]
-
-# 6. Check usage
-> /usage
-Context  95000/128000 tokens (74%)
-
-# 7. Auto-compact triggers at 75%
-[Compacts to 12800 tokens (10%)]
-```
-
----
-
-## Learn More
-
-- Architecture: `docs/MULTIAGENT_ARCHITECTURE.md`
-- Integration: `docs/MULTIAGENT_INTEGRATION.md`
-- Session Summary: `SESSION_SUMMARY.md`
-- Main README: `README.md`
+See [README.md](README.md) for profiles, optional features, permissions, server mode, and development checks.

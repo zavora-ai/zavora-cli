@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
     PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, transport::stdio};
@@ -22,9 +22,9 @@ impl ZavoraMcpServer {
     }
 
     fn adk_tool_to_mcp(&self, tool: &dyn adk_rust::Tool) -> rmcp::model::Tool {
-        let schema = tool.parameters_schema().unwrap_or_else(|| {
-            serde_json::json!({ "type": "object", "properties": {} })
-        });
+        let schema = tool
+            .parameters_schema()
+            .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
         let input_schema: rmcp::model::JsonObject = match schema {
             Value::Object(map) => map.into_iter().collect(),
             _ => Default::default(),
@@ -34,6 +34,12 @@ impl ZavoraMcpServer {
             tool.description().to_string(),
             Arc::new(input_schema),
         )
+    }
+}
+
+impl Default for ZavoraMcpServer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -80,9 +86,8 @@ impl ServerHandler for ZavoraMcpServer {
                     McpError::invalid_params(format!("tool '{}' not found", tool_name), None)
                 })?;
 
-            let ctx: Arc<dyn adk_rust::ToolContext> = Arc::new(
-                adk_tool::SimpleToolContext::new("mcp-server"),
-            );
+            let ctx: Arc<dyn adk_rust::ToolContext> =
+                Arc::new(adk_tool::SimpleToolContext::new("mcp-server"));
 
             match tool.execute(ctx, args).await {
                 Ok(result) => {
@@ -91,9 +96,11 @@ impl ServerHandler for ZavoraMcpServer {
                     } else {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     };
-                    Ok(CallToolResult::success(vec![Content::text(text)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
                 }
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                    e.to_string(),
+                )])),
             }
         }
     }
@@ -102,9 +109,10 @@ impl ServerHandler for ZavoraMcpServer {
 /// Run the MCP server on stdio.
 pub async fn run_mcp_server() -> anyhow::Result<()> {
     let server = ZavoraMcpServer::new();
-    let service = server.serve(stdio()).await.map_err(|e| {
-        anyhow::anyhow!("MCP server error: {:?}", e)
-    })?;
+    let service = server
+        .serve(stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server error: {:?}", e))?;
     service.waiting().await?;
     Ok(())
 }

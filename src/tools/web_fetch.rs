@@ -12,8 +12,8 @@ const BLOCKED_HOSTS: &[&str] = &[
     "127.0.0.1",
     "0.0.0.0",
     "::1",
-    "169.254.169.254",           // AWS metadata
-    "metadata.google.internal",  // GCP metadata
+    "169.254.169.254",          // AWS metadata
+    "metadata.google.internal", // GCP metadata
 ];
 
 pub async fn web_fetch_tool_response(args: &Value) -> Value {
@@ -69,10 +69,13 @@ pub async fn web_fetch_tool_response(args: &Value) -> Value {
     let final_url = response.url().to_string();
 
     // Check final redirect destination isn't blocked
-    if let Ok(final_parsed) = reqwest::Url::parse(&final_url) {
-        if let Err(msg) = check_blocked_host(&final_parsed) {
-            return error("blocked_domain", format!("redirect to blocked host: {}", msg));
-        }
+    if let Ok(final_parsed) = reqwest::Url::parse(&final_url)
+        && let Err(msg) = check_blocked_host(&final_parsed)
+    {
+        return error(
+            "blocked_domain",
+            format!("redirect to blocked host: {}", msg),
+        );
     }
 
     let body_bytes = match response.bytes().await {
@@ -84,7 +87,8 @@ pub async fn web_fetch_tool_response(args: &Value) -> Value {
     let body = String::from_utf8_lossy(&body_bytes[..bytes.min(MAX_CONTENT_BYTES)]);
 
     // Convert based on content type
-    let result = if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+    let result = if content_type.contains("text/html") || content_type.contains("application/xhtml")
+    {
         html_to_markdown(&body)
     } else if content_type.contains("application/json") {
         // Pretty-print JSON
@@ -97,11 +101,11 @@ pub async fn web_fetch_tool_response(args: &Value) -> Value {
     };
 
     // Truncate result
-    let result = if result.len() > MAX_CONTENT_BYTES {
-        format!("{}...\n[truncated at {}KB]", &result[..MAX_CONTENT_BYTES], MAX_CONTENT_BYTES / 1024)
-    } else {
-        result
-    };
+    let result = crate::text::truncate(
+        &result,
+        MAX_CONTENT_BYTES,
+        &format!("...\n[truncated at {}KB]", MAX_CONTENT_BYTES / 1024),
+    );
 
     json!({
         "url": final_url,

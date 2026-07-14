@@ -45,9 +45,7 @@ pub fn snapshot_file(file_path: &Path) -> Result<()> {
     });
 
     // Prune old snapshots
-    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).collect();
     if entries.len() > MAX_SNAPSHOTS {
         entries.sort_by_key(|e| e.file_name());
         for entry in &entries[..entries.len() - MAX_SNAPSHOTS] {
@@ -63,15 +61,16 @@ pub fn undo_last() -> Result<String> {
     let mut stack = UNDO_STACK.lock().unwrap();
     let stack = stack.get_or_insert_with(VecDeque::new);
 
-    let entry = stack.pop_back()
-        .context("nothing to undo")?;
+    let entry = stack.pop_back().context("nothing to undo")?;
 
     if !entry.snapshot.exists() {
-        return Err(anyhow::anyhow!("snapshot file missing: {}", entry.snapshot.display()));
+        return Err(anyhow::anyhow!(
+            "snapshot file missing: {}",
+            entry.snapshot.display()
+        ));
     }
 
-    std::fs::copy(&entry.snapshot, &entry.path)
-        .context("failed to restore snapshot")?;
+    std::fs::copy(&entry.snapshot, &entry.path).context("failed to restore snapshot")?;
 
     Ok(format!("Restored {}", entry.path.display()))
 }

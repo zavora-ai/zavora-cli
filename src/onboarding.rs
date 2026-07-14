@@ -1,8 +1,8 @@
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
+use anyhow::{Context, Result, bail};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 /// Create `.skills/` with a sample skill if it doesn't exist.
@@ -259,7 +259,6 @@ pub fn prompt_ollama_host(default: &str) -> Result<String> {
     }
 }
 
-
 /// Reads a line of input with characters masked as `*`.
 ///
 /// Uses crossterm raw mode to capture individual key events.
@@ -436,12 +435,8 @@ pub fn persist_onboarding_config(result: &OnboardingResult, config_path: &str) -
 
     // Create parent directory (e.g. `.zavora`) if missing.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create config directory '{}'",
-                parent.display()
-            )
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory '{}'", parent.display()))?;
     }
 
     // Load existing profiles to preserve other entries.
@@ -456,25 +451,41 @@ pub fn persist_onboarding_config(result: &OnboardingResult, config_path: &str) -
     if result.skipped {
         profile.provider = Some(Provider::Auto);
         profile.model = None;
+        profile.worker_provider = None;
+        profile.worker_model = None;
+        profile.planner_provider = None;
+        profile.planner_model = None;
         profile.api_key = None;
         profile.ollama_host = None;
     } else {
         profile.provider = Some(result.provider);
         profile.model = Some(result.model.clone());
-        profile.api_key = result.api_key.clone();
+        profile.worker_provider = Some(result.provider);
+        profile.worker_model = Some(result.model.clone());
+        profile.planner_provider = Some(result.provider);
+        profile.planner_model = Some(
+            crate::model_catalog::default_model(
+                result.provider,
+                crate::model_catalog::ModelRole::Planner,
+            )
+            .to_string(),
+        );
+        if let Some(api_key) = result.api_key.as_deref() {
+            crate::credentials::store_api_key(result.provider, api_key)?;
+        }
+        // Credentials belong in the OS keychain, never in project TOML.
+        profile.api_key = None;
         profile.ollama_host = result.ollama_host.clone();
     }
 
-    let toml_str = toml::to_string_pretty(&profiles_file)
-        .context("failed to serialize config to TOML")?;
+    let toml_str =
+        toml::to_string_pretty(&profiles_file).context("failed to serialize config to TOML")?;
 
-    std::fs::write(path, toml_str).with_context(|| {
-        format!("failed to write config to '{}'", path.display())
-    })?;
+    std::fs::write(path, toml_str)
+        .with_context(|| format!("failed to write config to '{}'", path.display()))?;
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

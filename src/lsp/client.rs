@@ -1,8 +1,8 @@
 //! LSP JSON-RPC client with Content-Length framing over stdio.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

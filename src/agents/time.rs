@@ -43,26 +43,25 @@ impl TimeAgent {
         }
 
         // "in X days/hours/minutes"
-        if let Some(rest) = input.strip_prefix("in ") {
-            if let Some((num_str, unit)) = rest.split_once(' ') {
-                if let Ok(num) = num_str.parse::<i64>() {
-                    let delta = match unit {
-                        "minute" | "minutes" => Duration::minutes(num),
-                        "hour" | "hours" => Duration::hours(num),
-                        "day" | "days" => Duration::days(num),
-                        "week" | "weeks" => Duration::weeks(num),
-                        _ => return Err(anyhow::anyhow!("Unknown time unit: {}", unit)),
-                    };
-                    return Ok(now + delta);
-                }
-            }
+        if let Some(rest) = input.strip_prefix("in ")
+            && let Some((num_str, unit)) = rest.split_once(' ')
+            && let Ok(num) = num_str.parse::<i64>()
+        {
+            let delta = match unit {
+                "minute" | "minutes" => Duration::minutes(num),
+                "hour" | "hours" => Duration::hours(num),
+                "day" | "days" => Duration::days(num),
+                "week" | "weeks" => Duration::weeks(num),
+                _ => return Err(anyhow::anyhow!("Unknown time unit: {}", unit)),
+            };
+            return Ok(now + delta);
         }
 
         // "next Friday"
-        if let Some(weekday_str) = input.strip_prefix("next ") {
-            if let Some(target_weekday) = parse_weekday(weekday_str) {
-                return Ok(next_weekday(now, target_weekday));
-            }
+        if let Some(weekday_str) = input.strip_prefix("next ")
+            && let Some(target_weekday) = parse_weekday(weekday_str)
+        {
+            return Ok(next_weekday(now, target_weekday));
         }
 
         Err(anyhow::anyhow!("Could not parse relative time: {}", input))
@@ -108,16 +107,16 @@ fn next_weekday(from: DateTime<Utc>, target: Weekday) -> DateTime<Utc> {
 
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     let s = s.trim();
-    if let Some((num_str, unit)) = s.split_once(' ') {
-        if let Ok(num) = num_str.parse::<i64>() {
-            return Ok(match unit {
-                "minute" | "minutes" => Duration::minutes(num),
-                "hour" | "hours" => Duration::hours(num),
-                "day" | "days" => Duration::days(num),
-                "week" | "weeks" => Duration::weeks(num),
-                _ => return Err(anyhow::anyhow!("Unknown time unit: {}", unit)),
-            });
-        }
+    if let Some((num_str, unit)) = s.split_once(' ')
+        && let Ok(num) = num_str.parse::<i64>()
+    {
+        return Ok(match unit {
+            "minute" | "minutes" => Duration::minutes(num),
+            "hour" | "hours" => Duration::hours(num),
+            "day" | "days" => Duration::days(num),
+            "week" | "weeks" => Duration::weeks(num),
+            _ => return Err(anyhow::anyhow!("Unknown time unit: {}", unit)),
+        });
     }
     Err(anyhow::anyhow!("Could not parse duration: {}", s))
 }

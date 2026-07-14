@@ -1,334 +1,189 @@
-# zavora-cli
+# Zavora CLI
 
 [![Crates.io](https://img.shields.io/crates/v/zavora-cli.svg)](https://crates.io/crates/zavora-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-```
-  ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗  █████╗
-  ╚══███╔╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗██╔══██╗
-    ███╔╝ ███████║██║   ██║██║   ██║██████╔╝███████║
-   ███╔╝  ██╔══██║╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██║
-  ███████╗██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║██║  ██║
-  ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
+Zavora is an ADK-Rust 2.0 coding agent for the terminal. It keeps routine implementation work on an efficient worker model and brings in a stronger planning model only when a task needs architectural reasoning or a material replan.
+
+```text
+Developer ──► worker agent ──► files · shell · MCP · sessions
+                    │
+                    └── complex work ──► bounded planner agent
 ```
 
-**Your AI agent, in the terminal.** Built on [ADK-Rust](https://github.com/zavora-ai/adk-rust).
-
-Multi-agent orchestration, tool safety controls, streaming markdown, checkpoints, MCP integration — all from a single binary.
+The interface is designed for long development sessions: streamed Markdown, visible tool activity, command history, checkpoints, context usage, model-role status, and confirmations for consequential actions. It works in narrow terminals, suppresses styling in redirected output, and honours `NO_COLOR`.
 
 ## Install
 
-### Cargo (recommended)
+Zavora v2 requires Rust 1.94 or newer when building from source.
 
 ```bash
 cargo install zavora-cli
 ```
 
-### npm
+Prebuilt release wrappers are also available:
 
 ```bash
 npm i -g @zavora-ai/zavora-cli
-```
-
-### Homebrew
-
-```bash
 brew install --formula https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/Formula/zavora-cli.rb
 ```
 
-### Build from source
+## Start
+
+OpenAI is the default provider. Store a key in the operating-system credential vault:
 
 ```bash
-git clone https://github.com/zavora-ai/zavora-cli.git
-cd zavora-cli
-cargo install --path .
-```
-
-Requires Rust 1.85+ (`rustup`, `cargo`) for cargo/source builds.
-
-## Quick Start
-
-1. Export an API key for any supported provider:
-
-```bash
-export GOOGLE_API_KEY="..."
-# or: OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY
-```
-
-Or use Ollama locally with no key needed:
-
-```bash
-OLLAMA_HOST=http://localhost:11434  # optional, this is the default
-```
-
-2. Start chatting:
-
-```bash
+zavora-cli setup
 zavora-cli chat
 ```
 
-## Usage
+Or provide it for the current shell:
 
 ```bash
-# Interactive chat (default when no subcommand)
+export OPENAI_API_KEY="..."
 zavora-cli chat
-zavora-cli                          # same as above
+```
 
-# One-shot question
-zavora-cli ask "Explain Rust ownership"
+The startup card shows both active roles before a model is called:
 
-# Specific provider/model
-zavora-cli --provider gemini --model gemini-2.5-flash chat
+```text
+ZAVORA v2.0.0 · ADK-Rust 2.0
+workspace  my-project  session  default-session
+┌─ MODEL ROUTING
+│ WORKER   Openai/gpt-5.4-mini-2026-03-17
+│ PLANNER  Openai/gpt-5.6-sol · max 4 calls
+└────────────────────────────────────────────
+```
 
-# Workflows
-zavora-cli workflow sequential "Plan an MVP rollout"
-zavora-cli workflow graph "Draft a release plan with risks"
+No tokens are spent generating a greeting.
 
-# Skills
-zavora-cli skills list              # list discovered skills
+## Planner and worker routing
 
-# RAG (requires --features rag)
-zavora-cli rag ingest ./docs/       # ingest documents
+The worker owns the conversation, tools, and implementation. By default it uses `gpt-5.4-mini-2026-03-17`, from the larger shared daily token pool. The planner is an ADK-Rust `AgentTool` backed by `gpt-5.6-sol`. It has no mutation tools and is available only to produce a concise plan for complex work.
 
-# Ralph autonomous dev pipeline
-zavora-cli ralph "Build a REST API for user management"
+The planner call budget defaults to four calls for one CLI process. It is a local guardrail, not a measurement of provider-side token usage. OpenAI remains authoritative for account limits.
 
-# Management
-zavora-cli profiles list
+```bash
+# Show available models, recommended roles, and shared quota pools
+zavora-cli models
+
+# Set roles independently
+zavora-cli \
+  --worker-provider openai \
+  --worker-model gpt-5.4-mini-2026-03-17 \
+  --planner-provider openai \
+  --planner-model gpt-5.6-sol \
+  --planner-call-budget 3 \
+  chat
+```
+
+Inside chat:
+
+```text
+/models                         show the catalog and quota pools
+/worker [model]                 switch the everyday model
+/planner [model]                switch the planning model
+/provider <name>                switch the worker provider
+/planner-provider <name>        switch the planner provider
+/status                         show the resolved runtime
+```
+
+Changing either role rebuilds the agent while preserving the current ADK session service.
+
+## Other providers
+
+OpenAI, Anthropic, Gemini, DeepSeek, Groq, and Ollama remain supported. The worker and planner can use different providers when both credentials are available.
+
+```bash
+# Anthropic worker with an OpenAI planner
+zavora-cli \
+  --worker-provider anthropic \
+  --worker-model claude-sonnet-4-20250514 \
+  --planner-provider openai \
+  --planner-model gpt-5.6-sol \
+  chat
+
+# Fully local
+zavora-cli \
+  --worker-provider ollama --worker-model llama4 \
+  --planner-provider ollama --planner-model qwen2.5-coder \
+  chat
+```
+
+Credential environment variables are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, and `GROQ_API_KEY`. Ollama uses `OLLAMA_HOST`, defaulting to `http://localhost:11434`.
+
+## Profile configuration
+
+Role-specific settings live in `.zavora/config.toml`:
+
+```toml
+[profiles.default]
+worker_provider = "openai"
+worker_model = "gpt-5.4-mini-2026-03-17"
+planner_provider = "openai"
+planner_model = "gpt-5.6-sol"
+planner_call_budget = 4
+
+session_backend = "sqlite"
+session_db_url = "sqlite://.zavora/sessions.db"
+tool_confirmation_mode = "mcp-only"
+auto_compact_enabled = true
+```
+
+Precedence is CLI/environment, selected agent, selected profile, then role defaults. The v1 `provider` and `model` settings are still accepted as worker aliases. New setup runs store API keys in the OS credential vault rather than project TOML.
+
+## Everyday commands
+
+```bash
+zavora-cli                              # interactive chat
+zavora-cli ask "Explain this workspace" # one response
+zavora-cli workflow parallel "Review the API and tests"
+zavora-cli ralph "Implement the accepted issue"
 zavora-cli agents list
+zavora-cli skills list
 zavora-cli sessions list
 zavora-cli mcp list
 zavora-cli doctor
 ```
 
-## Architecture
+Useful chat controls include `/help`, `/tools`, `/mcp`, `/usage`, `/compact`, `/checkpoint`, `/tangent`, `/todos`, `/delegate`, `/agent`, and `/exit`.
 
-```
-main.rs
-  ├── init_tracing()              console + optional OTLP layer (composable)
-  ├── memory::init()              single SQLite pool, OnceLock singleton
-  ├── resolve_runtime_tools()     builtin + MCP + browser (feature-gated)
-  └── build_runner()
-        ├── .memory_service()     ← shared memory singleton
-        ├── .with_auto_skills_mut()  .skills/ + .claude/skills/
-        └── .compaction_config()
+## Tools and operating controls
 
-Memory (single source of truth):
-  main.rs::init() → OnceLock<Arc<MemoryServiceAdapter>>
-       ↓                          ↓
-  Runner (.memory_service)    /memory commands + memory_agent tool
-
-Two retrieval layers:
-  retrieval.rs    auto prompt enrichment (before LLM call)
-  tools/rag.rs    LLM-callable on-demand retrieval (feature-gated)
-```
-
-## Multi-Agent Orchestration
-
-**Capability Agents** (callable as tools):
-- **time_agent** — Current time context, parse relative dates ("next Friday", "in 2 days")
-- **memory_agent** — Persistent learnings across sessions (SQLite-backed, FTS5 search)
-- **search_agent** — Web search via Gemini's Google Search (requires Gemini provider)
-
-**Workflow Agents** (execution patterns):
-- **file_search_agent** — Iterative file discovery with saturation detection
-- **sequential_agent** — Plan creation and step-by-step execution with progress tracking
-- **quality_agent** — Verification against acceptance criteria
-
-**Orchestration Pattern:**
-```
-Bootstrap (time + memory) → Gather (search/files) → Plan → Execute → Verify → Commit
-```
-
-## ADK Crate Integrations
-
-| Crate | Purpose | Integration |
-|-------|---------|-------------|
-| `adk-skill` | Skill system | Auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/` |
-| `adk-memory` | Semantic memory | SQLite FTS5 via `SqliteMemoryService`; shared singleton for Runner + chat |
-| `adk-telemetry` | Observability | Composable OTLP layer via `OTEL_EXPORTER_OTLP_ENDPOINT`; console fallback |
-| `adk-guardrail` | Safety | `PiiRedactor` (email/phone/SSN/CC) + `ContentFilter` (blocked keywords) |
-| `adk-browser` | Browser automation | 40+ WebDriver tools (feature: `browser`) |
-| `adk-sandbox` | Code execution | Sandboxed Python/Node/Rust via ProcessBackend (feature: `sandbox`) |
-| `adk-rag` | RAG pipeline | InMemoryVectorStore + bag-of-words embedding (feature: `rag`) |
-
-### Skills
-
-Place `.md` files with YAML frontmatter in `.skills/` or `.claude/skills/`:
-
-```yaml
----
-name: my-skill
-description: When to use this skill
----
-# Instructions here
-```
-
-Compatible with [Anthropic's skills](https://github.com/anthropics/skills) format.
-
-### File History and /undo
-
-Every `fs_write` (overwrite/append) and `file_edit` automatically snapshots the file before modification. Snapshots are stored in `.zavora/file_history/` (max 20 per file, oldest pruned). Use `/undo` in chat to restore the last modified file.
-
-## Feature Flags
-
-| Feature | What it enables |
-|---------|----------------|
-| `browser` | 40+ browser automation tools via WebDriver (`adk-browser`) |
-| `sandbox` | Sandboxed code execution: Python, Node.js, Rust (`adk-sandbox`) |
-| `rag` | RAG pipeline with `zavora rag ingest <path>` (`adk-rag`) |
-| `web-fetch` | HTTP fetch with HTML→markdown conversion |
-| `lsp` | Language Server Protocol: definitions, references, hover, symbols |
-| `oauth` | MCP OAuth 2.0 PKCE flow with OS keychain storage |
+The standard runtime includes workspace-aware file reading and editing, glob and ripgrep search, shell execution, GitHub operations, todos, time, memory, release planning, and tool discovery. Optional features add web fetching, LSP, browser automation, sandboxed code execution, and RAG.
 
 ```bash
-# Build with all optional features
 cargo install zavora-cli --features "web-fetch,lsp,oauth,browser,sandbox,rag"
 ```
 
-## Chat Commands
+MCP works in both directions:
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show available commands |
-| `/status` | Current provider, model, session info |
-| `/usage` | Context window usage breakdown by author |
-| `/compact` | Compact session history to reclaim context |
-| `/autocompact` | Toggle automatic compaction (threshold-based) |
-| `/memory recall [query]` | Search memories (empty = list all) |
-| `/memory remember <text>` | Store a persistent memory |
-| `/memory forget <query>` | Delete matching memories |
-| `/time [query]` | Get time context or parse relative dates |
-| `/orchestrate <goal>` | Run full agent orchestration loop |
-| `/tools` | List active built-in and MCP tools |
-| `/mcp` | MCP server diagnostics |
-| `/checkpoint save <label>` | Save session snapshot |
-| `/checkpoint list` | List saved checkpoints |
-| `/checkpoint restore <tag>` | Restore to a checkpoint |
-| `/tangent start` | Branch into exploratory tangent |
-| `/tangent end` | Return to main session |
-| `/todos list` | List todo lists |
-| `/todos show <id>` | Show a todo list |
-| `/todos clear` | Remove finished todos |
-| `/delegate <task>` | Fork isolated sub-agent (fresh context, 5-min timeout) |
-| `/allow <pattern>` | Auto-approve tool pattern for this session |
-| `/deny <pattern>` | Deny tool pattern for this session |
-| `/undo` | Restore last modified file from snapshot |
-| `/ralph <prompt>` | Run Ralph autonomous dev pipeline |
-| `/provider <name>` | Switch provider mid-session |
-| `/model [id]` | Switch model or open picker |
-| `/agent` | Trust all tools for the session (agent mode) |
-| `/exit` | Exit chat |
+- As a client, Zavora discovers tools from configured stdio or HTTP MCP servers and can update the configured server set.
+- As a server, `zavora-cli mcp serve` exposes the built-in tool surface over stdio.
 
-## Built-in Tools
+Write, shell, GitHub, and externally supplied MCP tools pass through confirmation and permission policy. The system prompt never commits or pushes unless the developer asks.
 
-| Tool | Purpose | Read-only |
-|------|---------|-----------|
-| `current_unix_time` | Current UTC timestamp | ✅ |
-| `fs_read` | Read files and directories with workspace path policy | ✅ |
-| `fs_write` | Create, overwrite, append, or patch files | ❌ |
-| `file_edit` | Surgical `old_string → new_string` replacement with diff output | ❌ |
-| `execute_bash` | Run shell commands with 20-check security pipeline | ❌ |
-| `glob` | Find files by glob pattern, respects `.gitignore` | ✅ |
-| `grep` | Search file contents via ripgrep with context lines | ✅ |
-| `github_ops` | GitHub operations via `gh` CLI | ❌ |
-| `todo_list` | Create/complete/view/list/delete task lists | ❌ |
-| `time_agent` | Current time context and relative date parsing | ✅ |
-| `memory_agent` | Persistent learnings: recall, remember, forget | ❌ |
-| `release_template` | Agile release checklist skeleton | ✅ |
-| `tool_search` | Keyword discovery of available tools (auto-enabled >15 tools) | ✅ |
-| `web_fetch` | Fetch URLs as markdown (feature: `web-fetch`) | ✅ |
-| `lsp` | Code intelligence: 9 operations, 7 languages (feature: `lsp`) | ✅ |
-| `code_execute` | Sandboxed code execution (feature: `sandbox`) | ❌ |
-| `rag_search` | RAG retrieval from ingested documents (feature: `rag`) | ✅ |
-| `browser_*` | 40+ browser automation tools (feature: `browser`) | ❌ |
+## ADK-Rust 2.0 architecture
 
-## Context Management
+Zavora uses the v2 `Runner`, typed events, `AgentTool`, session services, tool traits, model clients, skills, memory, guardrails, telemetry, MCP integration, A2A server support, and compaction APIs. The old `adk-ralph` 0.5 dependency and duplicate ADK runtime graph have been removed; Ralph now runs through the same v2 worker/planner runtime as chat.
 
-- `/usage` shows real-time token breakdown by author (user, assistant, tool, system)
-- Prompt shows ⚠ (>80%) or 🔴 (>90%) when approaching context limits
-- `/compact` manually summarizes history to reclaim space
-- `/autocompact` toggles automatic compaction (default: enabled at 75% → 10%)
-- Auto-compaction uses snip-first strategy (removes stale tool results) then LLM summary fallback
-- `/delegate <task>` forks an isolated sub-agent with fresh context and 5-minute timeout
-
-## Configuration
-
-Runtime defaults live in `.zavora/config.toml`:
-
-```toml
-[profiles.default]
-provider = "gemini"
-model = "gemini-2.5-flash"
-session_backend = "sqlite"
-session_db_url = "sqlite://.zavora/sessions.db"
-retrieval_backend = "disabled"
-tool_confirmation_mode = "mcp-only"
-auto_compact_enabled = true
-compaction_threshold = 0.75
-compaction_target = 0.10
-telemetry_enabled = true
-```
-
-### Telemetry
-
-Console tracing is always active. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable OpenTelemetry export to Jaeger, Datadog, etc. Both layers compose on the same subscriber — no conflict.
-
-```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 zavora-cli chat
-```
-
-### Guardrails
-
-PII redaction (emails, phones, SSNs, credit cards) is automatic in redact mode. Custom blocked keywords are configurable.
-
-```bash
-zavora-cli --guardrail-input-mode block --guardrail-output-mode redact ask "Summarize this"
-```
-
-### MCP Integration
-
-**As a client** — connect to HTTP or stdio MCP servers:
-
-```toml
-[[profiles.ops.mcp_servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-```
-
-**As a server** — expose zavora's tools to any MCP client:
-
-```bash
-zavora-cli mcp serve
-```
-
-### Permission Rules
-
-```toml
-[profiles.default.permission_rules]
-always_allow = ["fs_read:*", "glob:*", "grep:*", "execute_bash:git status*"]
-always_deny = ["execute_bash:rm -rf *", "fs_write:/etc/*"]
-always_ask = ["web_fetch:*", "github_ops:*"]
-```
-
-Session-level: `/allow execute_bash:cargo *` and `/deny fs_write:*.env`
-
-### Server Mode
-
-```bash
-zavora-cli server serve --host 127.0.0.1 --port 8787
-```
-
-Endpoints: `GET /healthz`, `POST /v1/ask`, `POST /v1/a2a/ping`.
+See the implementation specification in [`.kiro/specs/v2-upgrade/`](.kiro/specs/v2-upgrade/) and the v1 migration notes in [`docs/MIGRATION_GUIDE_v2.md`](docs/MIGRATION_GUIDE_v2.md).
 
 ## Development
 
 ```bash
-cargo check                         # type check
-cargo test -- --test-threads=1      # 210 tests
-cargo check --features "browser,sandbox,rag,lsp,web-fetch,oauth"  # all features
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets -- --test-threads=1
+cargo clippy --all-targets -- -D warnings
+
+# CLI smoke checks; these do not call a paid model
+cargo run -- --help
+cargo run -- models
+NO_COLOR=1 cargo run -- models
 ```
+
+The test suite is deliberately deterministic and uses ADK-Rust mock models for runtime tests.
 
 ## License
 

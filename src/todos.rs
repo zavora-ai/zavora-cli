@@ -142,11 +142,11 @@ pub fn clear_finished_todos(workspace: &Path) -> Result<usize> {
     let ids = list_todo_ids(workspace)?;
     let mut cleared = 0;
     for id in ids {
-        if let Ok(todo) = load_todo(workspace, &id) {
-            if todo.is_finished() {
-                delete_todo(workspace, &id)?;
-                cleared += 1;
-            }
+        if let Ok(todo) = load_todo(workspace, &id)
+            && todo.is_finished()
+        {
+            delete_todo(workspace, &id)?;
+            cleared += 1;
         }
     }
     Ok(cleared)
@@ -215,7 +215,16 @@ pub async fn run_delegate(
     tool_confirmation: &ToolConfirmationSettings,
     telemetry: &TelemetrySink,
 ) -> DelegateResult {
-    fork_sub_agent(task, None, cfg, session_service, runtime_tools, tool_confirmation, telemetry).await
+    fork_sub_agent(
+        task,
+        None,
+        cfg,
+        session_service,
+        runtime_tools,
+        tool_confirmation,
+        telemetry,
+    )
+    .await
 }
 
 /// Fork a sub-agent with a fresh session, optional file context, and timeout.
@@ -261,7 +270,12 @@ pub async fn fork_sub_agent(
     .await
     {
         Ok((runner, _, _)) => {
-            match tokio::time::timeout(timeout, run_prompt(&runner, &delegate_cfg, &prompt, telemetry)).await {
+            match tokio::time::timeout(
+                timeout,
+                run_prompt(&runner, &delegate_cfg, &prompt, telemetry),
+            )
+            .await
+            {
                 Ok(Ok(output)) => DelegateResult {
                     task: task.to_string(),
                     session_id: delegate_session_id.clone(),

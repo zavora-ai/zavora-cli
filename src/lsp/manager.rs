@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -97,12 +97,7 @@ impl LspManager {
     }
 
     /// Send an LSP request for a file. Starts the server lazily if needed.
-    pub async fn request(
-        &self,
-        file_path: &Path,
-        method: &str,
-        params: Value,
-    ) -> Result<Value> {
+    pub async fn request(&self, file_path: &Path, method: &str, params: Value) -> Result<Value> {
         let lang = Language::detect(file_path)
             .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", file_path.display()))?;
 
@@ -122,17 +117,20 @@ impl LspManager {
         };
 
         let servers = self.servers.lock().await;
-        if let Some(handle) = servers.get(&lang) {
-            if handle.open_files.contains(file_path) {
-                let uri = path_to_uri(file_path);
-                handle.client.notify(
+        if let Some(handle) = servers.get(&lang)
+            && handle.open_files.contains(file_path)
+        {
+            let uri = path_to_uri(file_path);
+            handle
+                .client
+                .notify(
                     "textDocument/didChange",
                     Some(json!({
                         "textDocument": { "uri": uri, "version": 1 },
                         "contentChanges": [{ "text": new_content }]
                     })),
-                ).await?;
-            }
+                )
+                .await?;
         }
         Ok(())
     }
@@ -154,18 +152,23 @@ impl LspManager {
             return Ok(handle.client.clone());
         }
 
-        let server_config = self.config.servers.get(lang.id()).ok_or_else(|| {
-            anyhow::anyhow!("no LSP server configured for {}", lang.id())
-        })?;
+        let server_config = self
+            .config
+            .servers
+            .get(lang.id())
+            .ok_or_else(|| anyhow::anyhow!("no LSP server configured for {}", lang.id()))?;
 
         let client = self.start_server(lang, server_config).await?;
         let client = Arc::new(client);
 
-        servers.insert(lang, ServerHandle {
-            client: client.clone(),
-            open_files: HashSet::new(),
-            restart_count: 0,
-        });
+        servers.insert(
+            lang,
+            ServerHandle {
+                client: client.clone(),
+                open_files: HashSet::new(),
+                restart_count: 0,
+            },
+        );
 
         Ok(client)
     }
@@ -230,14 +233,19 @@ impl LspManager {
             .with_context(|| format!("failed to read {}", file_path.display()))?;
 
         let uri = path_to_uri(file_path);
-        client.notify("textDocument/didOpen", Some(json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": lang.language_id(),
-                "version": 1,
-                "text": content
-            }
-        }))).await?;
+        client
+            .notify(
+                "textDocument/didOpen",
+                Some(json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": lang.language_id(),
+                        "version": 1,
+                        "text": content
+                    }
+                })),
+            )
+            .await?;
 
         handle.open_files.insert(file_path.to_path_buf());
         Ok(())
@@ -252,10 +260,10 @@ fn path_to_uri(path: &Path) -> String {
 pub fn load_lsp_config() -> Option<LspConfig> {
     let candidates = [".zavora/lsp.json", ".kiro/settings/lsp.json"];
     for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = serde_json::from_str::<LspConfig>(&content) {
-                return Some(config);
-            }
+        if let Ok(content) = std::fs::read_to_string(path)
+            && let Ok(config) = serde_json::from_str::<LspConfig>(&content)
+        {
+            return Some(config);
         }
     }
     None
@@ -277,10 +285,13 @@ pub fn generate_default_config() -> LspConfig {
 
     for &(lang, cmd, args) in checks {
         if which_exists(cmd) {
-            servers.insert(lang.to_string(), LspServerConfig {
-                command: cmd.to_string(),
-                args: args.iter().map(|s| s.to_string()).collect(),
-            });
+            servers.insert(
+                lang.to_string(),
+                LspServerConfig {
+                    command: cmd.to_string(),
+                    args: args.iter().map(|s| s.to_string()).collect(),
+                },
+            );
         }
     }
 

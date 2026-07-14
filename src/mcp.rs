@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use adk_rust::ReadonlyContext;
 use adk_rust::prelude::*;
-use adk_tool::mcp::RefreshConfig;
+use adk_tool::mcp::{
+    McpServerConfig as AdkMcpServerConfig, McpServerManager, RefreshConfig, RestartPolicy,
+};
 use adk_tool::{McpAuth, McpHttpClientBuilder};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -242,13 +244,22 @@ async fn discover_stdio_mcp_tools(server: &McpServerConfig) -> Result<Vec<Arc<dy
         .spawn()
         .with_context(|| format!("failed to spawn MCP server '{}' ({})", server.name, cmd))?;
 
-    let child_stdin = child.stdin.take().context("failed to open stdin for MCP child")?;
-    let child_stdout = child.stdout.take().context("failed to open stdout for MCP child")?;
+    let child_stdin = child
+        .stdin
+        .take()
+        .context("failed to open stdin for MCP child")?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .context("failed to open stdout for MCP child")?;
 
-    let client = ()
-        .serve((child_stdout, child_stdin))
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to connect to stdio MCP server '{}': {:?}", server.name, e))?;
+    let client = ().serve((child_stdout, child_stdin)).await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to connect to stdio MCP server '{}': {:?}",
+            server.name,
+            e
+        )
+    })?;
 
     let peer = client.peer().clone();
     let tools_result = peer
@@ -266,11 +277,7 @@ async fn discover_stdio_mcp_tools(server: &McpServerConfig) -> Result<Vec<Arc<dy
         .map(|mcp_tool| {
             let tool: Arc<dyn Tool> = Arc::new(StdioMcpTool {
                 name: format!("mcp:{}:{}", server_name, mcp_tool.name),
-                description: mcp_tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_string(),
+                description: mcp_tool.description.as_deref().unwrap_or("").to_string(),
                 schema: mcp_tool.input_schema.as_ref().clone().into_iter().collect(),
                 original_name: mcp_tool.name.to_string(),
                 peer: peer.clone(),
@@ -327,10 +334,8 @@ impl adk_rust::Tool for StdioMcpTool {
             let msg = result
                 .content
                 .first()
-                .and_then(|c| match &c.raw {
-                    rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
+                .and_then(rmcp::model::ContentBlock::as_text)
+                .map(|text| text.text.clone())
                 .unwrap_or_else(|| "MCP tool error".to_string());
             return Err(adk_rust::AdkError::tool(msg));
         }
@@ -338,10 +343,8 @@ impl adk_rust::Tool for StdioMcpTool {
         let text = result
             .content
             .iter()
-            .filter_map(|c| match &c.raw {
-                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
+            .filter_map(rmcp::model::ContentBlock::as_text)
+            .map(|text| text.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -505,4 +508,78 @@ pub async fn run_mcp_discover(cfg: &RuntimeConfig, server_name: Option<String>) 
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADK-Rust v2 McpServerManager lifecycle management
+// ---------------------------------------------------------------------------
+
+/// Convert our config format to the ADK McpServerConfig format for the manager.
+fn to_adk_mcp_config(server: &McpServerConfig) -> Option<AdkMcpServerConfig> {
+    if !server.is_stdio() {
+        // McpServerManager only handles stdio servers (child processes)
+        return None;
+    }
+
+    let cmd = server.command.as_deref()?;
+    Some(AdkMcpServerConfig {
+        command: cmd.to_string(),
+        args: server.args.clone(),
+        env: server.env.clone(),
+        disabled: !server.enabled.unwrap_or(true),
+        restart_policy: Some(RestartPolicy::default()),
+        auto_approve: vec![],
+    })
+}
+
+/// Build a managed MCP server manager for stdio servers with auto-restart.
+/// This provides health monitoring and crash recovery for long-running sessions.
+pub async fn build_managed_mcp_servers(cfg: &RuntimeConfig) -> Option<McpServerManager> {
+    let servers = select_mcp_servers(cfg, None).ok()?;
+    let stdio_servers: Vec<_> = servers.iter().filter(|s| s.is_stdio()).collect();
+
+    if stdio_servers.is_empty() {
+        return None;
+    }
+
+    let mut configs = std::collections::HashMap::new();
+    for server in &stdio_servers {
+        if let Some(adk_cfg) = to_adk_mcp_config(server) {
+            configs.insert(server.name.clone(), adk_cfg);
+        }
+    }
+
+    if configs.is_empty() {
+        return None;
+    }
+
+    let manager = McpServerManager::new(configs);
+    let results = manager.start_all().await;
+
+    // Check if any servers failed to start
+    let failures: Vec<_> = results
+        .iter()
+        .filter_map(|(name, result)| result.as_ref().err().map(|e| (name.clone(), e.to_string())))
+        .collect();
+
+    if !failures.is_empty() {
+        for (name, err) in &failures {
+            tracing::warn!(server = %name, error = %err, "MCP server failed to start");
+        }
+    }
+
+    let started = results.len() - failures.len();
+    if started > 0 {
+        // Start health monitoring with auto-restart for running servers
+        manager.start_monitoring();
+        tracing::info!(
+            started = started,
+            failed = failures.len(),
+            "MCP server manager active with health monitoring"
+        );
+        Some(manager)
+    } else {
+        tracing::warn!("All MCP servers failed to start");
+        None
+    }
 }

@@ -28,8 +28,7 @@ use crate::session::build_session_service;
 use crate::streaming::{run_prompt_streaming_with_retrieval, run_prompt_with_retrieval};
 use crate::telemetry::TelemetrySink;
 use crate::theme::{
-    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, print_startup_banner,
-    suggest_command,
+    BOLD, CYAN, DIM, GREEN, RESET, YELLOW, build_prompt, print_startup_banner, suggest_command,
 };
 use crate::todos;
 use crate::tool_policy::matches_wildcard;
@@ -47,7 +46,11 @@ pub enum ChatCommand {
     Todos(String),
     Delegate(String),
     Provider(String),
+    PlannerProvider(String),
     Model(Option<String>),
+    Worker(Option<String>),
+    Planner(Option<String>),
+    Models,
     Agent,
     AutoCompact,
     Memory(String),
@@ -136,6 +139,15 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
                 ParsedChatCommand::Command(ChatCommand::Provider(arg.to_string()))
             }
         }
+        "planner-provider" => {
+            if arg.is_empty() {
+                ParsedChatCommand::MissingArgument {
+                    usage: "/planner-provider <openai|gemini|anthropic|deepseek|groq|ollama>",
+                }
+            } else {
+                ParsedChatCommand::Command(ChatCommand::PlannerProvider(arg.to_string()))
+            }
+        }
         "model" => {
             if arg.is_empty() {
                 ParsedChatCommand::Command(ChatCommand::Model(None))
@@ -143,6 +155,13 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
                 ParsedChatCommand::Command(ChatCommand::Model(Some(arg.to_string())))
             }
         }
+        "worker" => ParsedChatCommand::Command(ChatCommand::Worker(
+            (!arg.is_empty()).then(|| arg.to_string()),
+        )),
+        "planner" => ParsedChatCommand::Command(ChatCommand::Planner(
+            (!arg.is_empty()).then(|| arg.to_string()),
+        )),
+        "models" => ParsedChatCommand::Command(ChatCommand::Models),
         other => ParsedChatCommand::UnknownCommand(format!("/{other}")),
     }
 }
@@ -170,8 +189,18 @@ pub fn print_chat_help() {
     println!();
     println!("  {BOLD}Config{RESET}");
     println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
-    println!("  {CYAN}/model{RESET} [id]         {DIM}switch model or open picker{RESET}");
-    println!("  {CYAN}/allow{RESET} <pattern>    {DIM}auto-approve tool pattern for session{RESET}");
+    println!(
+        "  {CYAN}/model{RESET} [id]         {DIM}switch the worker model (legacy alias){RESET}"
+    );
+    println!("  {CYAN}/worker{RESET} [id]        {DIM}switch the everyday coding model{RESET}");
+    println!("  {CYAN}/planner{RESET} [id]       {DIM}switch the strong planning model{RESET}");
+    println!("  {CYAN}/planner-provider{RESET} <name> {DIM}switch the planner provider{RESET}");
+    println!(
+        "  {CYAN}/models{RESET}             {DIM}show roles, models, and shared quota pools{RESET}"
+    );
+    println!(
+        "  {CYAN}/allow{RESET} <pattern>    {DIM}auto-approve tool pattern for session{RESET}"
+    );
     println!("  {CYAN}/deny{RESET} <pattern>     {DIM}deny tool pattern for session{RESET}");
     println!("  {CYAN}/undo{RESET}              {DIM}restore last modified file{RESET}");
     println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
@@ -219,28 +248,14 @@ pub fn model_picker_options(provider: Provider) -> Vec<ModelPickerOption> {
                 description: "strong reasoning, stable",
             },
         ],
-        Provider::Openai => vec![
-            ModelPickerOption {
-                id: "gpt-4.1",
-                context_window: "1M",
-                description: "balanced default",
-            },
-            ModelPickerOption {
-                id: "gpt-5.3-codex",
-                context_window: "400k",
-                description: "agentic coding, most capable",
-            },
-            ModelPickerOption {
-                id: "gpt-5-mini",
-                context_window: "400k",
-                description: "fast low-latency",
-            },
-            ModelPickerOption {
-                id: "o3-mini",
-                context_window: "200k",
-                description: "reasoning-focused",
-            },
-        ],
+        Provider::Openai => crate::model_catalog::models_for_provider(Provider::Openai)
+            .into_iter()
+            .map(|model| ModelPickerOption {
+                id: model.id,
+                context_window: model.pool.label(),
+                description: model.description,
+            })
+            .collect(),
         Provider::Anthropic => vec![
             ModelPickerOption {
                 id: "claude-sonnet-4-20250514",
@@ -368,6 +383,57 @@ pub fn prompt_model_picker(provider: Provider, current_model: &str) -> Result<Op
         .read_line(&mut selection)
         .context("failed to read model picker input")?;
     resolve_model_picker_selection(&options, &selection)
+}
+
+pub fn print_model_catalog(cfg: &RuntimeConfig) {
+    println!();
+    println!("  {BOLD}Model routing{RESET}");
+    println!(
+        "  {CYAN}WORKER{RESET}  {}/{}  {DIM}routine turns, tools, and implementation{RESET}",
+        cfg.worker_provider, cfg.worker_model
+    );
+    println!(
+        "  {YELLOW}PLANNER{RESET} {}/{}  {DIM}complex plans only · max {} calls/process{RESET}",
+        cfg.planner_provider, cfg.planner_model, cfg.planner_call_budget
+    );
+    println!();
+    println!("  {BOLD}OpenAI models available to this project{RESET}");
+    for pool in [
+        crate::model_catalog::QuotaPool::Premium1M,
+        crate::model_catalog::QuotaPool::Throughput10M,
+    ] {
+        println!();
+        println!(
+            "  {BOLD}{}{RESET} {DIM}· {}{RESET}",
+            pool.label(),
+            pool.tier_one_two_allowance()
+        );
+        for model in crate::model_catalog::models_for_provider(Provider::Openai)
+            .into_iter()
+            .filter(|model| model.pool == pool)
+        {
+            let selected = if model.id == cfg.worker_model {
+                " ← worker"
+            } else if model.id == cfg.planner_model {
+                " ← planner"
+            } else {
+                ""
+            };
+            println!(
+                "  {:<31} {:<7} {}{}",
+                model.id,
+                model.recommended_role.label(),
+                model.description,
+                selected,
+            );
+        }
+    }
+    println!();
+    println!("  {DIM}Unavailable: gpt-4.5-preview-2025-02-27 retired on 2025-07-14.{RESET}");
+    println!(
+        "  {DIM}Pools are shared across their model group. Provider usage is authoritative; Zavora only bounds local planner calls.{RESET}"
+    );
+    println!();
 }
 
 pub fn print_chat_tools(
@@ -536,8 +602,11 @@ pub async fn dispatch_chat_command(
             let prov = format!("{:?}", resolved_provider).to_ascii_lowercase();
             println!();
             println!("  {DIM}Profile:{RESET}  {GREEN}{}{RESET}", cfg.profile);
-            println!("  {DIM}Provider:{RESET} {GREEN}{prov}{RESET}");
-            println!("  {DIM}Model:{RESET}    {GREEN}{model_name}{RESET}");
+            println!("  {DIM}Worker:{RESET}   {GREEN}{prov}/{model_name}{RESET}");
+            println!(
+                "  {DIM}Planner:{RESET}  {YELLOW}{:?}/{}{RESET} {DIM}({} calls max){RESET}",
+                cfg.planner_provider, cfg.planner_model, cfg.planner_call_budget
+            );
             println!("  {DIM}Session:{RESET}  {}{RESET}", cfg.session_id);
             println!();
             Ok(ChatCommandAction::Continue)
@@ -717,11 +786,21 @@ pub async fn dispatch_chat_command(
             print_chat_mcp(cfg, runtime_tools);
             Ok(ChatCommandAction::Continue)
         }
+        ChatCommand::Models => {
+            print_model_catalog(cfg);
+            Ok(ChatCommandAction::Continue)
+        }
         ChatCommand::Provider(provider_name) => {
             let new_provider = parse_provider_name(&provider_name)?;
             let mut switched_cfg = cfg.clone();
             switched_cfg.provider = new_provider;
-            switched_cfg.model = None;
+            switched_cfg.worker_provider = new_provider;
+            switched_cfg.worker_model = crate::model_catalog::default_model(
+                new_provider,
+                crate::model_catalog::ModelRole::Worker,
+            )
+            .to_string();
+            switched_cfg.model = Some(switched_cfg.worker_model.clone());
 
             match build_single_runner_for_chat(
                 &switched_cfg,
@@ -745,6 +824,8 @@ pub async fn dispatch_chat_command(
                     );
                     switched_cfg.provider = *resolved_provider;
                     switched_cfg.model = Some(model_name.clone());
+                    switched_cfg.worker_provider = *resolved_provider;
+                    switched_cfg.worker_model = model_name.clone();
                     *cfg = switched_cfg;
                     tracing::info!(
                         provider = ?resolved_provider,
@@ -767,7 +848,7 @@ pub async fn dispatch_chat_command(
 
             Ok(ChatCommandAction::Continue)
         }
-        ChatCommand::Model(next_model) => {
+        ChatCommand::Model(next_model) | ChatCommand::Worker(next_model) => {
             let chosen_model = match next_model {
                 Some(value) => Some(value),
                 None => prompt_model_picker(*resolved_provider, model_name)?,
@@ -781,7 +862,8 @@ pub async fn dispatch_chat_command(
             };
 
             let mut switched_cfg = cfg.clone();
-            switched_cfg.model = Some(chosen_model);
+            switched_cfg.model = Some(chosen_model.clone());
+            switched_cfg.worker_model = chosen_model;
 
             match build_single_runner_for_chat(
                 &switched_cfg,
@@ -805,6 +887,8 @@ pub async fn dispatch_chat_command(
                     );
                     switched_cfg.provider = *resolved_provider;
                     switched_cfg.model = Some(model_name.clone());
+                    switched_cfg.worker_provider = *resolved_provider;
+                    switched_cfg.worker_model = model_name.clone();
                     *cfg = switched_cfg;
                     tracing::info!(
                         provider = ?resolved_provider,
@@ -825,6 +909,74 @@ pub async fn dispatch_chat_command(
                 }
             }
 
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::PlannerProvider(provider_name) => {
+            let provider = parse_provider_name(&provider_name)?;
+            if provider == Provider::Auto {
+                return Err(anyhow::anyhow!("planner provider must be explicit"));
+            }
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.planner_provider = provider;
+            switched_cfg.planner_model = crate::model_catalog::default_model(
+                provider,
+                crate::model_catalog::ModelRole::Planner,
+            )
+            .to_string();
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                runtime_tools,
+                tool_confirmation,
+                telemetry,
+            )
+            .await
+            {
+                Ok((new_runner, _, _)) => {
+                    *runner = new_runner;
+                    *cfg = switched_cfg;
+                    println!(
+                        "Planner switched to {:?}/{}. Worker and session are unchanged.",
+                        cfg.planner_provider, cfg.planner_model
+                    );
+                }
+                Err(error) => eprintln!("{}", format_cli_error(&error, cfg.show_sensitive_config)),
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Planner(next_model) => {
+            let chosen = match next_model {
+                Some(model) => Some(model),
+                None => prompt_model_picker(cfg.planner_provider, &cfg.planner_model)?,
+            };
+            let Some(chosen) = chosen else {
+                println!(
+                    "Planner unchanged: {:?}/{}",
+                    cfg.planner_provider, cfg.planner_model
+                );
+                return Ok(ChatCommandAction::Continue);
+            };
+            let mut switched_cfg = cfg.clone();
+            switched_cfg.planner_model = chosen;
+            match build_single_runner_for_chat(
+                &switched_cfg,
+                session_service.clone(),
+                runtime_tools,
+                tool_confirmation,
+                telemetry,
+            )
+            .await
+            {
+                Ok((new_runner, _, _)) => {
+                    *runner = new_runner;
+                    *cfg = switched_cfg;
+                    println!(
+                        "Planner switched to {:?}/{}. Worker and session are unchanged.",
+                        cfg.planner_provider, cfg.planner_model
+                    );
+                }
+                Err(error) => eprintln!("{}", format_cli_error(&error, cfg.show_sensitive_config)),
+            }
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Agent => {
@@ -1030,8 +1182,7 @@ pub async fn run_chat(
     );
 
     tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
-    let provider_label = format!("{:?}", resolved_provider).to_ascii_lowercase();
-    print_startup_banner(&provider_label, &model_name);
+    print_startup_banner(&cfg);
     if buffered_output_required(cfg.guardrail_output_mode) {
         println!(
             "  {YELLOW}Guardrail output mode {:?} active: responses will be buffered.{RESET}",
@@ -1042,45 +1193,7 @@ pub async fn run_chat(
     let mut rl = rustyline::DefaultEditor::new().context("failed to initialize readline")?;
     let workspace = std::env::current_dir().unwrap_or_default();
 
-    // Bootstrap: Get time and memory context once at startup for personalized greeting
-    let time_context = TimeAgent::handshake();
-    let memories = crate::agents::memory::recall("", 5).await.unwrap_or_default();
-
-    // Generate natural greeting with LLM
-    println!();
-    if memories.is_empty() {
-        println!("Hello, I'm Zavora. How may I help you today?");
-    } else {
-        let greeting_prompt = format!(
-            "Current time: {} ({})\nContext: {}\n\n\
-             Generate a brief, natural greeting (one sentence). Use their name if you know it. Be warm, not robotic.\n\n\
-             Examples:\n\
-             - Hi Sarah! What can I help with?\n\
-             - Hey Alex, good to see you again. What's up?\n\
-             - Morning James! What are we working on today?\n\
-             - Hello! How can I help?\n\n\
-             Output plain text only, no markdown, no code blocks.\n\n\
-             Your greeting:",
-            time_context.now_iso,
-            time_context.weekday,
-            memories.join("; ")
-        );
-
-        match run_prompt_streaming_with_retrieval(
-            &runner,
-            &cfg,
-            &greeting_prompt,
-            retrieval_service.as_ref(),
-            telemetry,
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(_) => {
-                println!("Hello, I'm Zavora. How may I help you today?");
-            }
-        }
-    }
+    println!("  Ready. Describe the outcome you want, or type /help.");
     println!();
 
     let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
@@ -1099,14 +1212,18 @@ pub async fn run_chat(
         let input = match rl.readline(&prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => {
-                if let Some(prev) = last_ctrl_c {
-                    if prev.elapsed() < std::time::Duration::from_secs(2) {
-                        println!();
-                        break;
-                    }
+                if let Some(prev) = last_ctrl_c
+                    && prev.elapsed() < std::time::Duration::from_secs(2)
+                {
+                    println!();
+                    break;
                 }
                 last_ctrl_c = Some(std::time::Instant::now());
-                println!("\n{}Press Ctrl+C again to exit.{}", crate::theme::DIM, crate::theme::RESET);
+                println!(
+                    "\n{}Press Ctrl+C again to exit.{}",
+                    crate::theme::DIM,
+                    crate::theme::RESET
+                );
                 continue;
             }
             Err(rustyline::error::ReadlineError::Eof) => break,
@@ -1236,25 +1353,25 @@ pub async fn run_chat(
         }
 
         // Check if auto-compaction should trigger
-        if cfg.auto_compact_enabled {
-            if let Ok(events) = snapshot_session_events(&session_service, &cfg).await {
-                let provider_str = format!("{:?}", resolved_provider).to_ascii_lowercase();
-                let usage = compute_context_usage(&events, &provider_str, &model_name);
-                if usage.utilization() >= cfg.compaction_threshold {
-                    println!();
-                    println!(
-                        "{}Auto-compacting ({}% usage)...{}",
-                        crate::theme::DIM,
-                        (usage.utilization() * 100.0) as u32,
-                        crate::theme::RESET
-                    );
-                    let target_util = cfg.compaction_target;
-                    match compact_to_target(&session_service, &cfg, target_util).await {
-                        Ok(msg) => println!("{}{}{}", crate::theme::DIM, msg, crate::theme::RESET),
-                        Err(e) => eprintln!("Auto-compaction failed: {e}"),
-                    }
-                    println!();
+        if cfg.auto_compact_enabled
+            && let Ok(events) = snapshot_session_events(&session_service, &cfg).await
+        {
+            let provider_str = format!("{:?}", resolved_provider).to_ascii_lowercase();
+            let usage = compute_context_usage(&events, &provider_str, &model_name);
+            if usage.utilization() >= cfg.compaction_threshold {
+                println!();
+                println!(
+                    "{}Auto-compacting ({}% usage)...{}",
+                    crate::theme::DIM,
+                    (usage.utilization() * 100.0) as u32,
+                    crate::theme::RESET
+                );
+                let target_util = cfg.compaction_target;
+                match compact_to_target(&session_service, &cfg, target_util).await {
+                    Ok(msg) => println!("{}{}{}", crate::theme::DIM, msg, crate::theme::RESET),
+                    Err(e) => eprintln!("Auto-compaction failed: {e}"),
                 }
+                println!();
             }
         }
     }

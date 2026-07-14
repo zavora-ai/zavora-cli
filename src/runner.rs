@@ -12,14 +12,11 @@ use serde_json::json;
 use crate::cli::ToolConfirmationMode;
 use crate::config::RuntimeConfig;
 use crate::mcp::discover_mcp_tools;
-use crate::provider::resolve_model;
+use crate::provider::{resolve_model, resolve_planner_model};
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
 use crate::tool_policy::filter_tools_by_policy;
-use crate::tools::{
-
-    build_builtin_tools,
-};
+use crate::tools::build_builtin_tools;
 
 const ORCHESTRATOR_INSTRUCTION: &str = "\
 You are the orchestrator. You coordinate specialist agents to accomplish complex tasks.
@@ -30,7 +27,6 @@ CAPABILITY AGENTS (call as tools when you need their unique skills):
 
 SUBAGENTS (automatically available when conditions met):
 - search_agent: For news, current events, and web searches (enabled only with --provider gemini)
-- ralph_agent: For greenfield projects and multi-phase development (enabled only in agent mode)
 
 WORKFLOW AGENTS (use for complex multi-step work):
 - file_search_agent: Comprehensive file discovery with saturation detection
@@ -39,7 +35,7 @@ WORKFLOW AGENTS (use for complex multi-step work):
 
 RULES:
 - For news/web searches: delegate to search_agent
-- For greenfield projects, multi-file scaffolding, or multi-phase development: delegate to ralph_agent (agent mode only)
+- For complex multi-file or architectural work: call plan_work once, then execute its plan
 - memory_agent is ONLY for user preferences/decisions, NOT for facts or general knowledge
 - For simple tasks, use your built-in tools directly
 - For complex multi-step tasks, use sequential_agent
@@ -165,14 +161,13 @@ pub fn build_single_agent_with_tools_and_telemetry(
              - Use conventional commit prefixes: feat:, fix:, refactor:, docs:, test:, chore:\n\
              - Write a concise summary line (<72 chars). For complex changes, add a blank line \
              then a body explaining what and why.\n\
-             - Stage with `git add -A` unless selectively staging specific files.\n\
-             - Push after committing unless the user says otherwise.\n\
+             - Stage only files that belong to the requested change. Preserve unrelated work.\n\
+             - Commit or push only when the user explicitly asks for it.\n\
              \n\
              WORKFLOW:\n\
              - Check `git status` before starting work to understand the current state.\n\
              - Don't amend or force-push unless explicitly asked.\n\
-             - When making multiple related changes, commit after each logical step — not all \
-             at the end.\n\
+             - Never amend, force-push, or change branches without explicit approval.\n\
              - If a build or test fails after changes, fix it before committing.\n\
              </git_guidelines>\n\
              \n\
@@ -192,8 +187,7 @@ pub fn build_single_agent_with_tools_and_telemetry(
              <rules>\n\
              - Never include secrets or API keys in code unless explicitly asked\n\
              - Substitute PII with generic placeholders\n\
-             - Do not modify or remove tests unless explicitly requested\n\
-             - Do not add tests unless explicitly requested\n\
+             - Preserve existing tests and add focused tests when they are needed to verify the change\n\
              - Decline requests for malicious code\n\
              - When uncertain, ask for clarification rather than guessing\n\
              </rules>"
@@ -228,34 +222,13 @@ pub fn build_single_agent_with_tools_and_telemetry(
     // runs with --provider gemini. Auto-detected provider mode does not attach it.
     let search_subagent = build_search_subagent_for_provider(runtime_cfg, model.clone());
 
-    // Ralph sub-agent is only attached when agent mode is active.
-    let ralph_subagent =
-        build_ralph_subagent_if_agent_mode(runtime_cfg, model.clone(), telemetry);
-
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
         .instruction(instruction)
         .model(model)
         .tool_confirmation_policy(tool_confirmation_policy)
         .tool_timeout(tool_timeout)
-        .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto)
-        .before_model_callback(Box::new(|_ctx, mut request| {
-            Box::pin(async move {
-                // Fix tool response roles: conversation_history() maps all non-user
-                // events to "model", but tool responses must be "function" for OpenAI.
-                for content in &mut request.contents {
-                    if content.role == "model"
-                        && content
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, adk_rust::prelude::Part::FunctionResponse { .. }))
-                    {
-                        content.role = "function".to_string();
-                    }
-                }
-                Ok(adk_rust::prelude::BeforeModelResult::Continue(request))
-            })
-        }));
+        .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto);
 
     for tool in tools {
         builder = builder.tool(tool.clone());
@@ -266,9 +239,29 @@ pub fn build_single_agent_with_tools_and_telemetry(
         builder = builder.sub_agent(search_agent);
     }
 
-    // Add ralph subagent if available (agent mode only)
-    if let Some(ralph_agent) = ralph_subagent {
-        builder = builder.sub_agent(ralph_agent);
+    if let Some(cfg) = runtime_cfg {
+        match resolve_planner_model(cfg) {
+            Ok((planner_model, provider, model_name)) => {
+                let planner = crate::model_roles::build_planner_agent(planner_model)?;
+                builder = builder.tool(Arc::new(crate::model_roles::BudgetedPlannerTool::new(
+                    planner,
+                    cfg.planner_call_budget,
+                )));
+                if let Some(telemetry) = telemetry {
+                    telemetry.emit(
+                        "planner.available",
+                        json!({
+                            "provider": format!("{provider:?}").to_ascii_lowercase(),
+                            "model": model_name,
+                            "call_budget": cfg.planner_call_budget,
+                        }),
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "planner unavailable; worker will continue without plan_work")
+            }
+        }
     }
 
     Ok(Arc::new(builder.build()?))
@@ -287,33 +280,6 @@ fn build_search_subagent_for_provider(
         Ok(agent) => Some(agent),
         Err(err) => {
             tracing::warn!("failed to build search sub-agent: {}", err);
-            None
-        }
-    }
-}
-
-fn build_ralph_subagent_if_agent_mode(
-    runtime_cfg: Option<&RuntimeConfig>,
-    model: Arc<dyn Llm>,
-    telemetry: Option<&TelemetrySink>,
-) -> Option<Arc<dyn Agent>> {
-    use crate::tools::confirming::is_agent_mode;
-
-    if !is_agent_mode() {
-        return None;
-    }
-
-    let cfg = runtime_cfg?;
-    let telemetry = telemetry?;
-
-    match crate::agents::ralph_agent::build_ralph_agent(
-        model,
-        Arc::new(cfg.clone()),
-        Arc::new(telemetry.clone()),
-    ) {
-        Ok(agent) => Some(agent),
-        Err(err) => {
-            tracing::warn!("failed to build ralph sub-agent: {}", err);
             None
         }
     }
@@ -379,8 +345,8 @@ pub fn resolve_tool_confirmation_settings(
 }
 
 pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
-    use crate::tools::confirming::ConfirmingTool;
     use crate::tool_policy::is_read_only_tool;
+    use crate::tools::confirming::ConfirmingTool;
 
     let mut tools = build_builtin_tools();
     let built_in_count = tools.len();
@@ -443,9 +409,7 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
                     // and ConfirmingTool handles per-call denial at runtime.
                     ConfirmingTool::wrap(tool)
                 }
-                crate::tool_policy::PermissionDecision::Ask => {
-                    ConfirmingTool::wrap(tool)
-                }
+                crate::tool_policy::PermissionDecision::Ask => ConfirmingTool::wrap(tool),
                 crate::tool_policy::PermissionDecision::NoMatch => {
                     // Default behavior: read-only tools auto-approve (display-only),
                     // guarded built-ins and MCP tools require confirmation
@@ -456,7 +420,10 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
                             ToolConfirmationMode::Always => ConfirmingTool::wrap(tool),
                             ToolConfirmationMode::McpOnly => {
                                 if discovered_mcp_tool_names.contains(name)
-                                    || matches!(name, "fs_write" | "file_edit" | "execute_bash" | "github_ops")
+                                    || matches!(
+                                        name,
+                                        "fs_write" | "file_edit" | "execute_bash" | "github_ops"
+                                    )
                                 {
                                     ConfirmingTool::wrap(tool)
                                 } else {
@@ -465,7 +432,10 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
                             }
                             ToolConfirmationMode::Never => {
                                 // Still wrap guarded built-ins
-                                if matches!(name, "fs_write" | "file_edit" | "execute_bash" | "github_ops") {
+                                if matches!(
+                                    name,
+                                    "fs_write" | "file_edit" | "execute_bash" | "github_ops"
+                                ) {
                                     ConfirmingTool::wrap(tool)
                                 } else {
                                     tool
@@ -577,8 +547,7 @@ pub async fn build_runner_with_session_service(
         builder = builder.compaction_config(cc);
     }
 
-    let runner = builder.build()
-        .context("failed to build ADK runner")?;
+    let runner = builder.build().context("failed to build ADK runner")?;
 
     Ok(runner)
 }

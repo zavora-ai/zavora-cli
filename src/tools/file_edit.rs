@@ -3,16 +3,14 @@ use std::path::Path;
 use serde_json::{Value, json};
 use similar::TextDiff;
 
-use super::fs_read::{
-    enforce_workspace_path_policy, fs_read_display_path, fs_read_workspace_root,
-};
+use super::fs_read::{enforce_workspace_path_policy, fs_read_display_path, fs_read_workspace_root};
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
 pub fn file_edit_tool_response(args: &Value) -> Value {
     let workspace_root = match fs_read_workspace_root() {
         Ok(root) => root,
-        Err(err) => return error_payload("<workspace>", &err.code, &err.message),
+        Err(err) => return error_payload("<workspace>", err.code, &err.message),
     };
 
     let file_path = match args.get("file_path").and_then(Value::as_str).map(str::trim) {
@@ -33,7 +31,11 @@ pub fn file_edit_tool_response(args: &Value) -> Value {
         .unwrap_or(false);
 
     if old_string == new_string {
-        return error_payload(file_path, "no_change", "old_string and new_string are identical");
+        return error_payload(
+            file_path,
+            "no_change",
+            "old_string and new_string are identical",
+        );
     }
 
     // Resolve path (reuse fs_read path resolution which requires the file to exist)
@@ -43,21 +45,25 @@ pub fn file_edit_tool_response(args: &Value) -> Value {
     };
 
     // Size check
-    if let Ok(meta) = std::fs::metadata(&resolved) {
-        if meta.len() > MAX_FILE_SIZE {
-            return error_payload(
-                file_path,
-                "file_too_large",
-                format!("file exceeds 10MB limit ({}MB)", meta.len() / (1024 * 1024)),
-            );
-        }
+    if let Ok(meta) = std::fs::metadata(&resolved)
+        && meta.len() > MAX_FILE_SIZE
+    {
+        return error_payload(
+            file_path,
+            "file_too_large",
+            format!("file exceeds 10MB limit ({}MB)", meta.len() / (1024 * 1024)),
+        );
     }
 
     // Read
     let original = match std::fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(_) => {
-            return error_payload(file_path, "io_error", format!("failed to read '{}'", file_path))
+            return error_payload(
+                file_path,
+                "io_error",
+                format!("failed to read '{}'", file_path),
+            );
         }
     };
 
@@ -102,7 +108,11 @@ pub fn file_edit_tool_response(args: &Value) -> Value {
 
     // Write
     if std::fs::write(&resolved, updated.as_bytes()).is_err() {
-        return error_payload(file_path, "io_error", format!("failed to write '{}'", file_path));
+        return error_payload(
+            file_path,
+            "io_error",
+            format!("failed to write '{}'", file_path),
+        );
     }
 
     // Diff
@@ -211,10 +221,10 @@ fn find_closest_match(content: &str, target: &str) -> Option<String> {
     #[cfg(not(feature = "semantic-search"))]
     {
         // Without strsim, do a simple substring prefix search
-        let prefix = &target[..target.len().min(40)];
+        let prefix = crate::text::truncate(target, 40, "");
         content
             .lines()
-            .find(|line| line.contains(prefix))
+            .find(|line| line.contains(&prefix))
             .map(|line| line.to_string())
     }
 }

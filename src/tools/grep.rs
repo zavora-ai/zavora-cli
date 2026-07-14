@@ -109,26 +109,41 @@ fn run_rg(
 
     // Output mode
     match output_mode {
-        "files_with_matches" => { cmd.arg("-l"); }
-        "count" => { cmd.arg("-c"); }
-        _ => { cmd.arg("-n"); } // content mode: show line numbers
+        "files_with_matches" => {
+            cmd.arg("-l");
+        }
+        "count" => {
+            cmd.arg("-c");
+        }
+        _ => {
+            cmd.arg("-n");
+        } // content mode: show line numbers
     }
 
     // Optional flags
     if args.get("-i").and_then(Value::as_bool).unwrap_or(false)
-        || args.get("case_insensitive").and_then(Value::as_bool).unwrap_or(false)
+        || args
+            .get("case_insensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         cmd.arg("-i");
     }
     if let Some(g) = args.get("glob").and_then(Value::as_str) {
         cmd.arg("--glob").arg(g);
     }
-    if let Some(t) = args.get("file_type").and_then(Value::as_str)
+    if let Some(t) = args
+        .get("file_type")
+        .and_then(Value::as_str)
         .or_else(|| args.get("type").and_then(Value::as_str))
     {
         cmd.arg("--type").arg(t);
     }
-    if args.get("multiline").and_then(Value::as_bool).unwrap_or(false) {
+    if args
+        .get("multiline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         cmd.arg("-U").arg("--multiline-dotall");
     }
 
@@ -140,7 +155,9 @@ fn run_rg(
         if let Some(n) = args.get("-A").and_then(Value::as_u64) {
             cmd.arg("-A").arg(n.to_string());
         }
-        let ctx = args.get("-C").and_then(Value::as_u64)
+        let ctx = args
+            .get("-C")
+            .and_then(Value::as_u64)
             .or_else(|| args.get("context").and_then(Value::as_u64));
         if let Some(n) = ctx {
             cmd.arg("-C").arg(n.to_string());
@@ -149,7 +166,9 @@ fn run_rg(
 
     cmd.arg("--").arg(pattern).arg(search_path);
 
-    let output = cmd.output().map_err(|e| format!("failed to run rg: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run rg: {}", e))?;
 
     // rg exits 1 for no matches — that's not an error
     if !output.status.success() && output.status.code() != Some(1) {
@@ -174,7 +193,10 @@ fn run_grep_fallback(
     cmd.arg("-rn"); // recursive + line numbers
 
     if args.get("-i").and_then(Value::as_bool).unwrap_or(false)
-        || args.get("case_insensitive").and_then(Value::as_bool).unwrap_or(false)
+        || args
+            .get("case_insensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         cmd.arg("-i");
     }
@@ -183,8 +205,12 @@ fn run_grep_fallback(
     }
 
     match output_mode {
-        "files_with_matches" => { cmd.arg("-l"); }
-        "count" => { cmd.arg("-c"); }
+        "files_with_matches" => {
+            cmd.arg("-l");
+        }
+        "count" => {
+            cmd.arg("-c");
+        }
         _ => {}
     }
 
@@ -195,7 +221,9 @@ fn run_grep_fallback(
 
     cmd.arg("-E").arg(pattern).arg(search_path);
 
-    let output = cmd.output().map_err(|e| format!("failed to run grep: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run grep: {}", e))?;
 
     if !output.status.success() && output.status.code() != Some(1) {
         let stderr = String::from_utf8_lossy(&output.stderr);

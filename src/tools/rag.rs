@@ -19,10 +19,14 @@ impl adk_rag::EmbeddingProvider for BowEmbedding {
             vec[h % DIMENSIONS] += 1.0;
         }
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 { vec.iter_mut().for_each(|x| *x /= norm); }
+        if norm > 0.0 {
+            vec.iter_mut().for_each(|x| *x /= norm);
+        }
         Ok(vec)
     }
-    fn dimensions(&self) -> usize { DIMENSIONS }
+    fn dimensions(&self) -> usize {
+        DIMENSIONS
+    }
 }
 
 fn hash_word(word: &str) -> usize {
@@ -44,7 +48,10 @@ pub fn build_rag_tool() -> anyhow::Result<Arc<dyn Tool>> {
         .build()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    Ok(Arc::new(adk_rag::RagTool::new(Arc::new(pipeline), COLLECTION)))
+    Ok(Arc::new(adk_rag::RagTool::new(
+        Arc::new(pipeline),
+        COLLECTION,
+    )))
 }
 
 /// Build a RAG pipeline for programmatic use (ingest + query).

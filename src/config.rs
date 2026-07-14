@@ -20,6 +20,11 @@ pub struct RuntimeConfig {
     pub agent_deny_tools: Vec<String>,
     pub provider: Provider,
     pub model: Option<String>,
+    pub worker_provider: Provider,
+    pub worker_model: String,
+    pub planner_provider: Provider,
+    pub planner_model: String,
+    pub planner_call_budget: u32,
     pub api_key: Option<String>,
     pub ollama_host: Option<String>,
     pub app_name: String,
@@ -68,6 +73,11 @@ pub struct ProfilesFile {
 pub struct ProfileConfig {
     pub provider: Option<Provider>,
     pub model: Option<String>,
+    pub worker_provider: Option<Provider>,
+    pub worker_model: Option<String>,
+    pub planner_provider: Option<Provider>,
+    pub planner_model: Option<String>,
+    pub planner_call_budget: Option<u32>,
     pub api_key: Option<String>,
     pub ollama_host: Option<String>,
     pub app_name: Option<String>,
@@ -457,15 +467,39 @@ pub fn resolve_runtime_config_with_agents(
         anyhow::anyhow!("resolved active agent '{}' is missing", active_agent_name)
     })?;
 
-    let provider = if cli.provider != Provider::Auto {
-        cli.provider
-    } else {
-        active_agent
-            .config
-            .provider
-            .or(profile.provider)
-            .unwrap_or(Provider::Auto)
-    };
+    let provider = cli
+        .worker_provider
+        .or((cli.provider != Provider::Auto).then_some(cli.provider))
+        .or(active_agent.config.provider)
+        .or(profile.worker_provider)
+        .or(profile.provider)
+        .unwrap_or(Provider::Openai);
+    let worker_model = cli
+        .worker_model
+        .clone()
+        .or(cli.model.clone())
+        .or(active_agent.config.model.clone())
+        .or(profile.worker_model.clone())
+        .or(profile.model.clone())
+        .unwrap_or_else(|| {
+            crate::model_catalog::default_model(provider, crate::model_catalog::ModelRole::Worker)
+                .to_string()
+        });
+    let planner_provider = cli
+        .planner_provider
+        .or(profile.planner_provider)
+        .unwrap_or(Provider::Openai);
+    let planner_model = cli
+        .planner_model
+        .clone()
+        .or(profile.planner_model.clone())
+        .unwrap_or_else(|| {
+            crate::model_catalog::default_model(
+                planner_provider,
+                crate::model_catalog::ModelRole::Planner,
+            )
+            .to_string()
+        });
 
     let require_confirm_tool =
         merge_unique_names(&profile.require_confirm_tool, &cli.require_confirm_tool);
@@ -491,11 +525,16 @@ pub fn resolve_runtime_config_with_agents(
         agent_allow_tools: active_agent.config.allow_tools.clone(),
         agent_deny_tools: active_agent.config.deny_tools.clone(),
         provider,
-        model: cli
-            .model
-            .clone()
-            .or(active_agent.config.model.clone())
-            .or(profile.model),
+        model: Some(worker_model.clone()),
+        worker_provider: provider,
+        worker_model,
+        planner_provider,
+        planner_model,
+        planner_call_budget: cli
+            .planner_call_budget
+            .or(profile.planner_call_budget)
+            .unwrap_or(4)
+            .max(1),
         api_key: profile.api_key,
         ollama_host: profile.ollama_host,
         app_name: cli

@@ -120,11 +120,12 @@ pub async fn get_or_build_server_runner(
     }
 
     // Evict oldest entry when cache is at capacity.
-    if cache.len() >= state.runner_cache_max && !cache.is_empty() {
-        if let Some(evict_key) = cache.keys().next().cloned() {
-            cache.remove(&evict_key);
-            tracing::info!(evicted_key = %evict_key, cache_size = cache.len(), "server runner cache eviction");
-        }
+    if cache.len() >= state.runner_cache_max
+        && !cache.is_empty()
+        && let Some(evict_key) = cache.keys().next().cloned()
+    {
+        cache.remove(&evict_key);
+        tracing::info!(evicted_key = %evict_key, cache_size = cache.len(), "server runner cache eviction");
     }
 
     cache.insert(key, runner.clone());
@@ -277,6 +278,57 @@ pub fn process_a2a_ping(request: A2aPingRequest) -> Result<A2aPingResponse> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InterruptRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InterruptResponse {
+    pub interrupted: bool,
+    pub session_id: String,
+}
+
+/// Interrupt a running agent session through the ADK-Rust v2 runner.
+pub async fn handle_interrupt(
+    State(state): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<InterruptRequest>,
+) -> ApiResult<InterruptResponse> {
+    check_server_auth(&state, &headers)?;
+
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "session_id is required for interrupt",
+        ));
+    }
+
+    // Look up the runner for this session and call interrupt()
+    let cache = state.runner_cache.read().await;
+    let mut interrupted = false;
+    for (key, runner) in cache.iter() {
+        if key.ends_with(&format!("::{}", session_id)) {
+            interrupted = runner.interrupt(&session_id);
+            break;
+        }
+    }
+
+    state.telemetry.emit(
+        "server.interrupt",
+        json!({
+            "session_id": session_id,
+            "interrupted": interrupted,
+        }),
+    );
+
+    Ok(Json(InterruptResponse {
+        interrupted,
+        session_id,
+    }))
+}
+
 pub async fn handle_a2a_ping(
     State(state): State<Arc<ServerState>>,
     headers: axum::http::HeaderMap,
@@ -307,6 +359,7 @@ pub fn build_server_router(state: Arc<ServerState>) -> AxumRouter {
     AxumRouter::new()
         .route("/healthz", get(handle_server_health))
         .route("/v1/ask", post(handle_server_ask))
+        .route("/v1/interrupt", post(handle_interrupt))
         .route("/v1/a2a/ping", post(handle_a2a_ping))
         .with_state(state)
 }
@@ -382,7 +435,7 @@ pub async fn run_server(
     );
 
     println!(
-        "Server mode listening on http://{} (health: /healthz, ask: /v1/ask, a2a: /v1/a2a/ping)",
+        "Server mode listening on http://{} (health: /healthz, ask: /v1/ask, interrupt: /v1/interrupt, a2a: /v1/a2a/ping)",
         addr
     );
 

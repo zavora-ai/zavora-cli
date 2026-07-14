@@ -28,7 +28,9 @@ pub fn tool_search_response(query: &str, all_tools: &[Arc<dyn Tool>]) -> Value {
         .filter(|t| {
             let name = t.name().to_ascii_lowercase();
             let desc = t.description().to_ascii_lowercase();
-            terms.iter().any(|term| name.contains(term) || desc.contains(term))
+            terms
+                .iter()
+                .any(|term| name.contains(term) || desc.contains(term))
         })
         .map(|t| {
             json!({
@@ -48,7 +50,13 @@ pub fn tool_search_response(query: &str, all_tools: &[Arc<dyn Tool>]) -> Value {
 
 /// Core tools always included in the system prompt (even when tool search is active).
 pub const CORE_TOOLS: &[&str] = &[
-    "fs_read", "fs_write", "file_edit", "execute_bash", "glob", "grep", "tool_search",
+    "fs_read",
+    "fs_write",
+    "file_edit",
+    "execute_bash",
+    "glob",
+    "grep",
+    "tool_search",
 ];
 
 /// Check if a tool is a core tool.

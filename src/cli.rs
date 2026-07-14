@@ -13,6 +13,20 @@ pub enum Provider {
     Ollama,
 }
 
+impl std::fmt::Display for Provider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "Auto",
+            Self::Gemini => "Gemini",
+            Self::Openai => "OpenAI",
+            Self::Anthropic => "Anthropic",
+            Self::Deepseek => "DeepSeek",
+            Self::Groq => "Groq",
+            Self::Ollama => "Ollama",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum WorkflowMode {
     Single,
@@ -218,6 +232,26 @@ pub struct Cli {
     #[arg(long, env = "ZAVORA_MODEL")]
     pub model: Option<String>,
 
+    /// Explicit worker provider. Overrides the legacy --provider flag.
+    #[arg(long, env = "ZAVORA_WORKER_PROVIDER", value_enum)]
+    pub worker_provider: Option<Provider>,
+
+    /// Model used for routine conversation, tools, and implementation work.
+    #[arg(long, env = "ZAVORA_WORKER_MODEL")]
+    pub worker_model: Option<String>,
+
+    /// Provider used by the bounded planning specialist.
+    #[arg(long, env = "ZAVORA_PLANNER_PROVIDER", value_enum)]
+    pub planner_provider: Option<Provider>,
+
+    /// Strong model used only when a complex task needs a plan or material replan.
+    #[arg(long, env = "ZAVORA_PLANNER_MODEL")]
+    pub planner_model: Option<String>,
+
+    /// Maximum strong-planner calls allowed during one CLI process (default: 4).
+    #[arg(long, env = "ZAVORA_PLANNER_CALL_BUDGET")]
+    pub planner_call_budget: Option<u32>,
+
     #[arg(long, env = "ZAVORA_AGENT")]
     pub agent: Option<String>,
 
@@ -312,6 +346,8 @@ pub enum Commands {
     },
     #[command(about = "Run interactive chat mode")]
     Chat,
+    #[command(about = "List model roles, quota pools, and selectable models")]
+    Models,
     #[command(about = "Run a workflow mode (single, sequential, parallel, loop) for a prompt")]
     Workflow {
         #[arg(value_enum)]
@@ -412,6 +448,7 @@ pub fn command_label(command: &Commands) -> String {
     match command {
         Commands::Ask { .. } => "ask".to_string(),
         Commands::Chat => "chat".to_string(),
+        Commands::Models => "models".to_string(),
         Commands::Workflow { mode, .. } => format!("workflow.{}", workflow_mode_label(*mode)),
         Commands::ReleasePlan { .. } => "release-plan".to_string(),
         Commands::Doctor => "doctor".to_string(),

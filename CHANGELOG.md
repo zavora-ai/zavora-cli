@@ -6,6 +6,39 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-07-14
+
+### Added
+
+- Independent worker and planner provider/model roles across CLI flags, environment variables, profiles, and interactive commands.
+- OpenAI-first model catalog with the available 1M and 10M shared daily pools, role guidance, and retired-model filtering.
+- Bounded `plan_work` agent tool: a strong planning agent can advise the worker for complex work without receiving mutation tools.
+- `/models`, `/worker`, `/planner`, and `/planner-provider` chat commands plus the `zavora-cli models` catalog command.
+- OS credential-vault storage for setup API keys.
+- Unicode-safe previews and truncation for streamed content, hook output, compaction, web fetches, and tool confirmations.
+- Kiro requirements, design, and implementation task specification in `.kiro/specs/v2-upgrade`.
+
+### Changed
+
+- Migrated the complete runtime to ADK-Rust 2.0 and `rmcp` 2.2.
+- OpenAI is now the default provider. Routine work defaults to `gpt-5.4-mini-2026-03-17`; planning defaults to `gpt-5.6-sol` with four calls per process.
+- OpenAI now uses the ADK-Rust v2 Responses API client.
+- Ralph now shares the v2 worker, planner, session, and tool runtime instead of pulling a duplicate ADK 0.5 dependency graph.
+- Replaced the large startup wordmark and model-generated greeting with a compact workspace, session, and model-routing surface.
+- Provider/model changes preserve the session and can update worker and planner independently.
+- Setup no longer creates a sample skill in every working directory.
+- Rust MSRV is now 1.94 and the crate uses the Rust 2024 edition.
+
+### Fixed
+
+- Setup credentials are now read by the runtime and are no longer written in plaintext TOML.
+- Removed an obsolete OpenAI role-repair callback that conflicted with the v2 model pipeline.
+- Agent instructions no longer direct the model to stage every file, commit, or push without an explicit developer request.
+- MCP client/server content conversion now follows the current `ContentBlock` API.
+- ANSI styling is omitted for `NO_COLOR`, dumb terminals, and redirected output.
+
+## [1.2.0] — 2026-04-05
+
 ### Added
 
 - **adk-skill** — auto-discovers `.skills/`, `.claude/skills/`, `~/.zavora/skills/`; `zavora skills list` CLI; tested with 17 Anthropic skills

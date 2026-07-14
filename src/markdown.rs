@@ -370,11 +370,12 @@ fn advance(
     state: &mut ParseState,
     width: usize,
 ) -> Result<(), ErrMode<MdError>> {
-    if let Some(tw) = state.terminal_width {
-        if state.column > 0 && state.column + width > tw {
-            state.column = width;
-            return q(&mut o, style::Print('\n'));
-        }
+    if let Some(tw) = state.terminal_width
+        && state.column > 0
+        && state.column + width > tw
+    {
+        state.column = width;
+        return q(&mut o, style::Print('\n'));
     }
     state.column += width;
     Ok(())

@@ -14,7 +14,10 @@ pub async fn get_browser() -> anyhow::Result<Arc<adk_browser::BrowserSession>> {
         .get_or_try_init(|| async {
             let config = adk_browser::BrowserConfig::new().headless(true);
             let session = Arc::new(adk_browser::BrowserSession::new(config));
-            session.start().await.map_err(|e| anyhow::anyhow!("browser start failed: {e}"))?;
+            session
+                .start()
+                .await
+                .map_err(|e| anyhow::anyhow!("browser start failed: {e}"))?;
             tracing::info!("Browser session started (headless)");
             Ok(session)
         })
@@ -30,9 +33,9 @@ pub fn build_browser_tools(session: Arc<adk_browser::BrowserSession>) -> Vec<Arc
 
 /// Cleanup browser session on exit.
 pub async fn cleanup_browser() {
-    if let Some(session) = BROWSER.get() {
-        if let Err(e) = session.stop().await {
-            tracing::warn!("Browser cleanup failed: {e}");
-        }
+    if let Some(session) = BROWSER.get()
+        && let Err(e) = session.stop().await
+    {
+        tracing::warn!("Browser cleanup failed: {e}");
     }
 }

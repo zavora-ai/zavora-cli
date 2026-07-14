@@ -1,3 +1,6 @@
+pub mod bash_security;
+#[cfg(feature = "browser")]
+pub mod browser;
 pub mod confirming;
 pub mod execute_bash;
 pub mod file_edit;
@@ -6,9 +9,6 @@ pub mod fs_write;
 pub mod github_ops;
 pub mod glob;
 pub mod grep;
-pub mod bash_security;
-#[cfg(feature = "browser")]
-pub mod browser;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 #[cfg(feature = "rag")]

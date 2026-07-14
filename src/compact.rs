@@ -77,11 +77,7 @@ pub fn summarize_events_text(events: &[Event], max_chars: usize) -> String {
         } else {
             "Assistant"
         };
-        let truncated = if text.len() > max_chars {
-            format!("{}…", &text[..max_chars])
-        } else {
-            text
-        };
+        let truncated = crate::text::truncate(&text, max_chars, "…");
         summary.push_str(&format!("{role}: {truncated}\n"));
     }
     summary
@@ -166,14 +162,13 @@ async fn generate_llm_summary(
 
     let mut summary = String::new();
     while let Some(event_result) = stream.next().await {
-        if let Ok(event) = event_result {
-            if event.author != "user" {
-                if let Some(content) = &event.llm_response.content {
-                    for part in &content.parts {
-                        if let Part::Text { text } = part {
-                            summary.push_str(text);
-                        }
-                    }
+        if let Ok(event) = event_result
+            && event.author != "user"
+            && let Some(content) = &event.llm_response.content
+        {
+            for part in &content.parts {
+                if let Part::Text { text } = part {
+                    summary.push_str(text);
                 }
             }
         }
@@ -423,15 +418,16 @@ pub fn snip_stale_tool_results(events: &[Event], max_age_events: usize) -> Vec<u
         let text = extract_event_text(event);
 
         // Dedup: for file read results, keep only the most recent per path
-        if let Some(path) = extract_file_read_path(event) {
-            if let Some(prev_idx) = seen_file_reads.insert(path, i) {
-                to_remove.push(prev_idx);
-            }
+        if let Some(path) = extract_file_read_path(event)
+            && let Some(prev_idx) = seen_file_reads.insert(path, i)
+        {
+            to_remove.push(prev_idx);
         }
 
         // Snip: large or failed results older than threshold
         let is_large = text.len() > 2048;
-        let is_failed = text.contains("\"status\":\"error\"") || event.llm_response.content.is_none();
+        let is_failed =
+            text.contains("\"status\":\"error\"") || event.llm_response.content.is_none();
         if age > max_age_events && (is_large || is_failed) {
             to_remove.push(i);
         }
@@ -446,10 +442,10 @@ pub fn snip_stale_tool_results(events: &[Event], max_age_events: usize) -> Vec<u
 fn extract_file_read_path(event: &Event) -> Option<String> {
     let text = extract_event_text(event);
     // Look for fs_read-style path in JSON output
-    if text.contains("\"kind\":\"file\"") || text.contains("\"kind\":\"directory\"") {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-            return val.get("path").and_then(|v| v.as_str()).map(String::from);
-        }
+    if (text.contains("\"kind\":\"file\"") || text.contains("\"kind\":\"directory\""))
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        return val.get("path").and_then(|v| v.as_str()).map(String::from);
     }
     None
 }
@@ -498,9 +494,7 @@ pub async fn apply_snip(
     ensure_session_exists(session_service, cfg).await?;
 
     for event in kept {
-        session_service
-            .append_event(&cfg.session_id, event)
-            .await?;
+        session_service.append_event(&cfg.session_id, event).await?;
     }
 
     Ok(removed_count)
@@ -535,7 +529,10 @@ pub async fn auto_compact(
     let usage = compute_context_usage(&events, &provider_str, model_name);
 
     if usage.utilization() <= cfg.compaction_threshold {
-        return Ok(format!("No compaction needed ({:.0}%)", usage.utilization() * 100.0));
+        return Ok(format!(
+            "No compaction needed ({:.0}%)",
+            usage.utilization() * 100.0
+        ));
     }
 
     // Step 1: Try snip (cheap, no LLM call)
@@ -557,7 +554,11 @@ pub async fn auto_compact(
         let usage = compute_context_usage(&events, &provider_str, model_name);
 
         if usage.utilization() <= cfg.compaction_target {
-            return Ok(format!("Snipped {} events → {:.0}%", removed, usage.utilization() * 100.0));
+            return Ok(format!(
+                "Snipped {} events → {:.0}%",
+                removed,
+                usage.utilization() * 100.0
+            ));
         }
     }
 

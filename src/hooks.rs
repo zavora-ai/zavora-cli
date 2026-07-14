@@ -216,11 +216,7 @@ async fn run_single_hook(
             } else {
                 String::from_utf8_lossy(&output.stderr)
             };
-            let truncated = if raw.len() > hook.max_output {
-                format!("{}... truncated", &raw[..hook.max_output])
-            } else {
-                raw.to_string()
-            };
+            let truncated = crate::text::truncate(&raw, hook.max_output, "... truncated");
             HookResult {
                 hook_point: point,
                 command: hook.command.clone(),

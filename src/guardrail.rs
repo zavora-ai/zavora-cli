@@ -17,7 +17,10 @@ pub const DEFAULT_GUARDRAIL_TERMS: &[&str] = &[
 ];
 
 pub fn default_guardrail_terms() -> Vec<String> {
-    DEFAULT_GUARDRAIL_TERMS.iter().map(|t| t.to_string()).collect()
+    DEFAULT_GUARDRAIL_TERMS
+        .iter()
+        .map(|t| t.to_string())
+        .collect()
 }
 
 pub fn guardrail_mode_label(mode: GuardrailMode) -> &'static str {
@@ -39,7 +42,9 @@ pub fn contains_guardrail_terms(text: &str, terms: &[String]) -> Vec<String> {
         handle.block_on(adk_guardrail::Guardrail::validate(&filter, &content))
     } else {
         // Fallback for non-async context
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(adk_guardrail::Guardrail::validate(&filter, &content))
     };
     match result {
@@ -64,14 +69,18 @@ pub fn redact_text(text: &str, terms: &[String], replacement: &str) -> String {
     // Then: custom term redaction
     let mut result = redacted;
     for term in terms {
-        if term.is_empty() { continue; }
+        if term.is_empty() {
+            continue;
+        }
         result = replace_case_insensitive(&result, term, replacement);
     }
     result
 }
 
 fn replace_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() { return input.to_string(); }
+    if needle.is_empty() {
+        return input.to_string();
+    }
     let input_lower = input.to_ascii_lowercase();
     let needle_lower = needle.to_ascii_lowercase();
     let mut out = String::new();
@@ -106,22 +115,40 @@ pub fn apply_guardrail(
     }
 
     let mode_label = guardrail_mode_label(mode);
-    let payload = json!({"direction": direction, "mode": mode_label, "hits": &hits, "hit_count": hits.len()});
+    let payload =
+        json!({"direction": direction, "mode": mode_label, "hits": &hits, "hit_count": hits.len()});
 
     match mode {
         GuardrailMode::Observe => {
-            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail observed");
+            tracing::warn!(
+                direction,
+                mode = mode_label,
+                hit_count = hits.len(),
+                "Guardrail observed"
+            );
             telemetry.emit(&format!("guardrail.{direction}.observed"), payload);
             Ok(text.to_string())
         }
         GuardrailMode::Block => {
-            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail blocked");
+            tracing::warn!(
+                direction,
+                mode = mode_label,
+                hit_count = hits.len(),
+                "Guardrail blocked"
+            );
             telemetry.emit(&format!("guardrail.{direction}.blocked"), payload);
-            Err(anyhow::anyhow!("guardrail blocked {direction} content due to matched terms"))
+            Err(anyhow::anyhow!(
+                "guardrail blocked {direction} content due to matched terms"
+            ))
         }
         GuardrailMode::Redact => {
             let redacted = redact_text(text, &hits, &cfg.guardrail_redact_replacement);
-            tracing::warn!(direction, mode = mode_label, hit_count = hits.len(), "Guardrail redacted");
+            tracing::warn!(
+                direction,
+                mode = mode_label,
+                hit_count = hits.len(),
+                "Guardrail redacted"
+            );
             telemetry.emit(&format!("guardrail.{direction}.redacted"), payload);
             Ok(redacted)
         }
@@ -137,7 +164,8 @@ pub fn enforce_prompt_limit(prompt: &str, max_chars: usize) -> Result<()> {
     if max_chars > 0 && prompt.len() > max_chars {
         return Err(anyhow::anyhow!(
             "prompt exceeds maximum length ({} chars > {} limit)",
-            prompt.len(), max_chars
+            prompt.len(),
+            max_chars
         ));
     }
     Ok(())

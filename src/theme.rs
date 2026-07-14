@@ -2,32 +2,58 @@
 ///
 /// Provides prompt visuals with mode indicators, fuzzy slash command matching,
 /// ANSI color helpers, and first-run onboarding help.
-use std::io::{self, Write};
+use std::fmt;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::checkpoint::CheckpointStore;
+use crate::config::RuntimeConfig;
 use crate::context::{BudgetLevel, ContextUsage};
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers
 // ---------------------------------------------------------------------------
 
-pub const RESET: &str = "\x1b[0m";
-pub const BOLD: &str = "\x1b[1m";
-pub const DIM: &str = "\x1b[2m";
-pub const CYAN: &str = "\x1b[36m";
-pub const GREEN: &str = "\x1b[32m";
-pub const YELLOW: &str = "\x1b[33m";
-pub const RED: &str = "\x1b[31m";
-pub const MAGENTA: &str = "\x1b[35m";
-pub const BLUE: &str = "\x1b[34m";
-pub const BOLD_CYAN: &str = "\x1b[1;36m";
-pub const BOLD_GREEN: &str = "\x1b[1;32m";
-pub const BOLD_YELLOW: &str = "\x1b[1;33m";
-pub const BOLD_RED: &str = "\x1b[1;31m";
-pub const BOLD_MAGENTA: &str = "\x1b[1;35m";
+#[derive(Clone, Copy)]
+pub struct Ansi(&'static str);
+
+impl fmt::Display for Ansi {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if colors_enabled() {
+            formatter.write_str(self.0)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub fn colors_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
+        && (io::stdout().is_terminal() || io::stderr().is_terminal())
+}
+
+pub static RESET: Ansi = Ansi("\x1b[0m");
+pub static BOLD: Ansi = Ansi("\x1b[1m");
+pub static DIM: Ansi = Ansi("\x1b[2m");
+pub static CYAN: Ansi = Ansi("\x1b[36m");
+pub static GREEN: Ansi = Ansi("\x1b[32m");
+pub static YELLOW: Ansi = Ansi("\x1b[33m");
+pub static RED: Ansi = Ansi("\x1b[31m");
+pub static MAGENTA: Ansi = Ansi("\x1b[35m");
+pub static BLUE: Ansi = Ansi("\x1b[34m");
+pub static BOLD_CYAN: Ansi = Ansi("\x1b[1;36m");
+pub static BOLD_GREEN: Ansi = Ansi("\x1b[1;32m");
+pub static BOLD_YELLOW: Ansi = Ansi("\x1b[1;33m");
+pub static BOLD_RED: Ansi = Ansi("\x1b[1;31m");
+pub static BOLD_MAGENTA: Ansi = Ansi("\x1b[1;35m");
+pub static BG_DELETE: Ansi = Ansi("\x1b[48;2;36;25;28m");
+pub static BG_INSERT: Ansi = Ansi("\x1b[48;2;24;38;30m");
+pub static BG_GUTTER_DELETE: Ansi = Ansi("\x1b[48;2;79;40;40m");
+pub static BG_GUTTER_INSERT: Ansi = Ansi("\x1b[48;2;40;67;43m");
+pub static CLEAR_LINE: Ansi = Ansi("\x1b[K");
 
 // ---------------------------------------------------------------------------
 // Known commands for fuzzy matching
@@ -39,6 +65,10 @@ pub const COMMAND_PALETTE: &[(&str, &str)] = &[
     ("status", "show active profile/provider/model/session"),
     ("provider", "switch provider and rebuild runtime"),
     ("model", "pick a model interactively or switch by id"),
+    ("worker", "switch the everyday coding model"),
+    ("planner", "switch the strong planning model"),
+    ("planner-provider", "switch the planning provider"),
+    ("models", "show model roles and shared quota pools"),
     ("tools", "show active tools and confirmation policy"),
     ("mcp", "show MCP server and tool summary"),
     ("usage", "show context usage and token breakdown"),
@@ -99,140 +129,36 @@ pub fn build_prompt(
 // Startup banner
 // ---------------------------------------------------------------------------
 
-/// Print the chat startup banner.
-pub fn print_startup_banner(provider: &str, model: &str) {
+/// Print a compact runtime surface that remains useful in an 80-column terminal.
+pub fn print_startup_banner(cfg: &RuntimeConfig) {
     let version = env!("CARGO_PKG_VERSION");
+    let workspace = std::env::current_dir()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "workspace".to_string());
     println!();
-    println!("{BOLD_CYAN}  ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗  █████╗{RESET}");
-    println!("{BOLD_CYAN}  ╚══███╔╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗██╔══██╗{RESET}");
-    println!("{BOLD_CYAN}    ███╔╝ ███████║██║   ██║██║   ██║██████╔╝███████║{RESET}");
-    println!("{BOLD_CYAN}   ███╔╝  ██╔══██║╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██║{RESET}");
-    println!("{BOLD_CYAN}  ███████╗██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║██║  ██║{RESET}");
-    println!("{BOLD_CYAN}  ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝{RESET}");
-    println!("  {DIM}Your AI agent, in the terminal.{RESET}  {DIM}v{version}{RESET}");
+    println!("  {BOLD_CYAN}ZAVORA{RESET} {DIM}v{version} · ADK-Rust 2.0{RESET}");
     println!(
-        "  {DIM}Provider:{RESET} {GREEN}{provider}{RESET}  {DIM}Model:{RESET} {GREEN}{model}{RESET}"
+        "  {DIM}workspace{RESET}  {workspace}  {DIM}session{RESET}  {}",
+        cfg.session_id
     );
-    println!();
-
-    // Rotating tips
-    let tips = [
-        format!("Use {CYAN}/compact{RESET} to summarize history and free context space"),
-        format!("Use {CYAN}/checkpoint save <label>{RESET} to snapshot your session"),
-        format!(
-            "Use {CYAN}/tangent start{RESET} to branch into exploratory work without losing context"
-        ),
-        format!("Use {CYAN}/usage{RESET} to see a real-time token breakdown by author"),
-        format!("Use {CYAN}/delegate <task>{RESET} to run a sub-agent in an isolated session"),
-        format!("Use {CYAN}/model{RESET} to open the interactive model picker"),
-        format!("Use {CYAN}/todos list{RESET} to see task lists the agent has created"),
-        format!(
-            "Commands can be abbreviated — type {CYAN}/ch{RESET} and press enter to see matches"
-        ),
-    ];
-    let idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as usize)
-        .unwrap_or(0)
-        % tips.len();
-
-    draw_tip_box("💡 Tip", &tips[idx]);
-
+    println!("  {DIM}┌─ MODEL ROUTING ─────────────────────────────────────────────{RESET}");
     println!(
-        "  {CYAN}/help{RESET} {DIM}commands{RESET}  {DIM}·{RESET}  {CYAN}/agent{RESET} {DIM}agent mode{RESET}  {DIM}·{RESET}  {CYAN}/ralph{RESET} {DIM}dev pipeline{RESET}  {DIM}·{RESET}  {CYAN}/tools{RESET} {DIM}active tools{RESET}  {DIM}·{RESET}  {CYAN}/exit{RESET} {DIM}quit{RESET}"
+        "  {DIM}│{RESET} {GREEN}WORKER {RESET} {}/{}",
+        cfg.worker_provider, cfg.worker_model
     );
     println!(
-        "  {DIM}{}━{RESET}",
-        "━".repeat(term_width().min(120).saturating_sub(4))
+        "  {DIM}│{RESET} {YELLOW}PLANNER{RESET} {}/{} {DIM}· max {} calls{RESET}",
+        cfg.planner_provider, cfg.planner_model, cfg.planner_call_budget
     );
-    println!();
-}
-
-/// Get terminal width, defaulting to 80.
-fn term_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
-}
-
-/// Draw a bordered tip box.
-fn draw_tip_box(title: &str, content: &str) {
-    let width: usize = term_width().min(120).saturating_sub(2); // leave 2 for leading indent
-    let inner = width - 4;
-
-    // Top border with title
-    let title_plain_len = title
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ' || !c.is_ascii())
-        .count();
-    let side = (width.saturating_sub(title_plain_len + 4)) / 2;
-    let right = width.saturating_sub(side + title_plain_len + 4);
+    println!("  {DIM}└──────────────────────────────────────────────────────────────{RESET}");
     println!(
-        "  {DIM}╭{}─ {RESET}{title}{DIM} ─{}╮{RESET}",
-        "─".repeat(side),
-        "─".repeat(right)
+        "  {CYAN}/models{RESET} roles & limits  {DIM}·{RESET}  {CYAN}/help{RESET} commands  {DIM}·{RESET}  {CYAN}/agent{RESET} permissions  {DIM}·{RESET}  {CYAN}/exit{RESET} quit"
     );
-
-    // Wrap content into lines
-    let words: Vec<&str> = content.split_whitespace().collect();
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    let mut visible_len = 0;
-
-    for word in &words {
-        // Strip ANSI to measure visible length
-        let word_vis: String = strip_ansi(word);
-        let wlen = word_vis.len();
-        let test_len = if line.is_empty() {
-            wlen
-        } else {
-            visible_len + 1 + wlen
-        };
-
-        if test_len <= inner {
-            if !line.is_empty() {
-                line.push(' ');
-                visible_len += 1;
-            }
-            line.push_str(word);
-            visible_len += wlen;
-        } else {
-            lines.push(line);
-            line = word.to_string();
-            visible_len = wlen;
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-
-    for l in &lines {
-        let vis_len = strip_ansi(l).len();
-        let pad = inner.saturating_sub(vis_len);
-        println!("  {DIM}│{RESET} {l}{}{DIM}│{RESET}", " ".repeat(pad + 1));
-    }
-
-    // Bottom border
-    println!("  {DIM}╰{}╯{RESET}", "─".repeat(width - 2));
     println!();
-}
-
-/// Strip ANSI escape sequences for visible length calculation.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut in_escape = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +402,13 @@ impl Spinner {
                     let secs = elapsed.as_secs();
                     let tokens = token_clone.load(Ordering::Relaxed);
 
-                    let new_phase = if secs >= 8 { 2 } else if secs >= 3 { 1 } else { 0 };
+                    let new_phase = if secs >= 8 {
+                        2
+                    } else if secs >= 3 {
+                        1
+                    } else {
+                        0
+                    };
 
                     // Clear previous lines when transitioning
                     if new_phase > phase {
@@ -493,11 +425,15 @@ impl Spinner {
                         }
                         1 => {
                             let stats = format_stats(secs, tokens);
-                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}");
+                            eprint!(
+                                "\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}"
+                            );
                         }
                         _ => {
                             let stats = format_stats(secs, tokens);
-                            eprint!("\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}");
+                            eprint!(
+                                "\r\x1b[2K{CYAN}✦{RESET} {DIM}{verb}…{RESET} {DIM}(Thinking in {lang} · {stats}){RESET}"
+                            );
                             eprint!("\n\r\x1b[2K  {DIM}💡 {tip}{RESET}");
                             eprint!("\x1b[1A");
                         }

@@ -220,15 +220,27 @@ impl PermissionRules {
     /// Check order: deny → allow → ask (deny takes precedence).
     pub fn evaluate(&self, tool_name: &str, content: Option<&str>) -> PermissionDecision {
         // Deny first (highest priority)
-        if self.always_deny.iter().any(|p| p.matches(tool_name, content)) {
+        if self
+            .always_deny
+            .iter()
+            .any(|p| p.matches(tool_name, content))
+        {
             return PermissionDecision::Deny;
         }
         // Allow
-        if self.always_allow.iter().any(|p| p.matches(tool_name, content)) {
+        if self
+            .always_allow
+            .iter()
+            .any(|p| p.matches(tool_name, content))
+        {
             return PermissionDecision::Allow;
         }
         // Ask
-        if self.always_ask.iter().any(|p| p.matches(tool_name, content)) {
+        if self
+            .always_ask
+            .iter()
+            .any(|p| p.matches(tool_name, content))
+        {
             return PermissionDecision::Ask;
         }
         PermissionDecision::NoMatch
@@ -237,7 +249,9 @@ impl PermissionRules {
     /// Merge another set of rules (overlay takes precedence by being checked first).
     pub fn merge_overlay(&self, overlay: &PermissionRules) -> PermissionRules {
         let mut merged = overlay.clone();
-        merged.always_allow.extend(self.always_allow.iter().cloned());
+        merged
+            .always_allow
+            .extend(self.always_allow.iter().cloned());
         merged.always_deny.extend(self.always_deny.iter().cloned());
         merged.always_ask.extend(self.always_ask.iter().cloned());
         merged
@@ -257,7 +271,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 
 /// Check if a tool is read-only by name.
 pub fn is_read_only_tool(name: &str) -> bool {
-    READ_ONLY_TOOLS.iter().any(|&ro| ro == name)
+    READ_ONLY_TOOLS.contains(&name)
 }
 
 // StubTool moved to tests.rs — not needed in production code.

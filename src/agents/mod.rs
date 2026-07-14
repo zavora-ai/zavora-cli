@@ -15,7 +15,6 @@ pub mod file_loop;
 pub mod memory;
 pub mod orchestrator;
 pub mod quality;
-pub mod ralph_agent;
 pub mod search;
 pub mod sequential;
 pub mod time;

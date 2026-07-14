@@ -65,6 +65,11 @@ fn base_cfg() -> RuntimeConfig {
         agent_deny_tools: Vec::new(),
         provider: Provider::Auto,
         model: None,
+        worker_provider: Provider::Openai,
+        worker_model: crate::model_catalog::DEFAULT_WORKER_MODEL.to_string(),
+        planner_provider: Provider::Openai,
+        planner_model: crate::model_catalog::DEFAULT_PLANNER_MODEL.to_string(),
+        planner_call_budget: 4,
         api_key: None,
         ollama_host: None,
         app_name: "test-app".to_string(),
@@ -150,6 +155,11 @@ fn test_cli(config_path: &str, profile: &str) -> Cli {
     Cli {
         provider: Provider::Auto,
         model: None,
+        worker_provider: None,
+        worker_model: None,
+        planner_provider: None,
+        planner_model: None,
+        planner_call_budget: None,
         agent: None,
         profile: profile.to_string(),
         config_path: config_path.to_string(),
@@ -371,7 +381,7 @@ async fn sqlite_session_backend_persists_history_between_runners() {
         .await
         .expect("second prompt should run");
 
-    let service = DatabaseSessionService::new(&db_url)
+    let service = SqliteSessionService::new(&db_url)
         .await
         .expect("db should open");
     service.migrate().await.expect("migration should run");
@@ -828,6 +838,9 @@ fn runtime_config_uses_selected_profile_defaults() {
 [profiles.dev]
 provider = "openai"
 model = "gpt-4.1"
+planner_provider = "openai"
+planner_model = "gpt-5.6-sol"
+planner_call_budget = 2
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/dev.db"
 app_name = "zavora-dev"
@@ -849,6 +862,11 @@ retrieval_min_score = 2
     assert_eq!(cfg.profile, "dev");
     assert_eq!(cfg.provider, Provider::Openai);
     assert_eq!(cfg.model.as_deref(), Some("gpt-4.1"));
+    assert_eq!(cfg.worker_provider, Provider::Openai);
+    assert_eq!(cfg.worker_model, "gpt-4.1");
+    assert_eq!(cfg.planner_provider, Provider::Openai);
+    assert_eq!(cfg.planner_model, "gpt-5.6-sol");
+    assert_eq!(cfg.planner_call_budget, 2);
     assert_eq!(cfg.session_backend, SessionBackend::Sqlite);
     assert!(!cfg.show_sensitive_config);
     assert_eq!(cfg.app_name, "zavora-dev");
@@ -874,6 +892,12 @@ retrieval_min_score = 2
         "default guardrail terms should include baseline sensitive markers"
     );
     assert_eq!(cfg.guardrail_redact_replacement, "[REDACTED]");
+
+    let mut cli_override = test_cli(path.to_string_lossy().as_ref(), "dev");
+    cli_override.planner_call_budget = Some(1);
+    let overridden =
+        resolve_runtime_config(&cli_override, &profiles).expect("CLI override should resolve");
+    assert_eq!(overridden.planner_call_budget, 1);
 }
 
 #[test]
@@ -1449,10 +1473,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
-        command: None,
-        args: vec![],
-        env: HashMap::new(),
-        oauth: None,
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            oauth: None,
         },
         McpServerConfig {
             name: "ops".to_string(),
@@ -1462,10 +1486,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
-        command: None,
-        args: vec![],
-        env: HashMap::new(),
-        oauth: None,
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            oauth: None,
         },
         McpServerConfig {
             name: "analytics".to_string(),
@@ -1475,10 +1499,10 @@ fn select_mcp_servers_filters_enabled_and_selects_by_name() {
             auth_bearer_env: None,
             tool_allowlist: Vec::new(),
             tool_aliases: HashMap::new(),
-        command: None,
-        args: vec![],
-        env: HashMap::new(),
-        oauth: None,
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            oauth: None,
         },
     ];
 
@@ -1616,7 +1640,7 @@ fn model_picker_selection_accepts_numeric_index() {
     let picked = resolve_model_picker_selection(&options, "2")
         .expect("selection should parse")
         .expect("selection should choose a model");
-    assert_eq!(picked, "gpt-5.3-codex");
+    assert_eq!(picked, "gpt-5.5-2026-04-23");
 }
 
 #[test]
@@ -1983,6 +2007,8 @@ async fn chat_switch_path_builds_runner_for_ollama_without_losing_session_servic
     let mut cfg = base_cfg();
     cfg.provider = Provider::Ollama;
     cfg.model = Some("llama3.2".to_string());
+    cfg.worker_provider = Provider::Ollama;
+    cfg.worker_model = "llama3.2".to_string();
     let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
     let runtime_tools = ResolvedRuntimeTools {
         tools: build_builtin_tools(),
@@ -3249,8 +3275,16 @@ fn test_glob_finds_files() {
     assert_eq!(result["numFiles"], 2);
     assert_eq!(result["truncated"], false);
     let filenames = result["filenames"].as_array().unwrap();
-    assert!(filenames.iter().any(|f| f.as_str().unwrap().ends_with("a.rs")));
-    assert!(filenames.iter().any(|f| f.as_str().unwrap().ends_with("b.rs")));
+    assert!(
+        filenames
+            .iter()
+            .any(|f| f.as_str().unwrap().ends_with("a.rs"))
+    );
+    assert!(
+        filenames
+            .iter()
+            .any(|f| f.as_str().unwrap().ends_with("b.rs"))
+    );
 }
 
 #[test]
@@ -3275,7 +3309,9 @@ fn test_tool_search_finds_by_keyword() {
     let tools = crate::tools::build_builtin_tools();
     let result = crate::tools::tool_search::tool_search_response("file read", &tools);
     assert!(result["matches"].as_u64().unwrap() >= 1);
-    let tool_names: Vec<&str> = result["tools"].as_array().unwrap()
+    let tool_names: Vec<&str> = result["tools"]
+        .as_array()
+        .unwrap()
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
@@ -3291,7 +3327,7 @@ fn test_tool_search_empty_query() {
 
 #[test]
 fn test_permission_rules_evaluate() {
-    use crate::tool_policy::{PermissionRules, ToolPattern, PermissionDecision};
+    use crate::tool_policy::{PermissionDecision, PermissionRules, ToolPattern};
 
     let rules = PermissionRules {
         always_allow: vec![ToolPattern("fs_read:*".to_string())],
@@ -3299,15 +3335,27 @@ fn test_permission_rules_evaluate() {
         always_ask: vec![ToolPattern("web_fetch:*".to_string())],
     };
 
-    assert_eq!(rules.evaluate("fs_read", Some("/any/path")), PermissionDecision::Allow);
-    assert_eq!(rules.evaluate("execute_bash", Some("rm -rf /")), PermissionDecision::Deny);
-    assert_eq!(rules.evaluate("web_fetch", Some("https://example.com")), PermissionDecision::Ask);
-    assert_eq!(rules.evaluate("todo_list", None), PermissionDecision::NoMatch);
+    assert_eq!(
+        rules.evaluate("fs_read", Some("/any/path")),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        rules.evaluate("execute_bash", Some("rm -rf /")),
+        PermissionDecision::Deny
+    );
+    assert_eq!(
+        rules.evaluate("web_fetch", Some("https://example.com")),
+        PermissionDecision::Ask
+    );
+    assert_eq!(
+        rules.evaluate("todo_list", None),
+        PermissionDecision::NoMatch
+    );
 }
 
 #[test]
 fn test_permission_rules_deny_takes_precedence() {
-    use crate::tool_policy::{PermissionRules, ToolPattern, PermissionDecision};
+    use crate::tool_policy::{PermissionDecision, PermissionRules, ToolPattern};
 
     let rules = PermissionRules {
         always_allow: vec![ToolPattern("execute_bash:*".to_string())],
@@ -3316,8 +3364,14 @@ fn test_permission_rules_deny_takes_precedence() {
     };
 
     // Deny takes precedence over allow
-    assert_eq!(rules.evaluate("execute_bash", Some("rm -rf /")), PermissionDecision::Deny);
-    assert_eq!(rules.evaluate("execute_bash", Some("ls -la")), PermissionDecision::Allow);
+    assert_eq!(
+        rules.evaluate("execute_bash", Some("rm -rf /")),
+        PermissionDecision::Deny
+    );
+    assert_eq!(
+        rules.evaluate("execute_bash", Some("ls -la")),
+        PermissionDecision::Allow
+    );
 }
 
 // Helper to temporarily change cwd for tests
@@ -3348,7 +3402,7 @@ fn test_adk_skill_parses_anthropic_skills() {
         return;
     }
     println!("Discovered {} skill files", files.len());
-    
+
     let index = adk_skill::load_skill_index(root);
     match &index {
         Ok(idx) => {

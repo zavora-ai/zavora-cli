@@ -100,14 +100,15 @@ impl Orchestrator {
 
         // 7. Commit: Store learnings in memory
         if final_verification.pass {
-            let _ = super::memory::remember(
-                &format!("Successfully completed: {}", goal),
-            ).await;
+            let _ = super::memory::remember(&format!("Successfully completed: {}", goal)).await;
         }
         if final_verification.pass && plan.steps.len() > 2 {
-            let _ = super::memory::remember(
-                &format!("Effective plan for '{}': {} steps", goal, plan.steps.len()),
-            ).await;
+            let _ = super::memory::remember(&format!(
+                "Effective plan for '{}': {} steps",
+                goal,
+                plan.steps.len()
+            ))
+            .await;
         }
 
         Ok(ExecutionResult {

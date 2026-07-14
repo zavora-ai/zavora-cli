@@ -42,13 +42,14 @@ pub fn model_context_window(model: &str, provider: &str) -> usize {
         m if m.starts_with("gpt-5") => 400_000,
         "o3-mini" | "o3" | "o4-mini" => 200_000,
         // Anthropic
-        "claude-opus-4-6" => 1_000_000,
+        "claude-opus-4-6" | "claude-opus-4-7" => 1_000_000,
         m if m.starts_with("claude-sonnet-4") => 1_000_000,
         m if m.starts_with("claude-3-5-haiku") => 200_000,
         // Gemini
         m if m.contains("gemini-2.5") => 1_048_576,
         m if m.contains("gemini-3") => 1_048_576,
         // DeepSeek
+        m if m.starts_with("deepseek-v4") => 128_000,
         m if m.starts_with("deepseek") => 128_000,
         // Groq-hosted models
         "llama-3.3-70b-versatile" => 131_072,
@@ -239,10 +240,10 @@ pub fn compute_context_usage(events: &[Event], provider: &str, model: &str) -> C
         }
 
         // Track the latest API-reported total token count (includes system prompt, tools, full history)
-        if let Some(meta) = &event.llm_response.usage_metadata {
-            if meta.total_token_count > 0 {
-                api_total_tokens = meta.total_token_count as usize;
-            }
+        if let Some(meta) = &event.llm_response.usage_metadata
+            && meta.total_token_count > 0
+        {
+            api_total_tokens = meta.total_token_count as usize;
         }
 
         match event.author.as_str() {

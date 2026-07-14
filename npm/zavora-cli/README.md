@@ -1,6 +1,6 @@
 # @zavora-ai/zavora-cli
 
-Install `zavora-cli` from npm with a prebuilt binary from GitHub Releases.
+Install the ADK-Rust 2.0 Zavora terminal agent from npm with a prebuilt binary from GitHub Releases.
 
 ## Install
 
@@ -22,4 +22,5 @@ cargo install zavora-cli
 
 ```bash
 zavora-cli chat
+zavora-cli models
 ```

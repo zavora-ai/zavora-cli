@@ -5,16 +5,10 @@ use std::sync::{Arc, Mutex};
 use adk_rust::prelude::*;
 use serde_json::Value;
 
-use crate::theme::{self, BOLD, CYAN, DIM, GREEN, RESET};
-
-const RED: &str = "\x1b[31m";
-
-// Diff background colors (truecolor, matching Q CLI's base16-ocean.dark)
-const BG_DELETE: &str = "\x1b[48;2;36;25;28m";
-const BG_INSERT: &str = "\x1b[48;2;24;38;30m";
-const BG_GUTTER_DELETE: &str = "\x1b[48;2;79;40;40m";
-const BG_GUTTER_INSERT: &str = "\x1b[48;2;40;67;43m";
-const CLEAR_LINE: &str = "\x1b[K";
+use crate::theme::{
+    self, BG_DELETE, BG_GUTTER_DELETE, BG_GUTTER_INSERT, BG_INSERT, BOLD, CLEAR_LINE, CYAN, DIM,
+    GREEN, RED, RESET,
+};
 
 /// Render a single line in the diff body. Kept as a helper so syntax highlighting can be reintroduced later.
 fn highlight_line(line: &str, _highlighter: &mut Option<()>) -> String {
@@ -45,10 +39,10 @@ fn display_result(tool_name: &str, result: &Value) {
                     eprintln!();
                 }
             }
-            if status == "error" {
-                if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
-                    eprintln!("{RED}{err}{RESET}");
-                }
+            if status == "error"
+                && let Some(err) = result.get("error").and_then(|v| v.as_str())
+            {
+                eprintln!("{RED}{err}{RESET}");
             }
         }
         "fs_write" => {
@@ -209,11 +203,7 @@ fn render_diff(old: &str, new: &str, hl: &mut Option<()>) -> String {
 /// Format generic tool args for display.
 fn format_tool_args(args: &Value) -> String {
     let pretty = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
-    if pretty.len() > 400 {
-        format!("{DIM}{}...{RESET}", &pretty[..400])
-    } else {
-        format!("{DIM}{pretty}{RESET}")
-    }
+    format!("{DIM}{}{RESET}", crate::text::truncate(&pretty, 400, "..."))
 }
 
 #[async_trait::async_trait]
@@ -277,17 +267,16 @@ impl Tool for ConfirmingTool {
         }
 
         // Auto-approve read-only shell commands (git status, ls, grep, etc.)
-        if self.inner.name() == "execute_bash" {
-            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                if crate::tools::execute_bash::is_read_only_command(cmd) {
-                    theme::resume_spinner();
-                    let mut approved_args = args;
-                    if let Some(obj) = approved_args.as_object_mut() {
-                        obj.insert("approved".to_string(), Value::Bool(true));
-                    }
-                    return self.execute_and_display(ctx, approved_args).await;
-                }
+        if self.inner.name() == "execute_bash"
+            && let Some(cmd) = args.get("command").and_then(|v| v.as_str())
+            && crate::tools::execute_bash::is_read_only_command(cmd)
+        {
+            theme::resume_spinner();
+            let mut approved_args = args;
+            if let Some(obj) = approved_args.as_object_mut() {
+                obj.insert("approved".to_string(), Value::Bool(true));
             }
+            return self.execute_and_display(ctx, approved_args).await;
         }
 
         eprintln!(

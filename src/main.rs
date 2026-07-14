@@ -32,17 +32,28 @@ fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
     // OTLP layer added first (on bare Registry) so the type parameter is Registry
-    let otlp_layer: Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>> =
-        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().and_then(|ep| {
-            adk_telemetry::build_otlp_layer("zavora-cli", &ep).ok()
-        });
+    let otlp_layer: Option<
+        Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>,
+    > = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .and_then(|ep| adk_telemetry::build_otlp_layer("zavora-cli", &ep).ok());
 
     if use_stderr {
-        let fmt = tracing_subscriber::fmt::layer().with_target(false).with_writer(std::io::stderr);
-        tracing_subscriber::registry().with(otlp_layer).with(filter).with(fmt).init();
+        let fmt = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_writer(std::io::stderr);
+        tracing_subscriber::registry()
+            .with(otlp_layer)
+            .with(filter)
+            .with(fmt)
+            .init();
     } else {
         let fmt = tracing_subscriber::fmt::layer().with_target(false);
-        tracing_subscriber::registry().with(otlp_layer).with(filter).with(fmt).init();
+        tracing_subscriber::registry()
+            .with(otlp_layer)
+            .with(filter)
+            .with(fmt)
+            .init();
     }
     Ok(())
 }
@@ -69,28 +80,39 @@ async fn main() -> Result<()> {
 async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing(
         &cli.log_filter,
-        matches!(cli.command, Some(Commands::Mcp { command: McpCommands::Serve })),
+        matches!(
+            cli.command,
+            Some(Commands::Mcp {
+                command: McpCommands::Serve
+            })
+        ),
     )?;
     let mut profiles = load_profiles(&cli.config_path)?;
 
     // Initialize SQLite memory (eager, before any tool use)
-    if let Err(e) = zavora_cli::agents::memory::init().await {
+    // Use ADK-Rust v2 project-scoped memory to isolate workspaces.
+    let memory_result = if let Some(project_id) = zavora_cli::agents::memory::detect_project_id() {
+        zavora_cli::agents::memory::init_with_project(&project_id).await
+    } else {
+        zavora_cli::agents::memory::init().await
+    };
+    if let Err(e) = memory_result {
         tracing::warn!("Memory init failed: {e}");
     }
-
-    // Auto-setup: scaffold .skills/ with sample on first run
-    zavora_cli::onboarding::ensure_skills_dir();
 
     // Auto-setup: trigger onboarding wizard for commands that need a provider
     let needs_provider = matches!(
         cli.command,
-        None | Some(Commands::Ask { .. }) | Some(Commands::Chat)
-            | Some(Commands::Workflow { .. }) | Some(Commands::ReleasePlan { .. })
+        None | Some(Commands::Ask { .. })
+            | Some(Commands::Chat)
+            | Some(Commands::Workflow { .. })
+            | Some(Commands::ReleasePlan { .. })
             | Some(Commands::Ralph { .. })
     );
     if needs_provider {
         let workspace = std::env::current_dir().unwrap_or_default();
-        if zavora_cli::theme::is_first_run(&workspace) && !profiles.profiles.contains_key("default") {
+        if zavora_cli::theme::is_first_run(&workspace) && !profiles.profiles.contains_key("default")
+        {
             let result = run_onboarding_wizard(None)?;
             persist_onboarding_config(&result, &cli.config_path)?;
             profiles = load_profiles(&cli.config_path)?;
@@ -200,6 +222,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 &telemetry,
             )
             .await?;
+            Ok(())
+        }
+        Commands::Models => {
+            print_model_catalog(&cfg);
             Ok(())
         }
         Commands::Workflow {
@@ -422,7 +448,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let result = run_onboarding_wizard(existing_profile)?;
             persist_onboarding_config(&result, &cli.config_path)?;
             if result.skipped {
-                println!("Minimal configuration saved. Set your provider via environment variables or edit the config file.");
+                println!(
+                    "Minimal configuration saved. Set your provider via environment variables or edit the config file."
+                );
             } else {
                 println!("Configuration saved! You can start chatting with `zavora`.");
             }
@@ -434,7 +462,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 let config = zavora_cli::lsp::manager::generate_default_config();
                 if config.servers.is_empty() {
                     println!("No language servers found in PATH.");
-                    println!("Install one: rust-analyzer, typescript-language-server, pylsp, gopls, clangd");
+                    println!(
+                        "Install one: rust-analyzer, typescript-language-server, pylsp, gopls, clangd"
+                    );
                 } else {
                     let path = ".zavora/lsp.json";
                     std::fs::create_dir_all(".zavora")?;
@@ -498,18 +528,20 @@ async fn run_rag_ingest(path: &str) -> Result<()> {
     if p.is_dir() {
         let mut count = 0;
         for entry in ignore::WalkBuilder::new(p).build().filter_map(|e| e.ok()) {
-            if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                    let doc = adk_rag::Document {
-                        id: entry.path().to_string_lossy().to_string(),
-                        text,
-                        metadata: Default::default(),
-                        source_uri: Some(entry.path().to_string_lossy().to_string()),
-                    };
-                    pipeline.ingest("default", &doc).await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    count += 1;
-                }
+            if entry.file_type().is_some_and(|ft| ft.is_file())
+                && let Ok(text) = std::fs::read_to_string(entry.path())
+            {
+                let doc = adk_rag::Document {
+                    id: entry.path().to_string_lossy().to_string(),
+                    text,
+                    metadata: Default::default(),
+                    source_uri: Some(entry.path().to_string_lossy().to_string()),
+                };
+                pipeline
+                    .ingest("default", &doc)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                count += 1;
             }
         }
         println!("Ingested {} files from {}", count, path);
@@ -521,7 +553,9 @@ async fn run_rag_ingest(path: &str) -> Result<()> {
             metadata: Default::default(),
             source_uri: Some(path.to_string()),
         };
-        pipeline.ingest("default", &doc).await
+        pipeline
+            .ingest("default", &doc)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("Ingested {}", path);
     }

@@ -1,7 +1,7 @@
 //! MCP OAuth 2.0 with PKCE for authenticated MCP servers.
 
 #[cfg(feature = "oauth")]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// OAuth config for an MCP server.
@@ -30,11 +30,11 @@ pub async fn get_access_token(server_name: &str, oauth: &McpOAuthConfig) -> Resu
             return Ok(tokens.access_token);
         }
         // Try refresh
-        if let Some(ref refresh) = tokens.refresh_token {
-            if let Ok(new_tokens) = refresh_token(oauth, refresh).await {
-                save_tokens(server_name, &new_tokens);
-                return Ok(new_tokens.access_token);
-            }
+        if let Some(ref refresh) = tokens.refresh_token
+            && let Ok(new_tokens) = refresh_token(oauth, refresh).await
+        {
+            save_tokens(server_name, &new_tokens);
+            return Ok(new_tokens.access_token);
         }
     }
 
@@ -183,7 +183,9 @@ async fn discover_metadata(oauth: &McpOAuthConfig) -> Result<AuthMetadata> {
         .as_deref()
         .context("auth_server_metadata_url is required for OAuth")?;
 
-    let resp = reqwest::get(url).await.context("metadata discovery failed")?;
+    let resp = reqwest::get(url)
+        .await
+        .context("metadata discovery failed")?;
     resp.json::<AuthMetadata>()
         .await
         .context("invalid auth server metadata")
@@ -195,8 +197,8 @@ async fn discover_metadata(oauth: &McpOAuthConfig) -> Result<AuthMetadata> {
 
 #[cfg(feature = "oauth")]
 async fn listen_for_callback(port: u16) -> Result<String> {
-    use tokio::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
@@ -204,13 +206,11 @@ async fn listen_for_callback(port: u16) -> Result<String> {
 
     println!("Waiting for authorization callback on port {}...", port);
 
-    let (mut stream, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        listener.accept(),
-    )
-    .await
-    .context("authorization timed out (2 minutes)")?
-    .context("accept failed")?;
+    let (mut stream, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
+            .await
+            .context("authorization timed out (2 minutes)")?
+            .context("accept failed")?;
 
     let mut buf = vec![0u8; 4096];
     let n = stream.read(&mut buf).await?;
@@ -244,7 +244,9 @@ fn save_tokens(server_name: &str, tokens: &OAuthTokens) {
     let key = format!("zavora-mcp-{}", server_name);
     if let Ok(json) = serde_json::to_string(tokens) {
         match keyring::Entry::new(&key, "oauth-tokens") {
-            Ok(entry) => { let _ = entry.set_password(&json); }
+            Ok(entry) => {
+                let _ = entry.set_password(&json);
+            }
             Err(_) => {
                 // Fallback: write to .zavora/tokens/<server>.json
                 let _ = save_tokens_file(server_name, &json);
