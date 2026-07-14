@@ -36,6 +36,7 @@ pub mod theme;
 pub mod todos;
 pub mod tool_policy;
 pub mod tools;
+pub mod tui;
 pub mod workflow;
 
 #[cfg(test)]

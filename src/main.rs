@@ -25,7 +25,7 @@ use zavora_cli::streaming::*;
 use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
-fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
+fn init_tracing(log_filter: &str, use_stderr: bool, terminal_ui: bool) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let filter = tracing_subscriber::EnvFilter::try_new(log_filter)
@@ -38,7 +38,14 @@ fn init_tracing(log_filter: &str, use_stderr: bool) -> Result<()> {
         .ok()
         .and_then(|ep| adk_telemetry::build_otlp_layer("zavora-cli", &ep).ok());
 
-    if use_stderr {
+    if terminal_ui {
+        // A formatted stdout/stderr layer corrupts an alternate-screen renderer.
+        // Structured telemetry remains active while the retained TUI owns the terminal.
+        tracing_subscriber::registry()
+            .with(otlp_layer)
+            .with(filter)
+            .init();
+    } else if use_stderr {
         let fmt = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_writer(std::io::stderr);
@@ -78,6 +85,13 @@ async fn main() -> Result<()> {
 }
 
 async fn run_cli(cli: Cli) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let terminal_ui = matches!(cli.command, None | Some(Commands::Chat))
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::env::var_os("ZAVORA_CLASSIC").is_none()
+        && std::env::var("TERM").map_or(true, |term| term != "dumb");
     init_tracing(
         &cli.log_filter,
         matches!(
@@ -86,6 +100,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 command: McpCommands::Serve
             })
         ),
+        terminal_ui,
     )?;
     let mut profiles = load_profiles(&cli.config_path)?;
 

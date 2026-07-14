@@ -6,6 +6,24 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- Retained full-screen Ratatui workspace with responsive conversation and activity layouts, a multiline Unicode-aware composer, BUILD/PLAN mode, keyboard overlay, in-place tool approvals, and automatic bottom-following output.
+- Terminal-native Markdown presentation with headings, emphasis, inline code, fenced code surfaces, and lightweight Rust syntax treatment.
+- Tool activity correlation by provider call ID so parallel calls with the same tool name remain distinct.
+- Render tests at wide, standard, and narrow terminal sizes plus cursor, Markdown, and parallel-tool reducer coverage.
+
+### Changed
+
+- Interactive TTY chat now opens the full-screen workspace; redirected, dumb-terminal, and `ZAVORA_CLASSIC=1` sessions retain the line-oriented interface.
+- Console tracing is suppressed while the alternate-screen renderer owns the terminal, while structured OTLP telemetry remains available.
+- TUI text follows the terminal foreground/background instead of assuming a dark theme.
+
+### Fixed
+
+- Input and output guardrails remain active in retained TUI sessions, including buffered output for block and redact modes.
+- Raw mode and the alternate screen are restored when terminal initialization fails.
+
 ## [2.0.0] — 2026-07-14
 
 ### Added

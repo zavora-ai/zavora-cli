@@ -11,7 +11,7 @@ Developer ──► worker agent ──► files · shell · MCP · sessions
                     └── complex work ──► bounded planner agent
 ```
 
-The interface is designed for long development sessions: streamed Markdown, visible tool activity, command history, checkpoints, context usage, model-role status, and confirmations for consequential actions. It works in narrow terminals, suppresses styling in redirected output, and honours `NO_COLOR`.
+The full-screen terminal workspace is designed for long development sessions: streamed Markdown and code, retained tool activity, context usage, model-role status, multiline editing, and in-place approvals for consequential actions. It adapts from a side-by-side wide layout to a compact stacked layout without losing the active conversation.
 
 ## Install
 
@@ -44,18 +44,23 @@ export OPENAI_API_KEY="..."
 zavora-cli chat
 ```
 
-The startup card shows both active roles before a model is called:
+An interactive terminal opens the retained workspace automatically. The worker route, active agent, BUILD or PLAN mode, conversation, tool runs, and composer remain visible as the session progresses. No tokens are spent generating a greeting.
 
 ```text
-ZAVORA v2.0.0 · ADK-Rust 2.0
-workspace  my-project  session  default-session
-┌─ MODEL ROUTING
-│ WORKER   Openai/gpt-5.4-mini-2026-03-17
-│ PLANNER  Openai/gpt-5.6-sol · max 4 calls
-└────────────────────────────────────────────
+Shift+Tab   switch BUILD / PLAN
+Enter       send
+Ctrl+J      add a line
+PageUp/Down review the conversation
+Ctrl+End    follow the newest response
+Ctrl+P      open keyboard help
+Esc         request cancellation
 ```
 
-No tokens are spent generating a greeting.
+For redirected output, a dumb terminal, or the complete line-oriented slash-command shell, use:
+
+```bash
+ZAVORA_CLASSIC=1 zavora-cli chat
+```
 
 ## Planner and worker routing
 
@@ -77,7 +82,7 @@ zavora-cli \
   chat
 ```
 
-Inside chat:
+Inside the classic chat shell:
 
 ```text
 /models                         show the catalog and quota pools
@@ -146,7 +151,7 @@ zavora-cli mcp list
 zavora-cli doctor
 ```
 
-Useful chat controls include `/help`, `/tools`, `/mcp`, `/usage`, `/compact`, `/checkpoint`, `/tangent`, `/todos`, `/delegate`, `/agent`, and `/exit`.
+The retained workspace handles `/help`, `/models`, and `/exit`. The classic shell additionally provides `/tools`, `/mcp`, `/usage`, `/compact`, `/checkpoint`, `/tangent`, `/todos`, `/delegate`, `/agent`, live route switching, and the remaining advanced slash commands.
 
 ## Tools and operating controls
 

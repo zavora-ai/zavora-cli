@@ -14,6 +14,28 @@ use crate::theme::Spinner;
 
 pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent.";
 
+#[derive(Debug, Clone)]
+pub enum UiEvent {
+    AgentChanged(String),
+    TextDelta {
+        author: String,
+        text: String,
+    },
+    ToolStarted {
+        call_id: Option<String>,
+        name: String,
+        detail: String,
+    },
+    ToolFinished {
+        call_id: Option<String>,
+        name: String,
+        success: bool,
+        detail: String,
+    },
+    Error(String),
+    Completed(String),
+}
+
 #[derive(Default, Debug)]
 pub struct AuthorTextTracker {
     pub latest_final_text: Option<String>,
@@ -315,6 +337,92 @@ pub async fn run_prompt_with_retrieval(
     };
     let enriched = augment_prompt_with_retrieval(retrieval, prompt, policy)?;
     run_prompt(runner, cfg, &enriched, telemetry).await
+}
+
+/// Stream typed runtime events into a retained UI without writing to stdout.
+pub async fn run_prompt_to_ui(
+    runner: &Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    telemetry: &TelemetrySink,
+    tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+) -> Result<String> {
+    let mut stream = runner
+        .run_str(
+            &cfg.user_id,
+            &cfg.session_id,
+            Content::new("user").with_text(prompt),
+        )
+        .await
+        .context("failed to start runner stream")?;
+    let mut tracker = AuthorTextTracker::default();
+    let mut current_author = String::new();
+
+    while let Some(event_result) = stream.next().await {
+        let event = match event_result {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = tx.send(UiEvent::Error(error.to_string()));
+                continue;
+            }
+        };
+        if event.author == "user" {
+            continue;
+        }
+        emit_tool_lifecycle_events(&event, telemetry);
+        if event.author != current_author {
+            current_author = event.author.clone();
+            let _ = tx.send(UiEvent::AgentChanged(current_author.clone()));
+        }
+        if let Some(content) = event.content() {
+            for part in &content.parts {
+                match part {
+                    Part::FunctionCall { name, args, id, .. } if name != "transfer_to_agent" => {
+                        let detail = crate::text::truncate(&args.to_string(), 140, "…");
+                        let _ = tx.send(UiEvent::ToolStarted {
+                            call_id: id.clone(),
+                            name: name.clone(),
+                            detail,
+                        });
+                    }
+                    Part::FunctionResponse {
+                        function_response,
+                        id,
+                    } => {
+                        let failure = extract_tool_failure_message(&function_response.response);
+                        let detail = failure.clone().unwrap_or_else(|| {
+                            crate::text::truncate(&function_response.response.to_string(), 140, "…")
+                        });
+                        let _ = tx.send(UiEvent::ToolFinished {
+                            call_id: id.clone(),
+                            name: function_response.name.clone(),
+                            success: failure.is_none(),
+                            detail,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let text = event_text(&event);
+        let delta = tracker.ingest_parts(
+            &event.author,
+            &text,
+            event.llm_response.partial,
+            event.is_final_response(),
+        );
+        if !delta.is_empty() {
+            let _ = tx.send(UiEvent::TextDelta {
+                author: event.author.clone(),
+                text: delta,
+            });
+        }
+    }
+    let answer = tracker
+        .resolve_text()
+        .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string());
+    let _ = tx.send(UiEvent::Completed(answer.clone()));
+    Ok(answer)
 }
 
 pub async fn run_prompt_streaming(

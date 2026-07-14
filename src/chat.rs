@@ -1152,7 +1152,7 @@ pub async fn dispatch_chat_command(
     }
 }
 
-pub async fn run_chat(
+async fn run_chat_classic(
     mut cfg: RuntimeConfig,
     retrieval_service: Arc<dyn RetrievalService>,
     runtime_tools: ResolvedRuntimeTools,
@@ -1381,4 +1381,41 @@ pub async fn run_chat(
     crate::tools::browser::cleanup_browser().await;
 
     Ok(())
+}
+
+/// Start an interactive chat using the retained terminal workspace when a TTY is
+/// available. Set `ZAVORA_CLASSIC=1` to keep the line-oriented interface.
+pub async fn run_chat(
+    cfg: RuntimeConfig,
+    retrieval_service: Arc<dyn RetrievalService>,
+    runtime_tools: ResolvedRuntimeTools,
+    tool_confirmation: ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
+) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let classic = std::env::var_os("ZAVORA_CLASSIC").is_some()
+        || !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || std::env::var("TERM").is_ok_and(|term| term == "dumb");
+
+    if classic {
+        run_chat_classic(
+            cfg,
+            retrieval_service,
+            runtime_tools,
+            tool_confirmation,
+            telemetry,
+        )
+        .await
+    } else {
+        crate::tui::run_tui_chat(
+            cfg,
+            retrieval_service,
+            runtime_tools,
+            tool_confirmation,
+            telemetry,
+        )
+        .await
+    }
 }

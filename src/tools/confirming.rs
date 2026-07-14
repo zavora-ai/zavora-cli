@@ -63,6 +63,37 @@ fn display_result(tool_name: &str, result: &Value) {
 static TRUSTED_TOOLS: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    AllowOnce,
+    TrustSession,
+    Deny,
+}
+
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub detail: String,
+    pub response: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
+static APPROVAL_SENDER: std::sync::LazyLock<
+    Mutex<Option<tokio::sync::mpsc::UnboundedSender<ApprovalRequest>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn install_approval_bridge() -> tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    *APPROVAL_SENDER.lock().unwrap() = Some(tx);
+    rx
+}
+
+pub fn clear_approval_bridge() {
+    *APPROVAL_SENDER.lock().unwrap() = None;
+}
+
+fn tui_active() -> bool {
+    APPROVAL_SENDER.lock().unwrap().is_some()
+}
+
 /// Trust a tool for the remainder of the session.
 pub fn trust_tool(name: &str) {
     TRUSTED_TOOLS.lock().unwrap().insert(name.to_string());
@@ -104,7 +135,9 @@ impl ConfirmingTool {
         args: Value,
     ) -> adk_rust::Result<Value> {
         let result = self.inner.execute(ctx, args).await?;
-        display_result(self.inner.name(), &result);
+        if !tui_active() {
+            display_result(self.inner.name(), &result);
+        }
         Ok(result)
     }
 }
@@ -254,7 +287,9 @@ impl Tool for ConfirmingTool {
             )
         };
 
-        eprint!("{display}");
+        if !tui_active() {
+            eprint!("{display}");
+        }
 
         // If trusted or display-only, show action and execute immediately
         if trusted || self.display_only {
@@ -277,6 +312,51 @@ impl Tool for ConfirmingTool {
                 obj.insert("approved".to_string(), Value::Bool(true));
             }
             return self.execute_and_display(ctx, approved_args).await;
+        }
+
+        let approval_sender = APPROVAL_SENDER.lock().unwrap().clone();
+        if let Some(sender) = approval_sender {
+            let detail = if self.inner.name() == "execute_bash" {
+                args.get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string()
+            } else {
+                crate::text::truncate(&args.to_string(), 300, "…")
+            };
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            if sender
+                .send(ApprovalRequest {
+                    tool: self.inner.name().to_string(),
+                    detail,
+                    response: response_tx,
+                })
+                .is_err()
+            {
+                return Ok(serde_json::json!({"error": "approval interface unavailable"}));
+            }
+            match response_rx.await.unwrap_or(ApprovalDecision::Deny) {
+                ApprovalDecision::TrustSession => {
+                    trust_tool(self.inner.name());
+                    let mut approved_args = args;
+                    if let Some(obj) = approved_args.as_object_mut() {
+                        obj.insert("approved".to_string(), Value::Bool(true));
+                    }
+                    return self.execute_and_display(ctx, approved_args).await;
+                }
+                ApprovalDecision::AllowOnce => {
+                    let mut approved_args = args;
+                    if let Some(obj) = approved_args.as_object_mut() {
+                        obj.insert("approved".to_string(), Value::Bool(true));
+                    }
+                    return self.execute_and_display(ctx, approved_args).await;
+                }
+                ApprovalDecision::Deny => {
+                    return Ok(serde_json::json!({
+                        "error": format!("Tool '{}' denied by user", self.inner.name())
+                    }));
+                }
+            }
         }
 
         eprintln!(

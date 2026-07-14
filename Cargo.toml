@@ -58,6 +58,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
 crossterm = "0.28"
+ratatui = "0.29"
+unicode-width = "0.2"
 rustyline = "15"
 similar = "2.7"
 winnow = "0.7"
