@@ -388,6 +388,7 @@ pub async fn run_prompt_to_ui(
                     Part::FunctionResponse {
                         function_response,
                         id,
+                        ..
                     } => {
                         let failure = extract_tool_failure_message(&function_response.response);
                         let detail = failure.clone().unwrap_or_else(|| {
