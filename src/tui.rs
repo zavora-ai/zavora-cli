@@ -7,14 +7,11 @@ use std::time::{Duration, Instant};
 use adk_rust::prelude::{Content, Event, Runner};
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event as TerminalEvent,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -162,8 +159,8 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/mouse",
-        usage: "/mouse",
-        description: "Toggle mouse capture so you can select and copy with the mouse",
+        usage: "/mouse [speed <1-20>]",
+        description: "Trade the mouse wheel against native selection, or set the wheel step",
         category: "Session",
     },
     CommandSpec {
@@ -251,6 +248,24 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         category: "Models",
     },
     CommandSpec {
+        name: "/width",
+        usage: "/width [full|comfortable|<columns>]",
+        description: "Prose measure: fill the pane, or cap it for readability",
+        category: "Settings",
+    },
+    CommandSpec {
+        name: "/activity",
+        usage: "/activity [show|autohide|off]",
+        description: "Run-history pane: pinned, revealed after a run, or hidden",
+        category: "Settings",
+    },
+    CommandSpec {
+        name: "/keys",
+        usage: "/keys",
+        description: "List every keyboard shortcut this terminal can send",
+        category: "Settings",
+    },
+    CommandSpec {
         name: "/autocompact",
         usage: "/autocompact",
         description: "Toggle automatic context compaction",
@@ -329,16 +344,65 @@ const MAX_PROMPT_HISTORY: usize = 200;
 /// Role used for the single retained elision marker.
 const ELIDED_ROLE: &str = "ELIDED";
 
+/// How much room the run-history pane is allowed to take.
+///
+/// The activity pane held 30% of the width unconditionally in the wide layout,
+/// even with nothing in it. That is a lot of the screen spent on chrome during
+/// the part of a turn when the streamed response most needs the room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ActivityVisibility {
+    /// Always pinned open.
+    Show,
+    /// Hidden while a turn is in flight, revealed once it finishes.
+    ///
+    /// The default: while work is running the response is what matters, and the
+    /// record of what it did is what matters afterwards.
+    #[default]
+    AutoHide,
+    /// Never shown.
+    Off,
+}
+
+impl ActivityVisibility {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Show => "show",
+            Self::AutoHide => "autohide",
+            Self::Off => "off",
+        }
+    }
+
+    fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "show" | "on" | "always" => Some(Self::Show),
+            "autohide" | "auto" => Some(Self::AutoHide),
+            "off" | "hide" | "never" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Cycle for a bare `/activity` with no argument.
+    fn next(self) -> Self {
+        match self {
+            Self::AutoHide => Self::Show,
+            Self::Show => Self::Off,
+            Self::Off => Self::AutoHide,
+        }
+    }
+}
+
 struct Message {
     role: String,
     text: String,
-    /// Rendered lines, cached against the text length they were produced from.
+    /// Rendered lines, cached against the text length and width they were
+    /// produced from.
     ///
     /// `draw_transcript` runs on every dirty frame — every streamed delta and
     /// every 250ms while busy — and previously re-parsed Markdown for the whole
-    /// transcript each time, so redraw cost grew with session length. Caching
-    /// makes it proportional to what changed. Requirement 4.6.
-    rendered: std::cell::RefCell<Option<(usize, Vec<Line<'static>>)>>,
+    /// transcript each time, so redraw cost grew with session length. Width is
+    /// part of the key because wrapping depends on it: a resized pane must
+    /// re-render, and only then.
+    rendered: std::cell::RefCell<Option<(usize, usize, Vec<Line<'static>>)>>,
 }
 
 impl Message {
@@ -356,16 +420,17 @@ impl Message {
         self.rendered.replace(None);
     }
 
-    /// Rendered lines, computed once per text revision.
-    fn lines(&self) -> Vec<Line<'static>> {
+    /// Rendered lines for a given width, computed once per text revision.
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut cache = self.rendered.borrow_mut();
-        if let Some((len, lines)) = cache.as_ref()
+        if let Some((len, cached_width, lines)) = cache.as_ref()
             && *len == self.text.len()
+            && *cached_width == width
         {
             return lines.clone();
         }
-        let lines = markdown_lines(&self.text);
-        *cache = Some((self.text.len(), lines.clone()));
+        let lines = markdown_lines_wrapped(&self.text, width);
+        *cache = Some((self.text.len(), width, lines.clone()));
         lines
     }
 }
@@ -400,7 +465,17 @@ struct App {
     current_assistant: Option<usize>,
     mode: Mode,
     busy: bool,
-    scroll: u16,
+    /// Rows between the top of the rendered transcript and the top of the
+    /// viewport. Zero is the very beginning of the conversation.
+    ///
+    /// Anchored to the content rather than to the bottom. It used to count back
+    /// from the newest line, which meant the bottom was the reference point —
+    /// and while a response streams the bottom moves. A reader who scrolled back
+    /// to re-read something watched it drift off the top at exactly the rate
+    /// output arrived, because "twenty lines from the end" names a different
+    /// twenty lines every time the end moves. Measuring from the top instead
+    /// makes an append a no-op for a detached view.
+    scroll_offset: usize,
     context_percent: u16,
     active_agent: String,
     approval: Option<PendingApproval>,
@@ -412,11 +487,70 @@ struct App {
     shell_mode: bool,
     /// Whether the terminal's mouse reporting is claimed by the app.
     ///
-    /// When on, the wheel scrolls the transcript — but the terminal's own
-    /// click-drag text selection stops working, because the app receives the
-    /// events instead. Toggling it off hands selection back so the developer can
-    /// copy with the mouse the way they do everywhere else.
+    /// On by default, which is not the obvious choice: claiming the mouse costs
+    /// the terminal's own click-drag selection. It is the right one because
+    /// leaving the wheel to the terminal is actively destructive rather than
+    /// merely inert. Screenshots of the workspace before and after eight wheel
+    /// notches in Apple Terminal show the whole drawn frame pushed six rows down
+    /// the window with blank space above it: the terminal scrolls its own buffer,
+    /// displacing a frame the app still believes it owns. Every later diffed
+    /// redraw then lands at the wrong row and the transcript interleaves old and
+    /// new text. With reporting claimed the frame stays put and the transcript
+    /// scrolls, which is what the wheel is for.
+    ///
+    /// Selection is one modifier away — `Fn` in Apple Terminal, `Option` in
+    /// iTerm2, `Shift` in most others — and `Ctrl+R` hands the mouse back
+    /// wholesale.
     mouse_capture: bool,
+    /// Lines the transcript moves per wheel notch.
+    ///
+    /// Configurable because terminals disagree about how many events a physical
+    /// notch produces — some amplify, some send exactly one — and the app cannot
+    /// tell which. Three matches `vim` and is what Bubble Tea and Claude Code
+    /// both default to.
+    wheel_lines: usize,
+    /// Largest useful scroll offset, in lines, recorded by the last draw.
+    ///
+    /// The key handler needs this to clamp. Without it `scroll` grew without
+    /// bound on PageUp — the render clamped for display but never wrote the
+    /// bound back — so overshooting the top left dead range that PageDown had to
+    /// walk through before the view moved at all. That reads as "scrolling is
+    /// broken" when it is really an unclamped counter.
+    max_scroll: std::cell::Cell<usize>,
+    /// Visible transcript height in lines, recorded by the last draw, so a page
+    /// step is an actual page rather than a fixed guess.
+    viewport: std::cell::Cell<usize>,
+    /// Row offset of every message label in the rendered transcript, recorded by
+    /// the last draw.
+    ///
+    /// Semantic navigation moves between these instead of a fixed number of
+    /// lines, so one keystroke lands on the start of a response whatever its
+    /// length. Only the renderer knows where the boundaries fell, because only
+    /// it knows the wrapped height of each message at the current width.
+    message_rows: std::cell::RefCell<Vec<usize>>,
+    activity_visibility: ActivityVisibility,
+    /// Optional cap on prose measure, in columns.
+    ///
+    /// `None` fills the pane. A cap is better for reading — long lines make the
+    /// eye lose its place on the return sweep — but on a wide terminal the
+    /// leftover space looks like a panel that failed to close, so filling is the
+    /// less surprising default and `/width` opts into the cap.
+    prose_width: Option<u16>,
+    /// Every chord the workspace answers, resolved for this terminal.
+    ///
+    /// Held on the app so the key handler, the footer, and `/keys` all read the
+    /// same table; they used to spell the shortcuts out separately and had
+    /// already drifted.
+    keys: crate::tui_keys::ActionRegistry,
+    /// Set when the next frame must repaint every cell rather than a diff.
+    ///
+    /// Needed because the terminal can move the drawn frame out from under the
+    /// app — by scrolling its own buffer — and nothing reports that, so recovery
+    /// has to be something the developer can ask for.
+    force_redraw: bool,
+    /// When a redraw was last asked for, so a second request in quick succession
+    /// can mean "and clear the conversation too".
+    last_redraw_request: Option<Instant>,
     task_abort: Option<tokio::task::AbortHandle>,
 }
 
@@ -430,7 +564,7 @@ impl App {
             current_assistant: None,
             mode: Mode::Build,
             busy: false,
-            scroll: 0,
+            scroll_offset: 0,
             context_percent: 0,
             active_agent: "idle".into(),
             approval: None,
@@ -441,7 +575,177 @@ impl App {
             history_draft: String::new(),
             shell_mode: false,
             mouse_capture: true,
+            wheel_lines: 3,
+            max_scroll: std::cell::Cell::new(0),
+            viewport: std::cell::Cell::new(0),
+            message_rows: std::cell::RefCell::new(Vec::new()),
+            activity_visibility: ActivityVisibility::default(),
+            prose_width: None,
+            keys: crate::tui_keys::ActionRegistry::detect(),
+            force_redraw: false,
+            last_redraw_request: None,
             task_abort: None,
+        }
+    }
+
+    /// Whether the run-history pane should occupy space this frame.
+    ///
+    /// `AutoHide` deliberately hides *while* busy rather than after: the
+    /// streamed response is what the developer is reading during a turn, and the
+    /// record of what ran is what they want once it is done.
+    fn show_activity(&self) -> bool {
+        match self.activity_visibility {
+            ActivityVisibility::Off => false,
+            ActivityVisibility::Show => true,
+            ActivityVisibility::AutoHide => !self.busy && !self.activities.is_empty(),
+        }
+    }
+
+    /// The measure to wrap prose at, given the available content width.
+    fn prose_measure(&self, content_width: usize) -> usize {
+        match self.prose_width {
+            Some(cap) => content_width.min(cap as usize).max(20),
+            None => content_width,
+        }
+    }
+
+    /// One page, in lines: the viewport minus an overlap row so the reader keeps
+    /// a line of context across the jump.
+    fn page_step(&self) -> usize {
+        self.viewport.get().saturating_sub(1).max(1)
+    }
+
+    /// Half a page, in lines — the step `PageUp`/`PageDown` take.
+    ///
+    /// A whole page leaves no overlap, so every jump forces the reader to
+    /// re-find their place. Half keeps the previous half on screen, which is why
+    /// both Claude Code's fullscreen renderer and grok's `Ctrl+U`/`Ctrl+D` move
+    /// by half a screen. The full page is still reachable on `Shift+PageUp`.
+    fn half_page_step(&self) -> usize {
+        (self.viewport.get() / 2).max(1)
+    }
+
+    /// Scroll towards the start of the conversation, stopping at the first line.
+    fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = self.top_offset().saturating_sub(lines);
+        self.follow_output = false;
+    }
+
+    /// Scroll towards the newest output.
+    ///
+    /// Reaching the end re-arms following, so scrolling back down by hand has
+    /// the same result as jumping there.
+    fn scroll_down(&mut self, lines: usize) {
+        let max = self.max_scroll.get();
+        self.scroll_offset = self.top_offset().saturating_add(lines).min(max);
+        self.follow_output = self.scroll_offset >= max;
+    }
+
+    /// Jump to the very beginning of the conversation.
+    fn scroll_to_start(&mut self) {
+        self.scroll_offset = 0;
+        self.follow_output = false;
+    }
+
+    /// Jump to the newest output and resume following it.
+    fn scroll_to_end(&mut self) {
+        self.scroll_offset = self.max_scroll.get();
+        self.follow_output = true;
+    }
+
+    /// Rows between the top of the transcript and the top of the viewport.
+    ///
+    /// While following, the effective position is the tail whatever
+    /// `scroll_offset` last held, because the renderer pins it there. Resolving
+    /// that here means a scroll away from the bottom starts from where the reader
+    /// can actually see, not from a stale offset.
+    fn top_offset(&self) -> usize {
+        let max = self.max_scroll.get();
+        if self.follow_output {
+            max
+        } else {
+            self.scroll_offset.min(max)
+        }
+    }
+
+    /// Swap the wheel for native text selection, or back.
+    ///
+    /// Both messages name the cost, because in the alternate screen this is a
+    /// real trade rather than a setting with a better side: the terminal either
+    /// forwards wheel events to the app or keeps them, and it cannot do both.
+    /// The modifier that forces native selection anyway is terminal-specific, so
+    /// the message names the one that works here.
+    fn toggle_mouse_capture(&mut self) {
+        self.mouse_capture = !self.mouse_capture;
+        // Claiming the mouse usually follows the terminal having scrolled the
+        // frame out of position, so repaint rather than diff onto a stale buffer.
+        self.force_redraw = true;
+        let chord = self
+            .keys
+            .advertised_key(crate::tui_keys::ActionId::ToggleMouseCapture)
+            .map(|key| key.display())
+            .unwrap_or_else(|| "/mouse".into());
+        if self.mouse_capture {
+            let modifier = self.keys.terminal().native_selection_modifier();
+            self.push_system(format!(
+                "Mouse wheel **on** — it scrolls the transcript. The terminal no \
+                 longer gets click-drag selection, so hold `{modifier}` while \
+                 dragging to select natively, or press `{chord}` to hand the \
+                 mouse back."
+            ));
+        } else {
+            self.push_system(format!(
+                "Mouse wheel **off** — select and copy with the mouse as usual. \
+                 The terminal now owns the wheel, and in the alternate screen it \
+                 will scroll its own buffer and push this frame out of place; \
+                 press `Ctrl+L` to repaint, or `{chord}` to take the wheel back. \
+                 Scroll with `PageUp`/`PageDown` meanwhile."
+            ));
+        }
+    }
+
+    /// Repaint every cell on the next frame, and report it.
+    ///
+    /// `Ctrl+L` means "redraw" almost everywhere, and a developer whose frame the
+    /// terminal has displaced will reach for it. It used to clear the
+    /// conversation outright, so the conventional reflex for a corrupted screen
+    /// destroyed the transcript instead of repairing it. Clearing now takes a
+    /// second press, which is also how Claude Code resolves the same collision.
+    fn request_redraw(&mut self) -> bool {
+        self.force_redraw = true;
+        let recent = self
+            .last_redraw_request
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+        if recent {
+            self.last_redraw_request = None;
+            return true;
+        }
+        self.last_redraw_request = Some(Instant::now());
+        false
+    }
+
+    /// Put a message boundary at the top of the viewport.    ///
+    /// Moving by response rather than by line means one keystroke reaches the
+    /// start of the previous answer whether it is three lines or three hundred.
+    /// Running off either end lands at that end instead of doing nothing, which
+    /// is what a reader holding the key expects.
+    fn scroll_to_message(&mut self, backwards: bool) {
+        let current = self.top_offset();
+        let target = {
+            let rows = self.message_rows.borrow();
+            if backwards {
+                rows.iter().rev().copied().find(|&row| row < current)
+            } else {
+                rows.iter().copied().find(|&row| row > current)
+            }
+        };
+        match target {
+            Some(row) => {
+                self.scroll_offset = row.min(self.max_scroll.get());
+                self.follow_output = self.scroll_offset >= self.max_scroll.get();
+            }
+            None if backwards => self.scroll_to_start(),
+            None => self.scroll_to_end(),
         }
     }
 
@@ -646,7 +950,7 @@ pub async fn run_tui_chat(
     confirmation: ToolConfirmationSettings,
     telemetry: &TelemetrySink,
 ) -> Result<()> {
-    let runtime_tools = Arc::new(runtime_tools);
+    let mut runtime_tools = Arc::new(runtime_tools);
     let session_service = build_session_service(&cfg).await?;
     let (runner, mut provider, model) = build_single_runner_for_chat(
         &cfg,
@@ -666,6 +970,11 @@ pub async fn run_tui_chat(
 
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     let mut stdout = io::stdout();
+    // Mouse reporting is claimed here to match `App::new()`. Leaving the wheel to
+    // the terminal is not a neutral choice: in the alternate screen the terminal
+    // scrolls its own buffer and displaces the frame the app is drawing into, and
+    // every diffed redraw after that lands at the wrong row. `Ctrl+R` hands the
+    // mouse back for anyone who wants native selection more than the wheel.
     if let Err(error) = execute!(
         stdout,
         EnterAlternateScreen,
@@ -675,25 +984,23 @@ pub async fn run_tui_chat(
         disable_raw_mode().ok();
         return Err(error).context("failed to enter terminal workspace");
     }
+    // From here the terminal is in states the shell cannot undo by itself. Arm the
+    // restore before anything else can fail: a panic or a signal from this point
+    // on would otherwise leave raw mode and mouse reporting on, and a terminal
+    // still reporting motion prints escape sequences as text into the shell.
+    crate::tui_restore::arm();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = match ratatui::Terminal::new(backend) {
         Ok(terminal) => terminal,
         Err(error) => {
-            let mut stdout = io::stdout();
-            execute!(
-                stdout,
-                DisableMouseCapture,
-                DisableBracketedPaste,
-                LeaveAlternateScreen
-            )
-            .ok();
-            disable_raw_mode().ok();
+            crate::tui_restore::restore();
             return Err(error).context("failed to initialize terminal workspace");
         }
     };
     let mut app = App::new();
     // Mirrors the terminal's actual mouse-reporting state so the loop only
-    // issues a control sequence when it genuinely changes.
+    // issues a control sequence when it genuinely changes. Matches both
+    // `App::new()` and the sequence issued above.
     let mut mouse_capture_active = true;
     let workspace = std::env::current_dir().unwrap_or_default();
     let mut checkpoint_store = CheckpointStore::load_from_disk(&workspace);
@@ -756,6 +1063,70 @@ pub async fn run_tui_chat(
                     }
                     last_context_refresh = Instant::now();
                 }
+
+                // A capability enabled during the last turn added MCP servers to
+                // the profile, and the sealed tool surface predates them. Reseal
+                // between turns so the capability works in this session instead of
+                // asking the developer to restart. Never mid-turn: the in-flight
+                // request is holding the current surface.
+                if !app.busy && crate::capabilities::take_surface_stale() {
+                    app.active_agent = "connecting".into();
+                    let _ = terminal.draw(|frame| draw(frame, &app, &cfg));
+
+                    match crate::config::reload_mcp_servers(&mut cfg) {
+                        Ok(declared) => {
+                            let before = runtime_tools.tools().len();
+                            let resolved =
+                                Arc::new(crate::runner::resolve_runtime_tools(&cfg).await);
+                            let failures = resolved.connect_failures().len();
+                            let gained = resolved.tools().len().saturating_sub(before);
+
+                            match build_single_runner_for_chat(
+                                &cfg,
+                                session_service.clone(),
+                                resolved.as_ref(),
+                                &confirmation,
+                                &telemetry,
+                            )
+                            .await
+                            {
+                                Ok((next_runner, _, _)) => {
+                                    runner = Arc::new(next_runner);
+                                    runtime_tools = resolved;
+                                    // Configured and connected are reported apart:
+                                    // a declared server can still refuse to answer.
+                                    let mut message = format!(
+                                        "Capability activated — {declared} MCP server{} configured, \
+                                         {gained} new tool{} available now.",
+                                        if declared == 1 { "" } else { "s" },
+                                        if gained == 1 { "" } else { "s" },
+                                    );
+                                    if failures > 0 {
+                                        message.push_str(&format!(
+                                            "\n\n{failures} server{} did not answer; run `/mcp` to see which.",
+                                            if failures == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                    app.push_system(message);
+                                }
+                                Err(error) => app.push_system(format!(
+                                    "Servers were configured, but rebuilding the agent failed, so \
+                                     the previous tools remain active.\n\n`{}`",
+                                    crate::error::format_cli_error(
+                                        &error,
+                                        cfg.show_sensitive_config
+                                    )
+                                )),
+                            }
+                        }
+                        Err(error) => app.push_system(format!(
+                            "Servers were configured, but the profile could not be re-read, so \
+                             they are not active yet.\n\n`{error}`"
+                        )),
+                    }
+                    app.active_agent = "idle".into();
+                    dirty = true;
+                }
                 if app.busy && last_animation.elapsed() >= Duration::from_millis(250) {
                     dirty = true;
                     last_animation = Instant::now();
@@ -779,6 +1150,16 @@ pub async fn run_tui_chat(
                     dirty = true;
                 }
                 if dirty {
+                    // A full repaint discards ratatui's back buffer, which is
+                    // the only way back from a frame the terminal has displaced.
+                    // Scrolling the terminal's own buffer moves the drawn frame
+                    // without the app knowing, and from then on a diffed redraw
+                    // paints every changed cell at the wrong row, interleaving
+                    // old and new text.
+                    if app.force_redraw {
+                        terminal.clear()?;
+                        app.force_redraw = false;
+                    }
                     terminal.draw(|frame| draw(frame, &app, &cfg))?;
                     dirty = false;
                 }
@@ -816,14 +1197,8 @@ pub async fn run_tui_chat(
                         TerminalEvent::Resize(_, _) => dirty = true,
                         TerminalEvent::Mouse(mouse) => {
                             match mouse.kind {
-                                MouseEventKind::ScrollUp => {
-                                    app.scroll = app.scroll.saturating_add(4);
-                                    app.follow_output = false;
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    app.scroll = app.scroll.saturating_sub(4);
-                                    app.follow_output = app.scroll == 0;
-                                }
+                                MouseEventKind::ScrollUp => app.scroll_up(app.wheel_lines),
+                                MouseEventKind::ScrollDown => app.scroll_down(app.wheel_lines),
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     let size = terminal.size()?;
                                     handle_mouse_click(
@@ -846,14 +1221,10 @@ pub async fn run_tui_chat(
         .await;
 
     clear_approval_bridge();
-    disable_raw_mode().ok();
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    )
-    .ok();
+    // Hand the terminal back through the same idempotent path the panic hook and
+    // signal handler use, so a signal arriving mid-teardown cannot double up and
+    // a panic in here still leaves a usable shell.
+    crate::tui_restore::restore();
     terminal.show_cursor().ok();
     result
 }
@@ -884,6 +1255,48 @@ fn handle_mouse_click(app: &mut App, column: u16, row: u16, area: Rect) {
             Mode::Build
         };
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Apply a navigation action, reporting whether it was one.
+///
+/// Navigation is the part of the key map dispatched from the registry rather
+/// than from a hand-written arm, so the chords, the footer, and `/keys` cannot
+/// disagree. Everything else — sending, cancelling, composer editing — carries
+/// enough surrounding logic that a table entry would only describe it, and those
+/// stay as explicit arms below.
+fn apply_navigation(app: &mut App, action: crate::tui_keys::ActionId) -> bool {
+    use crate::tui_keys::ActionId;
+    match action {
+        ActionId::ScrollLineUp => app.scroll_up(1),
+        ActionId::ScrollLineDown => app.scroll_down(1),
+        ActionId::ScrollHalfPageUp => {
+            let step = app.half_page_step();
+            app.scroll_up(step);
+        }
+        ActionId::ScrollHalfPageDown => {
+            let step = app.half_page_step();
+            app.scroll_down(step);
+        }
+        ActionId::ScrollPageUp => {
+            let step = app.page_step();
+            app.scroll_up(step);
+        }
+        ActionId::ScrollPageDown => {
+            let step = app.page_step();
+            app.scroll_down(step);
+        }
+        ActionId::ScrollToStart => app.scroll_to_start(),
+        ActionId::ScrollToEnd => app.scroll_to_end(),
+        ActionId::PrevMessage => app.scroll_to_message(true),
+        ActionId::NextMessage => app.scroll_to_message(false),
+        // Not navigation, but it belongs with it: the wheel is a scroll control,
+        // and reaching it by chord matters most when the wheel is dead.
+        ActionId::ToggleMouseCapture => app.toggle_mouse_capture(),
+        // Not navigation: leave it to the arms below.
+        _ => return false,
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -986,6 +1399,14 @@ async fn handle_key(
         }
         return false;
     }
+    // Navigation comes from the action registry, so the bound chords, the footer
+    // hints, and the `/keys` listing are all the same table. A chord the registry
+    // does not claim falls through to the arms below.
+    if let Some(action) = app.keys.lookup(key.code, key.modifiers, app.busy)
+        && apply_navigation(app, action)
+    {
+        return false;
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) if !app.busy => return true,
         (KeyCode::Char('d'), KeyModifiers::CONTROL) if !app.busy && app.input.is_empty() => {
@@ -993,10 +1414,17 @@ async fn handle_key(
         }
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => app.palette = Some(PaletteState::default()),
         (KeyCode::Char('l'), KeyModifiers::CONTROL) if !app.busy => {
-            app.messages.clear();
-            app.activities.clear();
-            app.scroll = 0;
-            app.follow_output = true;
+            // First press repaints; a second within two seconds clears.
+            if app.request_redraw() {
+                app.messages.clear();
+                app.activities.clear();
+                app.scroll_to_end();
+            } else {
+                app.push_system(
+                    "Screen repainted. Press `Ctrl+L` again within two seconds to \
+                     clear the conversation, or run `/clear`.",
+                );
+            }
         }
         (KeyCode::BackTab, _) => {
             app.mode = if app.mode == Mode::Build {
@@ -1018,18 +1446,6 @@ async fn handle_key(
         (KeyCode::Esc, _) if app.shell_mode => {
             app.shell_mode = false;
             app.push_system("Direct shell mode disabled.");
-        }
-        (KeyCode::PageUp, _) => {
-            app.scroll = app.scroll.saturating_add(8);
-            app.follow_output = false;
-        }
-        (KeyCode::PageDown, _) => {
-            app.scroll = app.scroll.saturating_sub(8);
-            app.follow_output = app.scroll == 0;
-        }
-        (KeyCode::End, KeyModifiers::CONTROL) => {
-            app.scroll = 0;
-            app.follow_output = true;
         }
         (KeyCode::Up, _) if !app.busy => app.history_previous(),
         (KeyCode::Down, _) if !app.busy => app.history_next(),
@@ -1131,8 +1547,7 @@ async fn submit_input(
     if raw == "/clear" {
         app.messages.clear();
         app.activities.clear();
-        app.scroll = 0;
-        app.follow_output = true;
+        app.scroll_to_end();
         return false;
     }
     if raw == "/shell" || raw == "!" {
@@ -1196,19 +1611,117 @@ async fn submit_input(
         }
         return false;
     }
-    if raw == "/mouse" {
-        app.mouse_capture = !app.mouse_capture;
-        if app.mouse_capture {
-            app.push_system(
-                "Mouse capture **on** — the wheel scrolls the transcript, and click-drag \
-                 selection is handled by the app.",
-            );
+    if raw == "/width" || raw.starts_with("/width ") {
+        let argument = raw.strip_prefix("/width").unwrap_or_default().trim();
+        match argument {
+            "" => {
+                let current = match app.prose_width {
+                    Some(cap) => format!("capped at {cap} columns"),
+                    None => "filling the pane".to_string(),
+                };
+                app.push_system(format!(
+                    "Prose measure is **{current}**. Use `/width full`, \
+                     `/width comfortable`, or `/width <columns>`."
+                ));
+            }
+            "full" | "fill" => {
+                app.prose_width = None;
+                app.push_system("Prose now **fills the pane**.");
+            }
+            "comfortable" | "read" => {
+                app.prose_width = Some(crate::tui_text::PROSE_MEASURE as u16);
+                app.push_system(format!(
+                    "Prose capped at **{} columns** — easier to read, with space to the right.",
+                    crate::tui_text::PROSE_MEASURE
+                ));
+            }
+            other => match other.parse::<u16>() {
+                Ok(columns) if columns >= 20 => {
+                    app.prose_width = Some(columns);
+                    app.push_system(format!("Prose capped at **{columns} columns**."));
+                }
+                Ok(_) => app.push_system("A measure below 20 columns is unreadable."),
+                Err(_) => app.push_system(
+                    "Usage: `/width full`, `/width comfortable`, or `/width <columns>`.",
+                ),
+            },
+        }
+        return false;
+    }
+    if raw == "/activity" || raw.starts_with("/activity ") {
+        let argument = raw.strip_prefix("/activity").unwrap_or_default().trim();
+        let requested = if argument.is_empty() {
+            Some(app.activity_visibility.next())
         } else {
-            app.push_system(
-                "Mouse capture **off** — select and copy with the mouse as usual. \
-                 Scroll with `PageUp`/`PageDown`. Run `/mouse` again to re-enable the wheel.",
+            ActivityVisibility::parse(argument)
+        };
+        match requested {
+            Some(visibility) => {
+                app.activity_visibility = visibility;
+                let explanation = match visibility {
+                    ActivityVisibility::Show => "pinned open.",
+                    ActivityVisibility::AutoHide => {
+                        "hidden while a turn runs, revealed when it finishes."
+                    }
+                    ActivityVisibility::Off => "hidden; the transcript takes the full width.",
+                };
+                app.push_system(format!(
+                    "Run history **{}** — {explanation}",
+                    visibility.label()
+                ));
+            }
+            None => app
+                .push_system("Usage: `/activity show`, `/activity autohide`, or `/activity off`."),
+        }
+        return false;
+    }
+    if raw == "/keys" {
+        // Generated from the same table the key handler dispatches through, and
+        // filtered to what this terminal can actually send, so it cannot
+        // describe a chord that does nothing here.
+        let mut out = String::from("Keyboard shortcuts\n");
+        for (category, rows) in app.keys.help_lines() {
+            out.push_str(&format!("\n**{}**\n", category.label()));
+            for (chords, description) in rows {
+                out.push_str(&format!("- `{chords}` — {description}\n"));
+            }
+        }
+        if app.keys.terminal() == crate::tui_keys::TerminalKind::AppleTerminal {
+            out.push_str(
+                "\nApple Terminal does not forward `Home`, `End`, or modified \
+                 arrow keys, and strips `Shift` from `PageUp`/`PageDown`, so the \
+                 `Ctrl`+letter forms above are the ones that reach the \
+                 workspace. Another terminal — iTerm2, Ghostty, WezTerm, kitty — \
+                 delivers the full set.\n",
             );
         }
+        app.push_system(out);
+        return false;
+    }
+    if raw == "/mouse" || raw.starts_with("/mouse ") {
+        let argument = raw.strip_prefix("/mouse").unwrap_or_default().trim();
+        if let Some(value) = argument.strip_prefix("speed") {
+            match value.trim().parse::<usize>() {
+                Ok(lines) if (1..=20).contains(&lines) => {
+                    app.wheel_lines = lines;
+                    app.push_system(format!(
+                        "Wheel step **{lines}** {} per notch.",
+                        if lines == 1 { "line" } else { "lines" }
+                    ));
+                }
+                _ => app.push_system(
+                    "Usage: `/mouse speed <1-20>`. Three matches `vim`; raise it if \
+                     your terminal sends one event per notch, lower it if the \
+                     terminal already accelerates the wheel.",
+                ),
+            }
+            return false;
+        }
+        if !argument.is_empty() {
+            app.push_system("Usage: `/mouse` to toggle the wheel, or `/mouse speed <1-20>`.");
+            return false;
+        }
+        app.toggle_mouse_capture();
         return false;
     }
     if raw == "/export" || raw.starts_with("/export ") {
@@ -1264,8 +1777,7 @@ async fn submit_input(
 
     app.push_message(Message::new("YOU", raw.clone()));
     app.activities.clear();
-    app.scroll = 0;
-    app.follow_output = true;
+    app.scroll_to_end();
     app.busy = true;
     app.active_agent = "starting".into();
     telemetry.emit_content(
@@ -1831,8 +2343,7 @@ async fn handle_sessions_command(
                     })
                     .collect();
                 app.activities.clear();
-                app.scroll = 0;
-                app.follow_output = true;
+                app.scroll_to_end();
                 app.current_assistant = None;
                 app.push_system(format!("Switched to session `{session_id}`."));
             }
@@ -2135,7 +2646,7 @@ async fn handle_memory_command(app: &mut App, subcommand: &str) {
 
 fn format_status_markdown(cfg: &RuntimeConfig, app: &App) -> String {
     format!(
-        "## Workspace status\n\n- **Profile:** `{}`\n- **Agent:** `{}` ({})\n- **Mode:** {}\n- **Worker:** {} / `{}`\n- **Planner:** {} / `{}`\n- **Session:** `{}`\n- **Context:** {}%\n- **Auto-compact:** {}",
+        "## Workspace status\n\n- **Profile:** `{}`\n- **Agent:** `{}` ({})\n- **Mode:** {}\n- **Worker:** {} / `{}`\n- **Planner:** {} / `{}`\n- **Session:** `{}`\n- **Context:** {}%\n- **Auto-compact:** {}\n- **Run history:** {}\n- **Mouse capture:** {}",
         cfg.profile,
         cfg.agent_name,
         cfg.agent_source.label(),
@@ -2150,6 +2661,12 @@ fn format_status_markdown(cfg: &RuntimeConfig, app: &App) -> String {
             "on"
         } else {
             "off"
+        },
+        app.activity_visibility.label(),
+        if app.mouse_capture {
+            "on (wheel scrolls; `/mouse` to select text)"
+        } else {
+            "off (mouse selection available)"
         }
     )
 }
@@ -2404,29 +2921,25 @@ fn draw(frame: &mut Frame<'_>, app: &App, cfg: &RuntimeConfig) {
         ])
         .split(area);
     draw_header(frame, root[0], app, cfg);
-    if area.width >= 110 {
+    let show_activity = app.show_activity();
+    if area.width >= 110 && show_activity {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(root[1]);
         draw_transcript(frame, body[0], app);
         draw_activity(frame, body[1], app);
-    } else {
-        let activity_height = if app.activities.is_empty() && !app.busy {
-            0
-        } else if area.height < 22 {
-            4
-        } else {
-            7
-        };
+    } else if show_activity {
+        let activity_height = if area.height < 22 { 4 } else { 7 };
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(activity_height)])
             .split(root[1]);
         draw_transcript(frame, body[0], app);
-        if activity_height > 0 {
-            draw_activity(frame, body[1], app);
-        }
+        draw_activity(frame, body[1], app);
+    } else {
+        // Hidden: the transcript takes the whole body, at any width.
+        draw_transcript(frame, root[1], app);
     }
     draw_composer(frame, root[2], app);
     draw_footer(frame, root[3], app, cfg);
@@ -2498,84 +3011,132 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, cfg: &RuntimeConfig
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    use crate::tui_text::GUTTER;
+
+    // Recorded even on the empty path so a page step is never a stale guess.
+    app.viewport.set(area.height.saturating_sub(1) as usize);
     if app.messages.is_empty() {
+        app.max_scroll.set(0);
+        app.message_rows.borrow_mut().clear();
         draw_welcome(frame, area);
         return;
     }
-    let mut lines = Vec::new();
-    for message in &app.messages {
-        let color = match message.role.as_str() {
-            "YOU" => Color::Cyan,
-            "ZAVORA" => ORANGE,
-            _ => Color::Green,
+
+    // Content width excludes the right border and the gutter on each side.
+    let content_width = area.width.saturating_sub(1 + (GUTTER as u16) * 2).max(8) as usize;
+    let gutter = " ".repeat(GUTTER);
+    let measure = app.prose_measure(content_width);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut message_rows: Vec<usize> = Vec::with_capacity(app.messages.len());
+    for (index, message) in app.messages.iter().enumerate() {
+        // Space separates messages instead of a rule. A full-width divider plus
+        // a reverse-video badge per message is a lot of chrome; whitespace does
+        // the same grouping work without competing with the content.
+        if index > 0 {
+            lines.push(Line::default());
+        }
+
+        // The blank separator belongs to the boundary: landing on it puts a
+        // little air above the message rather than jamming it to the top row.
+        message_rows.push(lines.len().saturating_sub(1));
+
+        if message.role == ELIDED_ROLE {
+            lines.push(Line::from(vec![
+                Span::raw(gutter.clone()),
+                Span::styled(
+                    format!("⋯ {}", message.text),
+                    Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+            continue;
+        }
+
+        let (color, label) = match message.role.as_str() {
+            "YOU" => (Color::Cyan, "you"),
+            "ZAVORA" => (ORANGE, "zavora"),
+            _ => (Color::Green, "agent"),
         };
-        let role = if message.role == "YOU" {
-            " YOU "
-        } else {
-            " ZAVORA "
-        };
+
+        // A lowercase coloured label reads as a speaker attribution rather than
+        // a UI chip, and costs one line instead of two.
         lines.push(Line::from(vec![
+            Span::raw(gutter.clone()),
             Span::styled(
-                role,
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if message.role == "YOU" {
-                    "  request"
-                } else {
-                    "  response"
-                },
-                Style::default().fg(MUTED),
+                label.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
         ]));
-        lines.push(Line::default());
-        lines.extend(message.lines());
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "─".repeat(area.width.saturating_sub(5) as usize),
-            Style::default().fg(Color::Rgb(48, 51, 59)),
-        )));
-        lines.push(Line::default());
+
+        for line in message.lines(measure) {
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::raw(gutter.clone()));
+            spans.extend(line.spans);
+            lines.push(Line::from(spans).style(line.style));
+        }
     }
-    let available = area.width.saturating_sub(4).max(1) as usize;
-    let visible = area.height.saturating_sub(2) as usize;
-    let rendered_height: usize = lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(available))
-        .sum();
-    let max_scroll = u16::try_from(rendered_height.saturating_sub(visible)).unwrap_or(u16::MAX);
-    let offset = max_scroll.saturating_sub(app.scroll.min(max_scroll));
-    let title = if app.scroll > 0 {
-        format!(
-            " Conversation  ·  {} lines below ",
-            app.scroll.min(max_scroll)
-        )
+
+    // Lines arrive pre-wrapped, so height is a simple count. With no title the
+    // block consumes only the bottom border row, so the viewport is height - 1.
+    // Getting this wrong by one is why streamed output stopped a line short of
+    // the bottom: an overestimated viewport makes max_scroll too small to reach
+    // the final line.
+    let visible = area.height.saturating_sub(1) as usize;
+    let rendered_height = lines.len();
+    let max_scroll = rendered_height.saturating_sub(visible);
+
+    // Publish the bounds for the key handler. Recorded here because only the
+    // renderer knows the wrapped line count and the pane height.
+    app.max_scroll.set(max_scroll);
+    app.viewport.set(visible);
+    *app.message_rows.borrow_mut() = message_rows;
+
+    // Following means pinning to the tail every frame; a detached view keeps the
+    // offset it was given, so lines arriving below it do not move it.
+    let offset = if app.follow_output {
+        max_scroll
     } else {
-        " Conversation ".to_string()
+        app.scroll_offset.min(max_scroll)
     };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((offset, 0))
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
-        area,
-    );
+
+    // No title on the top edge: the pane is self-evident, and a heading spends a
+    // row of the viewport on chrome. The scroll indicator goes on the bottom
+    // border, which is already chrome, so the viewport is the same height whether
+    // or not it is showing. A top title cost a content row only while scrolled —
+    // ratatui reserves a row for one even without a top border — so a one-line
+    // scroll moved the view by two.
+    let mut block = Block::default()
+        .borders(Borders::RIGHT | Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let below = max_scroll.saturating_sub(offset);
+    if below > 0 {
+        let resume = app
+            .keys
+            .advertised_key(crate::tui_keys::ActionId::ScrollToEnd)
+            .map(|key| key.display())
+            .unwrap_or_else(|| "/keys".into());
+        block = block.title_bottom(format!(" {below} lines below · {resume} newest "));
+    }
+
+    // Take the visible window rather than handing the whole transcript to
+    // `Paragraph::scroll`, whose offset is a `u16`: a long session renders past
+    // 65535 rows, and there the offset saturated and the top of the conversation
+    // became unreachable. Slicing also spares the widget walking the lines above
+    // the viewport on every frame.
+    let window: Vec<Line<'static>> = lines.into_iter().skip(offset).take(visible).collect();
+
+    frame.render_widget(Paragraph::new(Text::from(window)).block(block), area);
 }
 
 fn draw_welcome(frame: &mut Frame<'_>, area: Rect) {
     let height = 12.min(area.height);
-    let top = area.height.saturating_sub(height) / 2;
+    // Flush to the top of the pane, not centred in it. Centring left a bank of
+    // blank rows between the header and the first thing worth reading, and the
+    // transcript itself starts at the top of this pane — so the welcome now sits
+    // exactly where the first exchange will appear instead of jumping there.
     let welcome_area = Rect::new(
         area.x.saturating_add(2),
-        area.y.saturating_add(top),
+        area.y,
         area.width.saturating_sub(4),
         height,
     );
@@ -2617,7 +3178,7 @@ fn draw_welcome(frame: &mut Frame<'_>, area: Rect) {
         ]),
         Line::default(),
         Line::from(Span::styled(
-            "Shift+Tab mode  ·  Ctrl+P actions  ·  ! direct shell  ·  /copy clipboard  ·  /mouse to select text",
+            "Shift+Tab mode · Ctrl+P actions · /keys shortcuts · ! shell · /copy clipboard · /mouse select",
             Style::default().fg(MUTED),
         )),
     ]);
@@ -2744,30 +3305,64 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App, cfg: &RuntimeConfig) {
-    let status = if area.width >= 100 {
-        format!(
-            " {}  context {}%   planner {}             Enter send   ↑↓ history   Ctrl+P actions ",
-            if app.shell_mode {
-                "SHELL"
-            } else {
-                app.mode.label()
-            },
-            app.context_percent,
-            cfg.planner_model
-        )
+    // Hints come from the action registry, so the footer can only ever name a
+    // chord that is actually bound, and on a host that cannot deliver
+    // `Ctrl+Home` it names the arrow form instead.
+    let mut hints: Vec<String> = app
+        .keys
+        .hints(app.busy)
+        .into_iter()
+        .map(|(key, label)| format!("{key} {label}"))
+        .collect();
+    // While the app is not claiming the mouse, the wheel does nothing here —
+    // measured, not assumed: Apple Terminal delivers no wheel event at all, and
+    // does not implement alternate-scroll either. Say so rather than leaving the
+    // developer to conclude that scrolling is broken. The chord still comes from
+    // the registry; only the decision to show it lives here, because the
+    // registry does not track mouse state.
+    if !app.mouse_capture
+        && let Some(chord) = app
+            .keys
+            .advertised_key(crate::tui_keys::ActionId::ToggleMouseCapture)
+    {
+        hints.push(format!("{} wheel off", chord.display()));
+    }
+    let mode = if app.shell_mode {
+        "SHELL"
     } else {
-        format!(
-            " {}  context {}%          Enter send   ↑↓ history   Ctrl+P actions ",
-            if app.shell_mode {
-                "SHELL"
-            } else {
-                app.mode.label()
-            },
-            app.context_percent
-        )
+        app.mode.label()
     };
+
+    // Drop hints from the right until the line fits: the mode and context
+    // readings are status the developer is tracking, the trailing hints are
+    // reminders, so the reminders yield first.
+    let prefix_wide = format!(
+        "{mode}  context {}%   planner {}",
+        app.context_percent, cfg.planner_model
+    );
+    let prefix_narrow = format!("{mode}  context {}%", app.context_percent);
+    let budget = area.width as usize;
+    let mut prefix = if UnicodeWidthStr::width(prefix_wide.as_str()) + 24 <= budget {
+        prefix_wide
+    } else {
+        prefix_narrow
+    };
+    let mut shown = hints.len();
+    loop {
+        let candidate = if shown == 0 {
+            format!(" {prefix} ")
+        } else {
+            format!(" {prefix}     {} ", hints[..shown].join("  "))
+        };
+        if UnicodeWidthStr::width(candidate.as_str()) <= budget || shown == 0 {
+            prefix = candidate;
+            break;
+        }
+        shown -= 1;
+    }
+
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(MUTED)),
+        Paragraph::new(prefix).style(Style::default().fg(MUTED)),
         area,
     );
 }
@@ -2843,63 +3438,183 @@ fn friendly_detail(detail: &str, width: usize) -> String {
     crate::text::truncate(&concise, width.max(12), "…")
 }
 
-fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+/// Render Markdown to styled lines, wrapped to `width`.
+///
+/// Width-aware on purpose: `width` is the measure to wrap prose at, while code
+/// and tables take the full pane. The caller decides the measure — see
+/// `App::prose_measure` and the `/width` command.
+///
+/// Vertical rhythm is deliberately asymmetric. A heading takes a blank line
+/// above and none below, so the gap binds the heading to the content it titles
+/// instead of floating equidistant between two blocks. Uniform spacing is why
+/// the previous output read as undifferentiated.
+fn markdown_lines_wrapped(markdown: &str, width: usize) -> Vec<Line<'static>> {
+    use crate::tui_text::{WrapStyle, wrap_styled};
+
+    // `width` is the measure, chosen by the caller. Capping here instead left
+    // dead space on a wide terminal that reads as a panel that failed to close,
+    // so the decision belongs with whoever knows the pane and the preference.
+    let pane = width.max(8);
+    let measure = pane;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let mut code = false;
+    let mut code_block: Vec<String> = Vec::new();
+
+    // Avoid a leading blank line at the very top of a message.
+    let space_above = |lines: &mut Vec<Line<'static>>| {
+        if !lines.is_empty()
+            && lines
+                .last()
+                .is_some_and(|line| !line.spans.iter().all(|span| span.content.trim().is_empty()))
+        {
+            lines.push(Line::default());
+        }
+    };
+
     for raw in markdown.lines() {
         if let Some(language) = raw.trim().strip_prefix("```") {
-            code = !code;
             if code {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {}",
-                        if language.is_empty() {
-                            "code"
-                        } else {
-                            language
-                        }
-                    ),
-                    Style::default()
-                        .fg(ORANGE)
-                        .bg(Color::Rgb(22, 24, 30))
-                        .add_modifier(Modifier::BOLD),
-                )));
+                // Closing fence: emit the collected block as one surface.
+                lines.extend(code_block_lines(&code_block, pane));
+                code_block.clear();
+                code = false;
             } else {
-                lines.push(Line::default());
+                code = true;
+                space_above(&mut lines);
+                lines.push(code_fence_label(language, pane));
             }
             continue;
         }
         if code {
-            lines.push(code_line(raw));
+            code_block.push(raw.to_string());
             continue;
         }
-        if raw.is_empty() {
+
+        if raw.trim().is_empty() {
+            // Collapse runs of blank lines; rhythm comes from the renderer, not
+            // from however many newlines the model happened to emit.
+            if lines
+                .last()
+                .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+            {
+                continue;
+            }
             lines.push(Line::default());
-        } else if let Some(heading) = raw.strip_prefix("### ") {
-            lines.push(Line::from(Span::styled(
-                heading.to_string(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            )));
+            continue;
+        }
+
+        if let Some(heading) = raw.strip_prefix("### ") {
+            space_above(&mut lines);
+            lines.extend(wrap_styled(
+                &[Span::styled(
+                    heading.to_string(),
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                )],
+                &WrapStyle::plain(measure),
+            ));
         } else if let Some(heading) = raw.strip_prefix("## ").or_else(|| raw.strip_prefix("# ")) {
-            lines.push(Line::from(Span::styled(
-                heading.to_string(),
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-            )));
+            space_above(&mut lines);
+            lines.extend(wrap_styled(
+                &[Span::styled(
+                    heading.to_string(),
+                    Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                )],
+                &WrapStyle::plain(measure),
+            ));
         } else if let Some(item) = raw.strip_prefix("- ").or_else(|| raw.strip_prefix("* ")) {
-            let mut spans = vec![Span::styled("  •  ", Style::default().fg(ORANGE))];
-            spans.extend(inline_spans(item));
-            lines.push(Line::from(spans));
+            lines.extend(wrap_styled(
+                &inline_spans(item),
+                &WrapStyle::hanging(
+                    measure,
+                    Span::styled("  •  ".to_string(), Style::default().fg(ORANGE)),
+                ),
+            ));
         } else if let Some(quote) = raw.strip_prefix("> ") {
-            let mut spans = vec![Span::styled("┃ ", Style::default().fg(Color::Cyan))];
-            spans.extend(inline_spans(quote));
-            lines.push(Line::from(spans).style(Style::default().fg(MUTED)));
-        } else {
+            let quoted = wrap_styled(
+                &inline_spans(quote),
+                &WrapStyle::hanging(
+                    measure,
+                    Span::styled("┃ ".to_string(), Style::default().fg(Color::Cyan)),
+                ),
+            );
+            lines.extend(
+                quoted
+                    .into_iter()
+                    .map(|line| line.style(Style::default().fg(MUTED))),
+            );
+        } else if raw.trim_start().starts_with('|') {
+            // Tables are column-aligned by construction; wrapping would destroy
+            // them, so they take the full pane and may scroll horizontally.
             lines.push(Line::from(inline_spans(raw)));
+        } else {
+            lines.extend(wrap_styled(&inline_spans(raw), &WrapStyle::plain(measure)));
         }
     }
-    if markdown.is_empty() {
+
+    // An unterminated fence still has to render.
+    if !code_block.is_empty() {
+        lines.extend(code_block_lines(&code_block, pane));
+    }
+
+    if lines.is_empty() {
         lines.push(Line::default());
     }
+    lines
+}
+
+/// Width of the code surface, bounded so it does not span an entire wide pane.
+fn code_surface_width(pane: usize) -> usize {
+    pane.saturating_sub(2).clamp(20, 100)
+}
+
+/// The language label that opens a code block.
+fn code_fence_label(language: &str, pane: usize) -> Line<'static> {
+    let label = if language.trim().is_empty() {
+        "code"
+    } else {
+        language.trim()
+    };
+    let surface = code_surface_width(pane);
+    let mut text = format!("  {label}");
+    let pad = surface.saturating_sub(text.width());
+    text.push_str(&" ".repeat(pad));
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(ORANGE)
+            .bg(Color::Rgb(22, 24, 30))
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// Render a code block as a rectangular surface.
+///
+/// Each line is padded to a uniform width so the background forms a block. The
+/// previous rendering coloured only as far as each line's own text, so the right
+/// edge traced the code's line lengths and never read as a surface.
+fn code_block_lines(code: &[String], pane: usize) -> Vec<Line<'static>> {
+    let background = Color::Rgb(22, 24, 30);
+    let surface = code_surface_width(pane);
+    let mut lines = Vec::with_capacity(code.len() + 1);
+
+    for raw in code {
+        let mut line = code_line(raw);
+        let used: usize = line.spans.iter().map(|span| span.content.width()).sum();
+        if used < surface {
+            line.spans.push(Span::styled(
+                " ".repeat(surface - used),
+                Style::default().bg(background),
+            ));
+        }
+        lines.push(line);
+    }
+
+    // Close the surface with a padded blank row rather than an abrupt edge.
+    lines.push(Line::from(Span::styled(
+        " ".repeat(surface),
+        Style::default().bg(background),
+    )));
     lines
 }
 
@@ -3329,14 +4044,29 @@ mod tests {
         assert!(clipboard_payload(&app, true).is_none());
     }
 
-    /// Mouse capture starts on so the wheel scrolls, and toggles off so the
-    /// terminal's own selection works.
+    /// The workspace claims the wheel at startup, and can hand it back.
+    ///
+    /// Not the obvious default, since claiming the mouse costs the terminal's own
+    /// click-drag selection. It is the correct one because the alternative is
+    /// destructive rather than merely inert: with the wheel left to the terminal,
+    /// scrolling in the alternate screen moves the terminal's own buffer and
+    /// displaces the frame the app is drawing into, after which diffed redraws
+    /// land at the wrong row and the transcript interleaves old and new text.
+    /// Selection stays one modifier away, and `Ctrl+R` gives the mouse back.
     #[test]
-    fn mouse_capture_starts_on_and_toggles() {
+    fn the_wheel_is_claimed_by_default_and_can_be_handed_back() {
         let mut app = App::new();
-        assert!(app.mouse_capture, "wheel scrolling should work by default");
-        app.mouse_capture = !app.mouse_capture;
-        assert!(!app.mouse_capture);
+        assert!(
+            app.mouse_capture,
+            "the wheel must scroll the transcript rather than the terminal"
+        );
+        app.toggle_mouse_capture();
+        assert!(
+            !app.mouse_capture,
+            "Ctrl+R must hand the mouse back for native selection"
+        );
+        app.toggle_mouse_capture();
+        assert!(app.mouse_capture, "and take it again");
     }
 
     /// Property 13: retained buffers stay bounded, and elision is visible.
@@ -3413,16 +4143,20 @@ mod tests {
     fn message_rendering_is_cached_until_the_text_changes() {
         let mut message = Message::new("ZAVORA", "## Heading\n\nBody text.");
 
-        let first = message.lines();
+        let first = message.lines(60);
         assert!(!first.is_empty());
-        // Cache populated at the current text length.
+        // Cache populated at the current text length and width.
         assert_eq!(
-            message.rendered.borrow().as_ref().map(|(len, _)| *len),
-            Some(message.text.len())
+            message
+                .rendered
+                .borrow()
+                .as_ref()
+                .map(|(len, width, _)| (*len, *width)),
+            Some((message.text.len(), 60))
         );
 
-        // A second read must reuse the cache rather than reparse.
-        let second = message.lines();
+        // A second read at the same width must reuse the cache.
+        let second = message.lines(60);
         assert_eq!(first.len(), second.len());
 
         // Appending invalidates it.
@@ -3431,8 +4165,15 @@ mod tests {
             message.rendered.borrow().is_none(),
             "appending did not invalidate the render cache"
         );
-        let third = message.lines();
+        let third = message.lines(60);
         assert!(third.len() >= first.len());
+
+        // A different width must invalidate too, since wrapping depends on it.
+        let narrow = message.lines(24);
+        assert!(
+            narrow.len() >= third.len(),
+            "a narrower measure should produce at least as many lines"
+        );
     }
     use super::*;
     use ratatui::Terminal;
@@ -3507,8 +4248,10 @@ mod tests {
 
     #[test]
     fn markdown_renderer_styles_code_without_losing_content() {
-        let lines =
-            markdown_lines("## Example\nUse `cargo check`.\n```rust\nlet ready = true;\n```");
+        let lines = markdown_lines_wrapped(
+            "## Example\nUse `cargo check`.\n```rust\nlet ready = true;\n```",
+            60,
+        );
         let rendered = lines
             .iter()
             .map(ToString::to_string)
@@ -3604,5 +4347,923 @@ mod tests {
             format_transcript_markdown(&app, "test-session", "default", "openai", "gpt-test");
         assert!(markdown.contains("# Zavora session"));
         assert!(markdown.contains("## YOU\n\nship it"));
+    }
+}
+
+#[cfg(test)]
+mod typography_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const SAMPLE: &str = "## Measure matters\n\nLong lines make the eye lose its place on the return sweep, which reads as a wall of text even when the spacing is otherwise correct. Capping the measure is the single largest change.\n\n- A list item long enough that it must wrap, so the hanging indent has something to prove\n- A short one\n\n```rust\nfn answer() -> u8 { 42 }\n```\n\n> A quoted line that also runs long enough to wrap onto a second line of output.\n";
+
+    fn render(width: u16, height: u16) -> String {
+        let mut app = App::new();
+        app.push_message(Message::new("YOU", "why does this look better"));
+        app.push_message(Message::new("ZAVORA", SAMPLE));
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw_transcript(frame, frame.area(), &app);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        // Drop the right border column and the bottom border row: they are the
+        // block's chrome, not content, and would skew every measurement.
+        (0..buffer.area.height.saturating_sub(1))
+            .map(|row| {
+                (0..buffer.area.width.saturating_sub(1))
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every content row starts with the gutter, never flush at column zero.
+    #[test]
+    fn content_is_inset_by_the_gutter() {
+        let output = render(100, 40);
+        let content_rows: Vec<&str> = output
+            .lines()
+            // The block title occupies the first row and is chrome.
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert!(!content_rows.is_empty());
+        for row in content_rows {
+            assert!(
+                row.starts_with(' '),
+                "row was flush against the edge: {row:?}"
+            );
+        }
+    }
+
+    /// A wrapped bullet keeps its alignment.
+    #[test]
+    fn wrapped_bullets_stay_aligned() {
+        let output = render(60, 40);
+        let bullet_row = output
+            .lines()
+            .position(|line| line.contains('•'))
+            .expect("a bullet was rendered");
+        let rows: Vec<&str> = output.lines().collect();
+        let bullet_column = rows[bullet_row].find('•').expect("bullet column");
+        let continuation = rows[bullet_row + 1];
+        // The continuation must be indented at least to the bullet's text.
+        let first_text = continuation
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(usize::MAX);
+        assert!(
+            first_text > bullet_column,
+            "continuation at column {first_text} is not hanging under the bullet at {bullet_column}: {continuation:?}"
+        );
+    }
+
+    /// No horizontal rule between messages; space does the separating.
+    #[test]
+    fn messages_are_separated_by_space_not_rules() {
+        let output = render(100, 40);
+        assert!(
+            !output.contains("────────"),
+            "a horizontal rule survived:\n{output}"
+        );
+    }
+
+    /// The default hides the pane while a turn runs and reveals it afterwards.
+    #[test]
+    fn autohide_is_the_default_and_tracks_the_turn() {
+        let mut app = App::new();
+        assert_eq!(app.activity_visibility, ActivityVisibility::AutoHide);
+
+        // Nothing has run: nothing to show.
+        assert!(!app.show_activity());
+
+        // A turn starts and records activity — hidden, so the response has room.
+        app.busy = true;
+        app.activities.push(Activity {
+            call_id: None,
+            name: "fs_read".into(),
+            detail: "src/main.rs".into(),
+            state: ActivityState::Running,
+            started: Instant::now(),
+            elapsed: None,
+        });
+        assert!(!app.show_activity(), "autohide should hide while busy");
+
+        // The turn ends — the record becomes visible.
+        app.busy = false;
+        assert!(app.show_activity(), "autohide should reveal after the run");
+    }
+
+    #[test]
+    fn show_pins_the_pane_and_off_never_shows_it() {
+        let mut app = App::new();
+
+        app.activity_visibility = ActivityVisibility::Show;
+        assert!(app.show_activity(), "show should pin even when empty");
+        app.busy = true;
+        assert!(app.show_activity(), "show should stay pinned while busy");
+
+        app.activity_visibility = ActivityVisibility::Off;
+        assert!(!app.show_activity());
+        app.busy = false;
+        app.activities.push(Activity {
+            call_id: None,
+            name: "grep".into(),
+            detail: "TODO".into(),
+            state: ActivityState::Passed,
+            started: Instant::now(),
+            elapsed: None,
+        });
+        assert!(!app.show_activity(), "off should never show the pane");
+    }
+
+    #[test]
+    fn activity_visibility_parses_and_cycles() {
+        assert_eq!(
+            ActivityVisibility::parse("show"),
+            Some(ActivityVisibility::Show)
+        );
+        assert_eq!(
+            ActivityVisibility::parse("AUTO"),
+            Some(ActivityVisibility::AutoHide)
+        );
+        assert_eq!(
+            ActivityVisibility::parse("never"),
+            Some(ActivityVisibility::Off)
+        );
+        assert_eq!(ActivityVisibility::parse("sideways"), None);
+
+        // Cycling from the default returns to it after three steps.
+        let start = ActivityVisibility::AutoHide;
+        assert_eq!(start.next().next().next(), start);
+    }
+
+    /// The point of the change: when hidden, the pane's chrome is absent and the
+    /// transcript owns the full width.
+    #[test]
+    fn hiding_the_pane_removes_its_chrome_from_the_frame() {
+        fn frame_text(visibility: ActivityVisibility, busy: bool) -> String {
+            let mut app = App::new();
+            app.activity_visibility = visibility;
+            app.busy = busy;
+            app.activities.push(Activity {
+                call_id: None,
+                name: "fs_read".into(),
+                detail: "src/main.rs".into(),
+                state: ActivityState::Passed,
+                started: Instant::now(),
+                elapsed: None,
+            });
+
+            let backend = TestBackend::new(200, 24);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let cfg = crate::tests::base_cfg();
+            terminal
+                .draw(|frame| draw(frame, &app, &cfg))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Pinned: the pane and its contents are on screen.
+        let pinned = frame_text(ActivityVisibility::Show, false);
+        assert!(
+            pinned.contains("Run history"),
+            "pinned pane was not rendered"
+        );
+        assert!(
+            pinned.contains("Read file"),
+            "pinned pane lost its contents:\n{pinned}"
+        );
+
+        // Off: no title, no contents, at any width.
+        let off = frame_text(ActivityVisibility::Off, false);
+        assert!(
+            !off.contains("Run history") && !off.contains("Live run"),
+            "the pane's chrome survived being turned off"
+        );
+        assert!(
+            !off.contains("Read file"),
+            "the pane's contents survived being turned off"
+        );
+
+        // AutoHide while busy: hidden, so the response has the room.
+        let busy = frame_text(ActivityVisibility::AutoHide, true);
+        assert!(
+            !busy.contains("Live run") && !busy.contains("Read file"),
+            "autohide showed the pane during a run"
+        );
+
+        // AutoHide once idle: revealed, so the record is available.
+        let idle = frame_text(ActivityVisibility::AutoHide, false);
+        assert!(
+            idle.contains("Run history") && idle.contains("Read file"),
+            "autohide did not reveal the pane after the run"
+        );
+    }
+
+    /// A long response must be scrollable all the way back to its first line.
+    #[test]
+    fn a_long_story_can_be_scrolled_to_its_beginning() {
+        // A story far taller than any viewport.
+        let story = (1..=400)
+            .map(|n| format!("Paragraph {n} of the story."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let mut app = App::new();
+        app.push_message(Message::new("YOU", "tell me a long story"));
+        app.push_message(Message::new("ZAVORA", story));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        let cfg = crate::tests::base_cfg();
+        let draw_once = |app: &App, terminal: &mut Terminal<TestBackend>| -> String {
+            terminal.draw(|frame| draw(frame, app, &cfg)).expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // First draw publishes the bounds the key handler clamps against.
+        let bottom = draw_once(&app, &mut terminal);
+        assert!(
+            bottom.contains("Paragraph 400"),
+            "should start pinned to the newest output"
+        );
+        let max = app.max_scroll.get();
+        assert!(max > 0, "a long story must be scrollable, max_scroll={max}");
+
+        // Jump to the start: the very first line of the conversation is visible.
+        app.scroll_to_start();
+        let top = draw_once(&app, &mut terminal);
+        assert!(
+            top.contains("tell me a long story"),
+            "could not reach the beginning of the conversation:\n{}",
+            top.lines().take(4).collect::<Vec<_>>().join("\n")
+        );
+        assert!(
+            top.contains("Paragraph 1 of the story."),
+            "the story's first paragraph was not reachable"
+        );
+
+        // And back to the newest output.
+        app.scroll_to_end();
+        let bottom_again = draw_once(&app, &mut terminal);
+        assert!(bottom_again.contains("Paragraph 400"));
+    }
+
+    /// Paging up must not accumulate offset beyond the top.
+    ///
+    /// Regression: the offset was only clamped at render, so pressing PageUp past
+    /// the start grew a counter the view could not reflect, and PageDown then had
+    /// to walk back through that dead range before anything moved.
+    #[test]
+    fn paging_past_the_top_does_not_accumulate_dead_offset() {
+        let mut app = App::new();
+        app.push_message(Message::new("ZAVORA", "line\n\n".repeat(60)));
+        app.max_scroll.set(50);
+        app.viewport.set(23);
+
+        for _ in 0..40 {
+            let step = app.page_step();
+            app.scroll_up(step);
+        }
+        assert_eq!(
+            app.top_offset(),
+            0,
+            "scroll ran past the top instead of clamping"
+        );
+
+        // One page down must move immediately, not absorb dead range.
+        let step = app.page_step();
+        app.scroll_down(step);
+        assert_eq!(app.top_offset(), step, "PageDown did not respond at once");
+    }
+
+    /// A page step is a viewport, not a fixed guess.
+    #[test]
+    fn a_page_step_follows_the_viewport_height() {
+        let app = App::new();
+        app.viewport.set(40);
+        assert_eq!(app.page_step(), 39);
+        app.viewport.set(10);
+        assert_eq!(app.page_step(), 9);
+        // Degenerate heights still make progress.
+        app.viewport.set(0);
+        assert_eq!(app.page_step(), 1);
+    }
+
+    /// The footer shows registry hints and sheds them rather than overflowing.
+    #[test]
+    fn the_footer_is_generated_and_degrades_on_narrow_terminals() {
+        fn footer(width: u16, busy: bool) -> String {
+            let mut app = App::new();
+            app.busy = busy;
+            app.context_percent = 42;
+            let cfg = crate::tests::base_cfg();
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+            terminal
+                .draw(|frame| draw_footer(frame, frame.area(), &app, &cfg))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, 0)].symbol())
+                .collect::<String>()
+        }
+
+        // Wide: status, then hints in priority order.
+        let wide = footer(160, false);
+        assert!(wide.contains("context 42%"), "status is missing: {wide:?}");
+        for expected in ["mode", "send", "history", "scroll", "actions"] {
+            assert!(
+                wide.contains(expected),
+                "the footer dropped {expected:?}: {wide:?}"
+            );
+        }
+        // Priority order, left to right.
+        let mode = wide.find("mode").expect("mode");
+        let history = wide.find("history").expect("history");
+        let scroll = wide.find("scroll").expect("scroll");
+        assert!(
+            mode < history && history < scroll,
+            "hints out of order: {wide:?}"
+        );
+
+        // Narrow: hints are shed from the right; the status reading survives and
+        // nothing wraps or is truncated mid-cell.
+        let narrow = footer(46, false);
+        assert!(
+            narrow.contains("context 42%"),
+            "status must survive a narrow terminal: {narrow:?}"
+        );
+        assert!(
+            narrow.trim_end().chars().count() <= 46,
+            "the footer overflowed its line: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains("actions"),
+            "the lowest-priority hint should yield first: {narrow:?}"
+        );
+
+        // While a turn runs, cancel leads and prompt history is not offered.
+        let busy = footer(160, true);
+        assert!(busy.contains("cancel"), "no way to cancel shown: {busy:?}");
+        assert!(
+            !busy.contains("history"),
+            "history recall is not available mid-turn: {busy:?}"
+        );
+    }
+
+    /// The wheel state is visible, and the chord to change it comes from the
+    /// registry.
+    ///
+    /// A dead wheel with nothing on screen to explain it is what makes a
+    /// workspace look broken, so the footer says so while the app is not
+    /// claiming the mouse.
+    #[test]
+    fn the_footer_says_when_the_wheel_is_doing_nothing() {
+        fn footer(mouse_capture: bool) -> String {
+            let mut app = App::new();
+            app.mouse_capture = mouse_capture;
+            let cfg = crate::tests::base_cfg();
+            let mut terminal = Terminal::new(TestBackend::new(170, 1)).expect("terminal");
+            terminal
+                .draw(|frame| draw_footer(frame, frame.area(), &app, &cfg))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, 0)].symbol())
+                .collect::<String>()
+        }
+
+        let off = footer(false);
+        assert!(
+            off.contains("wheel off"),
+            "a dead wheel must be visible: {off:?}"
+        );
+        let chord = crate::tui_keys::ActionRegistry::detect()
+            .advertised_key(crate::tui_keys::ActionId::ToggleMouseCapture)
+            .expect("the toggle must be reachable")
+            .display();
+        assert!(
+            off.contains(&chord),
+            "the footer must name the chord that revives it ({chord}): {off:?}"
+        );
+
+        let on = footer(true);
+        assert!(
+            !on.contains("wheel off"),
+            "no warning once the wheel works: {on:?}"
+        );
+    }
+
+    /// Toggling names the cost in both directions, and the modifier that works.
+    #[test]
+    fn toggling_the_wheel_explains_what_it_costs() {
+        let mut app = App::new();
+        let modifier = app.keys.terminal().native_selection_modifier();
+
+        // Starts claimed, so the first toggle hands the mouse back.
+        app.toggle_mouse_capture();
+        assert!(!app.mouse_capture);
+        let off = &app.messages.last().expect("a message").text;
+        assert!(off.contains("**off**"), "state not stated: {off}");
+        assert!(
+            off.contains("push this frame out of place"),
+            "handing the wheel back has a real cost that must be named: {off}"
+        );
+        assert!(
+            off.contains("PageUp"),
+            "and must say what to scroll with instead: {off}"
+        );
+
+        app.toggle_mouse_capture();
+        assert!(app.mouse_capture);
+        let on = &app.messages.last().expect("a message").text;
+        assert!(on.contains("**on**"), "state not stated: {on}");
+        assert!(
+            on.contains(modifier),
+            "claiming the wheel costs native selection, so the message must name \
+             the modifier that restores it ({modifier}): {on}"
+        );
+
+        // Either direction repaints, because a toggle usually follows the
+        // terminal having displaced the frame.
+        assert!(app.force_redraw, "a toggle must force a full repaint");
+    }
+
+    /// `Ctrl+L` repaints first and only clears on a prompt second press.
+    ///
+    /// Regression: it cleared the conversation on the first press, so the
+    /// universal reflex for a corrupted screen destroyed the transcript instead
+    /// of repairing it.
+    #[test]
+    fn redraw_precedes_clearing_the_conversation() {
+        let mut app = App::new();
+        app.push_message(Message::new("YOU", "keep me"));
+
+        assert!(
+            !app.request_redraw(),
+            "one press must not clear the conversation"
+        );
+        assert!(app.force_redraw, "but it must repaint");
+        assert_eq!(app.messages.len(), 1, "the transcript survived");
+
+        // A prompt second press means clear.
+        assert!(
+            app.request_redraw(),
+            "a second press within the window should clear"
+        );
+
+        // After acting, the window closes: the next press repaints again.
+        assert!(
+            !app.request_redraw(),
+            "the double-press window must not stay armed"
+        );
+    }
+
+    /// The wheel step is configurable within bounds and rejects nonsense.
+    #[test]
+    fn the_wheel_step_is_configurable() {
+        let app = App::new();
+        assert_eq!(app.wheel_lines, 3, "three matches vim and Claude Code");
+
+        // Exercised through the scroll path so the setting is actually used.
+        let mut app = App::new();
+        app.max_scroll.set(100);
+        app.wheel_lines = 7;
+        app.scroll_up(app.wheel_lines);
+        assert_eq!(
+            app.top_offset(),
+            93,
+            "one notch should move seven lines back from the tail"
+        );
+    }
+
+    /// A scrolled-back view must not drift while output streams in.
+    ///
+    /// Regression: the offset counted lines back from the newest line, so the
+    /// bottom was the reference point — and the bottom moves while a response
+    /// streams. Scrolling back to re-read something meant watching it slide off
+    /// the top at exactly the rate output arrived, because "twenty lines from the
+    /// end" names different lines each time the end moves. This is the bug that
+    /// made earlier output look permanently out of reach.
+    #[test]
+    fn a_scrolled_view_holds_its_place_while_output_streams() {
+        let mut app = App::new();
+        let body: String = (1..=40)
+            .map(|n| format!("L{n:02}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let index = app.push_message(Message::new("ZAVORA", body));
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("terminal");
+        let visible = |app: &App, terminal: &mut Terminal<TestBackend>| -> Vec<String> {
+            terminal
+                .draw(|frame| draw_transcript(frame, frame.area(), app))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .filter_map(|row| {
+                    row.split_whitespace()
+                        .find(|word| word.starts_with('L'))
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+
+        // Establish the bounds, then scroll back as a reader would mid-turn.
+        visible(&app, &mut terminal);
+        app.scroll_up(20);
+        let before = visible(&app, &mut terminal);
+        assert!(!before.is_empty(), "nothing on screen to compare");
+        assert!(!app.follow_output, "scrolling up must detach from the tail");
+
+        // Ten more lines arrive below the viewport.
+        for n in 41..=50 {
+            app.messages[index].text.push_str(&format!("L{n:02}\n"));
+            app.messages[index].rendered.replace(None);
+        }
+        let after = visible(&app, &mut terminal);
+        assert_eq!(
+            before, after,
+            "the view drifted while output streamed: was {before:?}, now {after:?}"
+        );
+
+        // Following still tracks the tail when it is armed.
+        app.scroll_to_end();
+        let tail = visible(&app, &mut terminal);
+        assert!(
+            tail.contains(&"L50".to_string()),
+            "following should show the newest line, got {tail:?}"
+        );
+        for n in 51..=55 {
+            app.messages[index].text.push_str(&format!("L{n:02}\n"));
+            app.messages[index].rendered.replace(None);
+        }
+        let tail = visible(&app, &mut terminal);
+        assert!(
+            tail.contains(&"L55".to_string()),
+            "a followed view must keep up with new output, got {tail:?}"
+        );
+    }
+
+    /// The scroll indicator must not cost a content row.
+    ///
+    /// Regression: it was a top-edge block title, and ratatui reserves a row for
+    /// one even when there is no top border, so the viewport silently shrank by a
+    /// line the moment the view detached — a one-line scroll moved the view two
+    /// lines. The indicator now sits on the bottom border, which is chrome
+    /// already.
+    #[test]
+    fn the_scroll_indicator_does_not_steal_a_content_row() {
+        let mut app = App::new();
+        let body: String = (1..=40)
+            .map(|n| format!("L{n:02}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        app.push_message(Message::new("ZAVORA", body));
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("terminal");
+        let content_rows = |app: &App, terminal: &mut Terminal<TestBackend>| -> Vec<String> {
+            terminal
+                .draw(|frame| draw_transcript(frame, frame.area(), app))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .filter_map(|row| {
+                    row.split_whitespace()
+                        .find(|word| word.starts_with('L'))
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+
+        let following = content_rows(&app, &mut terminal);
+        app.scroll_up(1);
+        let detached = content_rows(&app, &mut terminal);
+
+        assert_eq!(
+            following.len(),
+            detached.len(),
+            "the viewport changed height when the indicator appeared: \
+             {following:?} then {detached:?}"
+        );
+        // One line up means exactly one line of movement.
+        let first_before: usize = following[0]
+            .trim_start_matches('L')
+            .parse()
+            .expect("number");
+        let first_after: usize = detached[0].trim_start_matches('L').parse().expect("number");
+        assert_eq!(
+            first_before - first_after,
+            1,
+            "a one-line scroll moved {} lines: {following:?} then {detached:?}",
+            first_before - first_after
+        );
+
+        // And the indicator is present, naming how far from the tail we are.
+        terminal
+            .draw(|frame| draw_transcript(frame, frame.area(), &app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let frame_text: String = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            frame_text.contains("1 lines below"),
+            "the indicator should say how far below the tail the view is:\n{frame_text}"
+        );
+    }
+
+    /// The welcome screen starts under the header, not floating in the middle.
+    ///
+    /// Regression: it was centred vertically in the transcript pane, which put a
+    /// bank of blank rows between the header and the first thing worth reading on
+    /// a tall terminal. The transcript itself renders from the top of this pane,
+    /// so the welcome now occupies the rows the first exchange will occupy.
+    #[test]
+    fn the_welcome_screen_starts_at_the_top_of_the_pane() {
+        let app = App::new();
+        assert!(app.messages.is_empty(), "this is the startup state");
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("terminal");
+        terminal
+            .draw(|frame| draw_transcript(frame, frame.area(), &app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+
+        let first_content = rows
+            .iter()
+            .position(|row| !row.is_empty())
+            .expect("the welcome screen drew nothing");
+        assert_eq!(
+            first_content,
+            0,
+            "the welcome screen left {first_content} blank rows above it: {:?}",
+            &rows[..=first_content]
+        );
+        assert!(
+            rows[0].contains("ZAVORA"),
+            "the first row should be the title, got {:?}",
+            rows[0]
+        );
+    }
+
+    /// Half a page keeps context across the jump; a whole page does not.
+    #[test]
+    fn a_half_page_step_is_half_the_viewport() {
+        let app = App::new();
+        app.viewport.set(40);
+        assert_eq!(app.half_page_step(), 20);
+        assert!(
+            app.half_page_step() < app.page_step(),
+            "the default step must be smaller than a whole page"
+        );
+        // Degenerate heights still make progress rather than stalling.
+        app.viewport.set(1);
+        assert_eq!(app.half_page_step(), 1);
+        app.viewport.set(0);
+        assert_eq!(app.half_page_step(), 1);
+    }
+
+    /// A transcript taller than `u16::MAX` stays reachable end to end.
+    ///
+    /// Regression: scroll state was `u16` and the renderer clamped the bound with
+    /// `u16::try_from(..).unwrap_or(u16::MAX)`, so past 65535 rendered rows the
+    /// offset saturated and the top of the conversation could not be reached at
+    /// all. The window is now sliced in `usize` space instead of leaning on
+    /// `Paragraph::scroll`, whose offset is a `u16`.
+    #[test]
+    fn a_transcript_taller_than_u16_stays_reachable() {
+        let mut app = App::new();
+        app.push_message(Message::new("YOU", "count for me"));
+        // Distinct first and last lines, comfortably past the old ceiling.
+        let body: String = (0..70_000)
+            .map(|n| format!("row {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        app.push_message(Message::new("ZAVORA", body));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let render = |app: &App, terminal: &mut Terminal<TestBackend>| -> String {
+            terminal
+                .draw(|frame| draw_transcript(frame, frame.area(), app))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The first draw publishes the bound the key handler clamps against.
+        let bottom = render(&app, &mut terminal);
+        assert!(
+            bottom.contains("row 69999"),
+            "should start pinned to the newest output"
+        );
+        assert!(
+            app.max_scroll.get() > u16::MAX as usize,
+            "this transcript must exceed the old u16 ceiling, got {}",
+            app.max_scroll.get()
+        );
+
+        app.scroll_to_start();
+        let top = render(&app, &mut terminal);
+        assert!(
+            top.contains("count for me"),
+            "the beginning of a very long conversation was unreachable:\n{}",
+            top.lines().take(3).collect::<Vec<_>>().join("\n")
+        );
+
+        app.scroll_to_end();
+        assert!(render(&app, &mut terminal).contains("row 69999"));
+    }
+
+    /// Message navigation lands on response boundaries, not fixed line counts.
+    #[test]
+    fn message_navigation_moves_between_responses() {
+        let mut app = App::new();
+        for turn in 0..5 {
+            app.push_message(Message::new("YOU", format!("question {turn}")));
+            // Deliberately uneven lengths: a fixed step could not track these.
+            app.push_message(Message::new(
+                "ZAVORA",
+                format!("answer {turn}\n").repeat(turn * 7 + 3),
+            ));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        terminal
+            .draw(|frame| draw_transcript(frame, frame.area(), &app))
+            .expect("draw");
+
+        let boundaries = app.message_rows.borrow().clone();
+        assert_eq!(
+            boundaries.len(),
+            app.messages.len(),
+            "every message needs a boundary"
+        );
+        assert!(
+            boundaries.windows(2).all(|pair| pair[0] < pair[1]),
+            "boundaries must ascend: {boundaries:?}"
+        );
+
+        // From the bottom, stepping back must stop on successive boundaries
+        // rather than skipping or standing still.
+        app.scroll_to_end();
+        let mut visited = Vec::new();
+        for _ in 0..4 {
+            app.scroll_to_message(true);
+            visited.push(app.top_offset());
+        }
+        assert!(
+            visited.windows(2).all(|pair| pair[0] > pair[1]),
+            "each step back must move further up: {visited:?}"
+        );
+        assert!(
+            visited.iter().all(|row| boundaries.contains(row)),
+            "every stop must be a message boundary: {visited:?} in {boundaries:?}"
+        );
+
+        // Forward again returns to boundaries, and running off the end follows
+        // output rather than sticking.
+        app.scroll_to_message(false);
+        assert!(boundaries.contains(&app.top_offset()));
+        for _ in 0..20 {
+            app.scroll_to_message(false);
+        }
+        assert!(
+            app.follow_output,
+            "running past the last response should resume following output"
+        );
+
+        // And running off the top lands at the very beginning.
+        for _ in 0..20 {
+            app.scroll_to_message(true);
+        }
+        assert_eq!(app.top_offset(), 0, "should come to rest at the first line");
+    }
+
+    /// Reaching the bottom resumes following streamed output.
+    #[test]
+    fn returning_to_the_bottom_resumes_following_output() {
+        let mut app = App::new();
+        app.max_scroll.set(30);
+        app.viewport.set(20);
+
+        app.scroll_up(10);
+        assert!(!app.follow_output, "scrolling up should detach from output");
+
+        app.scroll_down(10);
+        assert_eq!(app.top_offset(), 30, "should be back at the tail");
+        assert!(
+            app.follow_output,
+            "returning to the bottom should resume following"
+        );
+    }
+
+    /// Prose fills the pane by default, and honours a cap when one is set.
+    #[test]
+    fn prose_fills_the_pane_by_default_and_caps_on_request() {
+        fn widest_prose(prose_width: Option<u16>) -> usize {
+            let mut app = App::new();
+            app.prose_width = prose_width;
+            app.push_message(Message::new("ZAVORA", "word ".repeat(200)));
+
+            let mut terminal = Terminal::new(TestBackend::new(200, 16)).expect("terminal");
+            // Render the transcript alone: `draw` also paints a header rule, a
+            // composer border and the pane's own bottom border, all of which are
+            // full-width chrome that would measure as content.
+            terminal
+                .draw(|frame| draw_transcript(frame, frame.area(), &app))
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height.saturating_sub(1))
+                .map(|row| {
+                    (0..buffer.area.width.saturating_sub(1))
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .chars()
+                        .count()
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        // Default: prose uses the width it is given.
+        let filled = widest_prose(None);
+        assert!(
+            filled > 150,
+            "prose should fill a 200-column pane, reached only {filled}"
+        );
+
+        // Capped: wraps well short of the pane, leaving the space `/width` asks for.
+        let capped = widest_prose(Some(88));
+        assert!(
+            capped <= 92,
+            "an 88-column cap should hold, reached {capped}"
+        );
+        assert!(capped < filled, "the cap made no difference");
+    }
+
+    /// Print both widths so the layout can be reviewed by eye.
+    #[test]
+    fn show_rendered_output() {
+        for width in [80u16, 200u16] {
+            eprintln!("\n===== {width} columns =====");
+            eprintln!("{}", render(width, 34));
+        }
     }
 }
