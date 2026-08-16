@@ -5,13 +5,15 @@
 
 Zavora is an ADK-Rust 2.0 coding agent for the terminal. It keeps routine implementation work on an efficient worker model and brings in a stronger planning model only when a task needs architectural reasoning or a material replan.
 
+![The Zavora terminal workspace](docs/images/welcome.png)
+
+The workspace is built for long sessions: streamed Markdown and code, retained tool activity, context usage, model-role status, multiline editing, and in-place approvals for consequential actions. It adapts from a side-by-side wide layout to a compact stacked layout without losing the active conversation.
+
 ```text
 Developer ──► worker agent ──► files · shell · MCP · sessions
                     │
                     └── complex work ──► bounded planner agent
 ```
-
-The full-screen terminal workspace is designed for long development sessions: streamed Markdown and code, retained tool activity, context usage, model-role status, multiline editing, and in-place approvals for consequential actions. It adapts from a side-by-side wide layout to a compact stacked layout without losing the active conversation.
 
 ## Install
 
@@ -44,17 +46,7 @@ export OPENAI_API_KEY="..."
 zavora-cli chat
 ```
 
-An interactive terminal opens the retained workspace automatically. The worker route, active agent, BUILD or PLAN mode, conversation, tool runs, and composer remain visible as the session progresses. No tokens are spent generating a greeting.
-
-```text
-Shift+Tab   switch BUILD / PLAN
-Enter       send
-Ctrl+J      add a line
-PageUp/Down review the conversation
-Ctrl+End    follow the newest response
-Ctrl+P      open keyboard help
-Esc         request cancellation
-```
+An interactive terminal opens the retained workspace automatically. The worker route, active agent, BUILD or PLAN mode, conversation, tool runs, and composer stay visible as the session progresses. No tokens are spent generating a greeting.
 
 For redirected output, a dumb terminal, or the complete line-oriented slash-command shell, use:
 
@@ -62,17 +54,50 @@ For redirected output, a dumb terminal, or the complete line-oriented slash-comm
 ZAVORA_CLASSIC=1 zavora-cli chat
 ```
 
+## Moving around
+
+```text
+Shift+Tab   switch BUILD / PLAN
+Enter       send
+Ctrl+J      add a line
+PageUp/Down scroll half a screen
+Ctrl+O/N    jump to the older / newer response
+Ctrl+T/B    jump to the top / bottom of the conversation
+Ctrl+P      search every action
+Ctrl+L      repaint the screen
+/keys       list the shortcuts this terminal can send
+Esc         request cancellation
+```
+
+`PageUp` and `PageDown` move half a screen rather than a whole one, so the previous half stays on screen and you keep your place. A view scrolled away from the newest output holds its position while a response streams in, and the bottom border reports how far from the tail it is.
+
+Several actions carry more than one chord because terminals disagree about what they forward. Apple Terminal, for instance, sends neither `Home` nor `End`, strips `Shift` from `PageUp`, and does not deliver `Ctrl`- or `Alt`-modified arrows — so the `Ctrl`+letter forms are the ones that arrive there. `/keys` lists only the shortcuts that reach the workspace on the terminal in use, and reports an action as unavailable rather than naming a key that does nothing. See [`docs/TUI.md`](docs/TUI.md#terminals-deliver-different-keys).
+
+The mouse wheel scrolls the transcript. That costs the terminal's own click-drag selection, which is one modifier away — hold `Fn` in Apple Terminal, `Option` in iTerm2, `Shift` in most others — and `Ctrl+R` hands the mouse back entirely. [`docs/TUI.md`](docs/TUI.md#the-mouse-wheel-is-a-trade) explains why that is a real trade rather than a preference.
+
 ## Planner and worker routing
 
 The worker owns the conversation, tools, and implementation. By default it uses `gpt-5.4-mini-2026-03-17`, from the larger shared daily token pool. The planner is an ADK-Rust `AgentTool` backed by `gpt-5.6-sol`. It has no mutation tools and is available only to produce a concise plan for complex work.
 
 The planner call budget defaults to four calls for one CLI process. It is a local guardrail, not a measurement of provider-side token usage. OpenAI remains authoritative for account limits.
 
-```bash
-# Show available models, recommended roles, and shared quota pools
-zavora-cli models
+```text
+$ zavora-cli models
 
-# Set roles independently
+  Model routing
+  WORKER  OpenAI/gpt-5.6-sol  routine turns, tools, and implementation
+  PLANNER OpenAI/gpt-5.6-sol  complex plans only · max 4 calls/process
+
+  OpenAI models available to this project
+
+  1M shared daily pool · 250K on usage tiers 1–2
+  gpt-5.6-sol                     planner strongest planning default ← worker
+  gpt-5.5-2026-04-23              planner high-capability general reasoning
+```
+
+Roles are set independently:
+
+```bash
 zavora-cli \
   --worker-provider openai \
   --worker-model gpt-5.4-mini-2026-03-17 \
@@ -82,7 +107,7 @@ zavora-cli \
   chat
 ```
 
-Inside the classic chat shell:
+Inside the workspace:
 
 ```text
 /models                         show the catalog and quota pools
@@ -156,16 +181,11 @@ zavora-cli agents list
 zavora-cli capabilities list
 zavora-cli skills list
 zavora-cli skills search device
-zavora-cli skills validate .agents/skills/repository-development
-zavora-cli skills link ./my-skill
 zavora-cli plugins list
-zavora-cli plugins validate ./my-extension
-zavora-cli plugins install https://github.com/example/my-extension.git
 zavora-cli plugins doctor --json
 zavora-cli sessions list
 zavora-cli mcp catalog office
 zavora-cli mcp add docx-mcp
-zavora-cli mcp list
 zavora-cli doctor
 ```
 
@@ -181,9 +201,38 @@ git diff | zavora-cli ask --output-format stream-json "Review this patch"
 See [`docs/HEADLESS.md`](docs/HEADLESS.md) for schemas, events, approvals, and
 exit codes.
 
-The full-screen workspace and classic shell share the same runtime commands. In the TUI, `Ctrl+P` opens a searchable command palette; slash commands autocomplete with `Tab`; `↑`/`↓` recall prompt history; `Shift+Tab` changes build/plan mode; and the mouse wheel scrolls the transcript. It includes live tool activity, in-place approvals, model/provider switching, session switching, checkpoints, compaction, Markdown export, cancellable workflows, and a direct shell mode with `!`. A discovered skill is directly invocable as `/<skill-name> [request]`.
+## Capabilities the agent can turn on
 
-See [`docs/TUI.md`](docs/TUI.md) for the interaction and command contract.
+A capability is a curated set of MCP servers plus the specialist agent that uses them. `capabilities list` reports every one, with its maturity, risk, and how many of its servers are configured:
+
+```text
+$ zavora-cli capabilities list
+
+Productivity:
+  skills: brand-guidelines, canvas-design, docx, email-operations, pdf, pptx, xlsx
+    productivity.office          certified risk=high     mcp=0/5 — Create and edit Word documents, presentations, spreadsheets, PDFs, and diagrams.
+    productivity.communication   preview   risk=high     mcp=0/5 — Work with email, calendars, Slack, messaging, and notifications.
+    productivity.work-management preview   risk=medium   mcp=0/6 — Manage tasks, projects, schedules, workflows, forms, and surveys.
+Development:
+    development.core             core      risk=high     mcp=0/5 — Repository, code search, testing, dependency, and security advisory tools.
+    development.delivery         preview   risk=critical mcp=0/6 — Operate CI/CD, containers, databases, infrastructure, and observability.
+```
+
+The agent can find the capability a request needs and turn it on. `capability_status` is read-only and reports, per capability, its risk, its specialist agent, and for each MCP server whether it is installed and configured. `capability_enable` installs the missing packages, writes them into the profile, and enables the capability — behind an approval that names the exact commands:
+
+```text
+Install 3 packages to enable "Office Artifacts" (productivity.office)?
+  cargo install slides-mcp-server
+  cargo install excel-mcp-server
+  cargo install mcp-pdf
+Then configures 4 MCP servers and enables the capability.
+risk high · certified · runs third-party code · enabling does not make the
+servers usable until they connect.
+```
+
+"Enable office support" and "compile and install four programs from the internet" are one request described at two levels of consequence, so the approval describes the second one. The agent supplies only a capability id validated against the built-in set; every install command comes from the curated catalogue, never from the model or the prompt. Installs run as an argument vector, never through a shell.
+
+Once the servers are configured the workspace reconnects between turns, so a capability enabled mid-session works in that session, and reports how many servers actually answered rather than assuming.
 
 ## Capability model
 
@@ -193,7 +242,7 @@ Zavora reports capability state from the live runtime rather than relying on a s
 - `.agents/skills/<name>/SKILL.md` is the preferred portable skill layout. Compatible `.zavora`, Claude, Gemini, Grok, and OpenCode skill roots are discovered with deterministic precedence. Skills support install/link/update/enable/disable/uninstall and are injected through ADK-Rust's plugin runtime for every model provider.
 - Plugins normalize native Zavora, Codex, Claude, Gemini, Grok, and OpenCode packages. Enabled packages contribute namespaced skills, portable Markdown agents/commands, and MCP servers. JavaScript/TypeScript entrypoints are reported but require an explicit trusted runtime; discovery never silently executes package code.
 - Specialist subagents cover productivity artifacts, development, research, operations/devices, and independent review.
-- Capability recipes describe useful MCP server combinations. `configured`, `connected`, and `authorized` are reported separately; enabling a recipe never claims that its servers are usable.
+- `configured`, `connected`, and `authorized` are reported separately; enabling a recipe never claims that its servers are usable.
 
 Use `zavora-cli capabilities list`, `zavora-cli skills list`, `zavora-cli agents list`, and `zavora-cli mcp doctor` for progressively deeper inspection.
 
@@ -216,6 +265,10 @@ MCP works in both directions:
 Stdio tool discovery prefers the MCP `2026-07-28` `server/discover` lifecycle, falls back to `2025-11-25` for compliant legacy servers, advertises tool-call task support, and bounds the handshake by the server timeout. `zavora-cli mcp protocol --json` reports remaining transport and authorization gates instead of overstating compatibility.
 
 Write, shell, GitHub, and externally supplied MCP tools pass through confirmation and permission policy. The system prompt never commits or pushes unless the developer asks.
+
+## Handing the terminal back
+
+The workspace puts the terminal into states a shell cannot undo on its own: raw mode, the alternate screen, bracketed paste, and mouse reporting. All of it is undone on exit, on a panic, and on a signal — including `SIGTERM` and the `SIGHUP` a closing window sends. Without that, a killed process leaves mouse reporting on, and every pointer movement prints escape sequences into the shell. See [`docs/TUI.md`](docs/TUI.md#handing-the-terminal-back).
 
 ## ADK-Rust 2.0 architecture
 

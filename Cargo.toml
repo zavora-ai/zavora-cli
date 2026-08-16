@@ -9,6 +9,9 @@ repository = "https://github.com/zavora-ai/zavora-cli"
 authors = ["Zavora AI <info@zavora.ai>"]
 keywords = ["cli", "ai", "agent", "adk", "llm"]
 categories = ["command-line-utilities"]
+# Screenshots are for the repository's README, not the published crate: they are
+# an order of magnitude larger than the source and nothing at runtime reads them.
+exclude = ["docs/images/*", ".kiro/*", "docs/history/*"]
 
 [features]
 # `semantic-search` is on by default: it is a single small dependency (strsim)
