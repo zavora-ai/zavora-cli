@@ -17,6 +17,7 @@ pub const NO_TEXTUAL_RESPONSE: &str = "No textual response produced by the agent
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     AgentChanged(String),
+    System(String),
     TextDelta {
         author: String,
         text: String,
@@ -318,9 +319,17 @@ pub async fn run_prompt(
         );
     }
 
-    Ok(tracker
+    let answer = tracker
         .resolve_text()
-        .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string()))
+        .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string());
+    telemetry.emit_content(
+        "chat.response",
+        serde_json::json!({
+            "content": answer,
+            "status": "ok",
+        }),
+    );
+    Ok(answer)
 }
 
 pub async fn run_prompt_with_retrieval(
@@ -422,6 +431,13 @@ pub async fn run_prompt_to_ui(
     let answer = tracker
         .resolve_text()
         .unwrap_or_else(|| NO_TEXTUAL_RESPONSE.to_string());
+    telemetry.emit_content(
+        "chat.response",
+        serde_json::json!({
+            "content": answer,
+            "status": "ok",
+        }),
+    );
     let _ = tx.send(UiEvent::Completed(answer.clone()));
     Ok(answer)
 }

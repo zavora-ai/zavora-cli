@@ -1,5 +1,11 @@
 # Implementation Plan: Provider Onboarding
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Overview
 
 Implement an interactive onboarding wizard for zavora-cli that guides first-time users through provider selection, model selection, and API key configuration. The implementation extends the existing config and provider systems, adds a new `onboarding.rs` module, and wires it into the first-run path and a new `setup` CLI subcommand.

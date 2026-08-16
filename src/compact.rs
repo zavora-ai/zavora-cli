@@ -562,9 +562,33 @@ pub async fn auto_compact(
         }
     }
 
-    // Step 2: Fall back to LLM summary compaction
-    match compact_session(session_service, cfg, &CompactStrategy::default()).await? {
-        Some(msg) => Ok(format!("Snip + summary: {}", msg)),
+    // Step 2: LLM summary compaction.
+    let summary_outcome =
+        compact_session(session_service, cfg, &CompactStrategy::default()).await?;
+
+    // Step 3: if a single summary pass still leaves the session over target,
+    // escalate to the bounded repeat loop. Without this, `auto_compact` could
+    // report success while still above the threshold, and the next turn would
+    // hit the provider's context limit.
+    let session = session_service
+        .get(adk_session::GetRequest {
+            app_name: cfg.app_name.clone(),
+            user_id: cfg.user_id.clone(),
+            session_id: cfg.session_id.clone(),
+            num_recent_events: None,
+            after: None,
+        })
+        .await?;
+    let events = session.events().all();
+    let usage = compute_context_usage(&events, &provider_str, model_name);
+
+    if usage.utilization() > cfg.compaction_target {
+        let escalated = compact_to_target(session_service, cfg, cfg.compaction_target).await?;
+        return Ok(format!("Snip + summary + repeat: {escalated}"));
+    }
+
+    match summary_outcome {
+        Some(msg) => Ok(format!("Snip + summary: {msg}")),
         None => Ok("Session too short to compact".to_string()),
     }
 }

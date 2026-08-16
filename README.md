@@ -15,7 +15,7 @@ The full-screen terminal workspace is designed for long development sessions: st
 
 ## Install
 
-Zavora v2 requires Rust 1.94 or newer when building from source.
+Zavora v2 requires Rust 1.95 or newer when building from source.
 
 ```bash
 cargo install zavora-cli
@@ -132,10 +132,18 @@ planner_call_budget = 4
 session_backend = "sqlite"
 session_db_url = "sqlite://.zavora/sessions.db"
 tool_confirmation_mode = "mcp-only"
-auto_compact_enabled = true
 ```
 
-Precedence is CLI/environment, selected agent, selected profile, then role defaults. The v1 `provider` and `model` settings are still accepted as worker aliases. New setup runs store API keys in the OS credential vault rather than project TOML.
+Worker precedence is CLI/environment, selected agent, selected profile, then role
+defaults. The planner resolves independently and only from planner-scoped
+settings — `--planner-provider`/`--planner-model`, `ZAVORA_PLANNER_*`, and
+`planner_provider`/`planner_model` in the profile. It does **not** inherit the
+worker provider or a bare `provider` setting, and defaults to OpenAI. If you move
+the worker to another provider and want the planner to follow, set the planner
+role explicitly.
+
+The v1 `provider` and `model` settings are still accepted as worker aliases. New
+setup runs store API keys in the OS credential vault rather than project TOML.
 
 ## Everyday commands
 
@@ -145,13 +153,52 @@ zavora-cli ask "Explain this workspace" # one response
 zavora-cli workflow parallel "Review the API and tests"
 zavora-cli ralph "Implement the accepted issue"
 zavora-cli agents list
+zavora-cli capabilities list
 zavora-cli skills list
+zavora-cli skills search device
+zavora-cli skills validate .agents/skills/repository-development
+zavora-cli skills link ./my-skill
+zavora-cli plugins list
+zavora-cli plugins validate ./my-extension
+zavora-cli plugins install https://github.com/example/my-extension.git
+zavora-cli plugins doctor --json
 zavora-cli sessions list
+zavora-cli mcp catalog office
+zavora-cli mcp add docx-mcp
 zavora-cli mcp list
 zavora-cli doctor
 ```
 
-The retained workspace handles `/help`, `/models`, and `/exit`. The classic shell additionally provides `/tools`, `/mcp`, `/usage`, `/compact`, `/checkpoint`, `/tangent`, `/todos`, `/delegate`, `/agent`, live route switching, and the remaining advanced slash commands.
+One-shot commands have a versioned automation surface with clean stdout,
+repeatable file inputs, automatic piped stdin, stable exits, and both single
+JSON and streaming JSONL output:
+
+```bash
+zavora-cli ask --output-format json --file README.md "Summarize this project"
+git diff | zavora-cli ask --output-format stream-json "Review this patch"
+```
+
+See [`docs/HEADLESS.md`](docs/HEADLESS.md) for schemas, events, approvals, and
+exit codes.
+
+The full-screen workspace and classic shell share the same runtime commands. In the TUI, `Ctrl+P` opens a searchable command palette; slash commands autocomplete with `Tab`; `↑`/`↓` recall prompt history; `Shift+Tab` changes build/plan mode; and the mouse wheel scrolls the transcript. It includes live tool activity, in-place approvals, model/provider switching, session switching, checkpoints, compaction, Markdown export, cancellable workflows, and a direct shell mode with `!`. A discovered skill is directly invocable as `/<skill-name> [request]`.
+
+See [`docs/TUI.md`](docs/TUI.md) for the interaction and command contract.
+
+## Capability model
+
+Zavora reports capability state from the live runtime rather than relying on a static prompt:
+
+- `AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` families supply additive, scope-resolved project instructions. Native `AGENTS.override.md` takes precedence in its directory; Gemini custom context names, Claude local/rules files, imports, deduplication, and inspection are supported.
+- `.agents/skills/<name>/SKILL.md` is the preferred portable skill layout. Compatible `.zavora`, Claude, Gemini, Grok, and OpenCode skill roots are discovered with deterministic precedence. Skills support install/link/update/enable/disable/uninstall and are injected through ADK-Rust's plugin runtime for every model provider.
+- Plugins normalize native Zavora, Codex, Claude, Gemini, Grok, and OpenCode packages. Enabled packages contribute namespaced skills, portable Markdown agents/commands, and MCP servers. JavaScript/TypeScript entrypoints are reported but require an explicit trusted runtime; discovery never silently executes package code.
+- Specialist subagents cover productivity artifacts, development, research, operations/devices, and independent review.
+- Capability recipes describe useful MCP server combinations. `configured`, `connected`, and `authorized` are reported separately; enabling a recipe never claims that its servers are usable.
+
+Use `zavora-cli capabilities list`, `zavora-cli skills list`, `zavora-cli agents list`, and `zavora-cli mcp doctor` for progressively deeper inspection.
+
+The dated competitor and gap assessment lives in [`docs/CLI_CAPABILITY_MATRIX.md`](docs/CLI_CAPABILITY_MATRIX.md).
+The exact instruction discovery and precedence contract is documented in [`docs/PROJECT_INSTRUCTIONS.md`](docs/PROJECT_INSTRUCTIONS.md).
 
 ## Tools and operating controls
 
@@ -163,8 +210,10 @@ cargo install zavora-cli --features "web-fetch,lsp,oauth,browser,sandbox,rag"
 
 MCP works in both directions:
 
-- As a client, Zavora discovers tools from configured stdio or HTTP MCP servers and can update the configured server set.
+- As a client, Zavora discovers tools from configured stdio or HTTP MCP servers. `mcp catalog`, `mcp add`, and `mcp remove` provide comment-preserving configuration for curated productivity, development, research, device, and registry servers.
 - As a server, `zavora-cli mcp serve` exposes the built-in tool surface over stdio.
+
+Stdio tool discovery prefers the MCP `2026-07-28` `server/discover` lifecycle, falls back to `2025-11-25` for compliant legacy servers, advertises tool-call task support, and bounds the handshake by the server timeout. `zavora-cli mcp protocol --json` reports remaining transport and authorization gates instead of overstating compatibility.
 
 Write, shell, GitHub, and externally supplied MCP tools pass through confirmation and permission policy. The system prompt never commits or pushes unless the developer asks.
 

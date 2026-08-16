@@ -1,6 +1,7 @@
 /target
 .env
 .zavora/
+.cargo/config.toml
 evals/reports/latest.json
 .DS_Store
 *.swp
@@ -9,6 +10,11 @@ evals/reports/latest.json
 .idea/
 .vscode/
 go/
+# `.skills/` is a user-local discovery root scaffolded on first run by
+# src/onboarding.rs. It is not bundled product content; the skills that ship
+# with the repository live in `.agents/skills/<name>/SKILL.md`.
+.skills/
+# Local scratch workspaces, never product content.
 test/
 test-projects/
-.skills/
+hello_world/

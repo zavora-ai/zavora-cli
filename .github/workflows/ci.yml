@@ -14,9 +14,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The pinned toolchain comes from rust-toolchain.toml rather than
+      # whatever `stable` resolves to, so a future stable release cannot
+      # silently change the compiler under a release.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.95.0"
           components: rustfmt, clippy
 
       - name: Cache Cargo
@@ -26,13 +30,25 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check
+        run: cargo check --all-targets
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --all-targets -- --test-threads=1
+
+      # Property 1: a clean checkout must resolve with no sibling repositories.
+      - name: Clean-checkout resolvability
+        run: ./scripts/check_clean_clone.sh
+
+      # Property 4: no module or watched symbol may be written and never called.
+      - name: Wiring census
+        run: ./scripts/check_wiring.sh
+
+      # Property 12: documented configuration and command examples must work.
+      - name: Documentation examples
+        run: ./scripts/check_docs.sh
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -42,5 +58,47 @@ jobs:
       - name: npm package dry-run
         run: make npm-pack-check
 
+      # Property 14: the crate, npm package, and formula must agree.
+      - name: Version agreement
+        run: make version-check
+
       - name: Quality Gate (eval + guardrails)
         run: make quality-gate
+
+  feature-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: All optional features
+        run: cargo check --all-targets --features "web-fetch,lsp,oauth,browser,sandbox,rag,semantic-search,checkpoints"
+
+      - name: Default features only
+        run: cargo check --all-targets --no-default-features
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Advisory exceptions are dated and justified in .cargo/audit.toml.
+      - name: Advisory scan
+        run: cargo audit

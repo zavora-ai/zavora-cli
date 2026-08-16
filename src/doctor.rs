@@ -84,6 +84,8 @@ pub async fn run_doctor(cfg: &RuntimeConfig) -> Result<()> {
             .count()
     );
 
+    print_external_tooling_check();
+
     if matches!(cfg.session_backend, SessionBackend::Sqlite) {
         let _service = open_sqlite_session_service(&cfg.session_db_url).await?;
         println!(
@@ -109,4 +111,55 @@ pub async fn run_migrate(cfg: &RuntimeConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Report the external binaries the enabled features depend on.
+///
+/// Requirement 14.2. Without this, a missing `rg` degraded search silently and a
+/// missing language server made the `lsp` tool look broken rather than absent.
+fn print_external_tooling_check() {
+    fn found(binary: &str) -> bool {
+        which_in_path(binary).is_some()
+    }
+
+    // `rg` is preferred by the grep tool; `grep` is the documented fallback.
+    let rg = if found("rg") {
+        "found"
+    } else if found("grep") {
+        "missing (falling back to grep)"
+    } else {
+        "missing (no fallback available)"
+    };
+    println!("Search tooling: rg={rg}");
+
+    if cfg!(feature = "lsp") {
+        // The servers the LSP manager knows how to launch.
+        let servers = [
+            ("rust", "rust-analyzer"),
+            ("typescript", "typescript-language-server"),
+            ("python", "pyright-langserver"),
+            ("go", "gopls"),
+            ("c/c++", "clangd"),
+        ];
+        let available = servers
+            .iter()
+            .filter(|(_, binary)| found(binary))
+            .map(|(language, binary)| format!("{language}={binary}"))
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            println!(
+                "Language servers: none found on PATH; the lsp tool will report no server for every language"
+            );
+        } else {
+            println!("Language servers: {}", available.join(", "));
+        }
+    }
+}
+
+/// Minimal PATH lookup. Avoids a dependency for one diagnostic.
+fn which_in_path(binary: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }

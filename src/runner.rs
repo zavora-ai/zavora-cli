@@ -9,42 +9,94 @@ use adk_session::SessionService;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::cli::ToolConfirmationMode;
 use crate::config::RuntimeConfig;
-use crate::mcp::discover_mcp_tools;
 use crate::provider::{resolve_model, resolve_planner_model};
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
-use crate::tool_policy::filter_tools_by_policy;
-use crate::tools::build_builtin_tools;
 
-const ORCHESTRATOR_INSTRUCTION: &str = "\
+/// Descriptions for every agent the orchestrator may be told about.
+///
+/// The prompt section is rendered from this table filtered against what is
+/// actually registered, so a conditionally attached agent — `search_agent` is
+/// only present with `--provider gemini` — is simply absent from the prompt
+/// rather than advertised and then stripped. Requirement 6.2, 6.5.
+/// Agents exposed as real tools: the orchestrator calls them and gets a result
+/// back, with control never leaving the orchestrator.
+///
+/// `time_agent` and `memory_agent` are `impl Tool` (`src/agents/tools.rs`) and
+/// `plan_work` is a `BudgetedPlannerTool`, so "call as tools" is literally true
+/// for these three and only these three.
+const AGENT_TOOL_CATALOGUE: &[(&str, &str)] = &[
+    (
+        "time_agent",
+        "Get current time, parse relative dates (for example \"next Friday\", \"in 2 days\")",
+    ),
+    (
+        "memory_agent",
+        "Recall or store USER preferences, decisions, and learnings (NOT general knowledge)",
+    ),
+    (
+        "plan_work",
+        "Produce a concise plan for complex or architectural work",
+    ),
+];
+
+/// Specialists registered with `builder.sub_agent(...)`.
+///
+/// These are reached through ADK's `transfer_to_agent`, which **hands over
+/// control** rather than returning a value. Describing them as callable tools
+/// caused exactly the failure it sounds like: the orchestrator "called" one, ADK
+/// turned that into a transfer, and the receiving specialist read the same
+/// instruction and transferred onward — three models paid to pass a task around
+/// without doing it. The framing below is deliberately different for that reason.
+/// Requirement 13.2, 13.3.
+const SUBAGENT_CATALOGUE: &[(&str, &str)] = &[
+    ("search_agent", "News, current events, and web searches"),
+    (
+        "artifact_agent",
+        "Documents, presentations, spreadsheets, PDFs, email, and work management",
+    ),
+    (
+        "developer_agent",
+        "Repository, implementation, testing, dependencies, CI/CD, and delivery",
+    ),
+    (
+        "research_agent",
+        "Source-grounded web and specialist research",
+    ),
+    (
+        "operations_agent",
+        "Devices, desktop automation, infrastructure, incidents, and business systems",
+    ),
+    (
+        "reviewer_agent",
+        "Independent correctness, safety, provenance, and acceptance review",
+    ),
+];
+
+/// Test-only views of both catalogues.
+#[cfg(test)]
+pub const AGENT_CATALOGUE_FOR_TEST: &[(&str, &str)] = SUBAGENT_CATALOGUE;
+#[cfg(test)]
+pub const AGENT_TOOL_CATALOGUE_FOR_TEST: &[(&str, &str)] = AGENT_TOOL_CATALOGUE;
+#[cfg(test)]
+pub const SUBAGENT_CATALOGUE_FOR_TEST: &[(&str, &str)] = SUBAGENT_CATALOGUE;
+
+pub const ORCHESTRATOR_INSTRUCTION: &str = "\
 You are the orchestrator. You coordinate specialist agents to accomplish complex tasks.
-
-CAPABILITY AGENTS (call as tools when you need their unique skills):
-- time_agent: Get current time, parse relative dates (\"next Friday\", \"in 2 days\")
-- memory_agent: Recall/store USER preferences, decisions, and learnings (NOT for general knowledge)
-
-SUBAGENTS (automatically available when conditions met):
-- search_agent: For news, current events, and web searches (enabled only with --provider gemini)
-
-WORKFLOW AGENTS (use for complex multi-step work):
-- file_search_agent: Comprehensive file discovery with saturation detection
-- sequential_agent: Create plans and execute steps with progress tracking
-- quality_agent: Verify work against acceptance criteria
 
 RULES:
 - For news/web searches: delegate to search_agent
+- Delegate focused work to the matching specialist; do not send every task through a subagent
 - For complex multi-file or architectural work: call plan_work once, then execute its plan
 - memory_agent is ONLY for user preferences/decisions, NOT for facts or general knowledge
 - For simple tasks, use your built-in tools directly
-- For complex multi-step tasks, use sequential_agent
 - Store only high-signal learnings: user preferences, decisions, patterns (not facts)
 ";
 
 #[cfg(test)]
 pub fn build_single_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
-    let tools = build_builtin_tools();
+    let tools = crate::tools::build_builtin_tools();
     build_single_agent_with_tools(
         model,
         &tools,
@@ -152,6 +204,9 @@ pub fn build_single_agent_with_tools_and_telemetry(
              - Consider the operating system when providing paths and commands\n\
              - Be aware of the current working directory for relative paths\n\
              - After making code changes, compile/build to verify they work\n\
+             - Treat every tool result as authoritative. Never claim a file was created or changed \
+             when the write or edit tool reported an error, denial, or timeout\n\
+             - After a write or edit, read the affected file before reporting the change as complete\n\
              </tool_guidelines>\n\
              \n\
              <git_guidelines>\n\
@@ -193,6 +248,33 @@ pub fn build_single_agent_with_tools_and_telemetry(
              </rules>"
             ),
         ];
+        let configured_servers = cfg
+            .mcp_servers
+            .iter()
+            .filter(|server| server.enabled.unwrap_or(true))
+            .map(|server| server.name.clone())
+            .collect::<Vec<_>>();
+        let connected_mcp_tools = tools
+            .iter()
+            .map(|tool| tool.name())
+            .filter(|name| name.starts_with("mcp:"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        sections.push(format!(
+            "<runtime_capabilities>\n{}\n</runtime_capabilities>",
+            crate::capabilities::format_prompt_capabilities(
+                &configured_servers,
+                &connected_mcp_tools,
+            )
+        ));
+        match crate::skills::resolve_workspace_instructions() {
+            Ok(instructions) if !instructions.content.is_empty() => sections.push(format!(
+                "<workspace_instructions>\n{}\n</workspace_instructions>",
+                instructions.content
+            )),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "project instruction loading unavailable"),
+        }
         if let Some(agent_instruction) = cfg
             .agent_instruction
             .as_deref()
@@ -221,6 +303,79 @@ pub fn build_single_agent_with_tools_and_telemetry(
     // Intentional: search sub-agent is only enabled when the invocation explicitly
     // runs with --provider gemini. Auto-detected provider mode does not attach it.
     let search_subagent = build_search_subagent_for_provider(runtime_cfg, model.clone());
+    let capability_subagents = runtime_cfg
+        .filter(|cfg| cfg.agent_name == "default")
+        .map(|_| crate::agents::capability::build_specialist_agents(model.clone(), tools))
+        .transpose()?
+        .unwrap_or_default();
+
+    // Property 3: a name the prompt advertises must be a name the runtime can
+    // serve. The v2 prompt advertised three workflow agents that were never
+    // registered, so every session paid tokens describing tools that could only
+    // fail when called. Auditing here — after the tool surface and sub-agents
+    // are both known — is the only point where both sides are visible.
+    let mut advertised = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    advertised.extend(
+        [
+            "time_agent",
+            "memory_agent",
+            "plan_work",
+            "artifact_agent",
+            "developer_agent",
+            "research_agent",
+            "operations_agent",
+            "reviewer_agent",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    if search_subagent.is_some() {
+        advertised.push("search_agent".to_string());
+    }
+    for specialist in &capability_subagents {
+        advertised.push(specialist.name().to_string());
+    }
+
+    let surface = crate::prompt_surface::PromptSurface::from_names(advertised);
+
+    // Two sections, because there are two mechanisms. Tools return a value and
+    // keep control here; sub-agents take over the turn. Collapsing them into one
+    // "call as tools" list made the orchestrator transfer instead of work.
+    let tool_section = surface.render_section(AGENT_TOOL_CATALOGUE);
+    let subagent_section = surface.render_section(SUBAGENT_CATALOGUE);
+
+    let mut instruction = instruction;
+    if !tool_section.is_empty() {
+        instruction.push_str("\n\nAGENT TOOLS (call these; they return a result to you):\n");
+        instruction.push_str(&tool_section);
+    }
+    if !subagent_section.is_empty() {
+        instruction.push_str(
+            "\n\nSPECIALISTS (transferring hands the whole turn to them; you do not get \
+             control back):\n",
+        );
+        instruction.push_str(&subagent_section);
+        instruction.push_str(
+            "\nTransfer only when the specialist's domain is clearly the whole task. \
+             If you transfer, you are done. If you receive a transfer, complete the work \
+             yourself and answer the user — do not transfer again.\n",
+        );
+    }
+
+    // Belt to that: anything still advertised and unregistered is real drift.
+    let (instruction, phantoms) = surface.sanitize(&instruction);
+    if !phantoms.is_empty() {
+        // Loud on purpose: with the sections generated, a surviving phantom means
+        // hand-written prose names a tool the runtime cannot serve.
+        tracing::error!(
+            count = phantoms.len(),
+            phantoms = ?phantoms.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            "system prompt advertised tools that are not registered; removed before the model saw them"
+        );
+    }
 
     let mut builder = LlmAgentBuilder::new("assistant")
         .description("General purpose engineering assistant")
@@ -230,19 +385,29 @@ pub fn build_single_agent_with_tools_and_telemetry(
         .tool_timeout(tool_timeout)
         .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto);
 
-    for tool in tools {
-        builder = builder.tool(tool.clone());
+    if runtime_cfg.is_some() {
+        builder = builder.toolset(Arc::new(crate::capabilities::CapabilityToolset::routed(
+            "prompt-routed-capabilities",
+            tools.to_vec(),
+        )));
+    } else {
+        for tool in tools {
+            builder = builder.tool(tool.clone());
+        }
     }
 
     // Add search subagent if available
     if let Some(search_agent) = search_subagent {
         builder = builder.sub_agent(search_agent);
     }
+    for specialist in capability_subagents {
+        builder = builder.sub_agent(specialist);
+    }
 
     if let Some(cfg) = runtime_cfg {
         match resolve_planner_model(cfg) {
             Ok((planner_model, provider, model_name)) => {
-                let planner = crate::model_roles::build_planner_agent(planner_model)?;
+                let planner = crate::model_roles::build_workspace_planner_agent(planner_model)?;
                 builder = builder.tool(Arc::new(crate::model_roles::BudgetedPlannerTool::new(
                     planner,
                     cfg.planner_call_budget,
@@ -290,11 +455,9 @@ fn build_search_subagent_for_provider(
 // See src/agents/ for new architecture
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct ResolvedRuntimeTools {
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub mcp_tool_names: BTreeSet<String>,
-}
+// The tool surface and its single enforcement point live in `tool_surface`.
+// Re-exported here so existing `crate::runner::` imports keep working.
+pub use crate::tool_surface::{ResolvedRuntimeTools, ToolSurface, resolve_runtime_tools};
 
 #[derive(Debug, Clone)]
 pub struct ToolConfirmationSettings {
@@ -318,7 +481,7 @@ pub fn resolve_tool_confirmation_settings(
     // Confirmation is now handled by ConfirmingTool wrappers applied in
     // resolve_runtime_tools(). The ADK-level policy is always Never.
     let available_tool_names = runtime_tools
-        .tools
+        .tools()
         .iter()
         .map(|tool| tool.name().to_string())
         .collect::<BTreeSet<String>>();
@@ -341,162 +504,6 @@ pub fn resolve_tool_confirmation_settings(
     ToolConfirmationSettings {
         policy: ToolConfirmationPolicy::Never,
         run_config,
-    }
-}
-
-pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
-    use crate::tool_policy::is_read_only_tool;
-    use crate::tools::confirming::ConfirmingTool;
-
-    let mut tools = build_builtin_tools();
-    let built_in_count = tools.len();
-    let mut mcp_tools = discover_mcp_tools(cfg).await;
-    let mcp_count = mcp_tools.len();
-    let discovered_mcp_tool_names = mcp_tools
-        .iter()
-        .map(|tool| tool.name().to_string())
-        .collect::<BTreeSet<String>>();
-    tools.append(&mut mcp_tools);
-
-    tools = filter_tools_by_policy(tools, &cfg.agent_allow_tools, &cfg.agent_deny_tools);
-
-    // Build effective permission rules: profile rules + backward-compat mapping
-    let rules = &cfg.permission_rules;
-
-    // Legacy approve_tool → always_allow, require_confirm_tool → always_ask
-    let mut effective_allow: Vec<crate::tool_policy::ToolPattern> = rules.always_allow.clone();
-    let effective_deny: Vec<crate::tool_policy::ToolPattern> = rules.always_deny.clone();
-    let mut effective_ask: Vec<crate::tool_policy::ToolPattern> = rules.always_ask.clone();
-
-    for name in &cfg.approve_tool {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            effective_allow.push(crate::tool_policy::ToolPattern(trimmed.to_string()));
-        }
-    }
-    for name in &cfg.require_confirm_tool {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            effective_ask.push(crate::tool_policy::ToolPattern(trimmed.to_string()));
-        }
-    }
-
-    let effective_rules = crate::tool_policy::PermissionRules {
-        always_allow: effective_allow,
-        always_deny: effective_deny,
-        always_ask: effective_ask,
-    };
-
-    // Determine wrapping per tool using layered rules
-    tools = tools
-        .into_iter()
-        .map(|tool| {
-            let name = tool.name();
-            let decision = effective_rules.evaluate(name, None);
-
-            match decision {
-                crate::tool_policy::PermissionDecision::Allow => {
-                    // Explicitly allowed — no confirmation, but show display for reads
-                    if is_read_only_tool(name) {
-                        ConfirmingTool::wrap_display_only(tool)
-                    } else {
-                        tool
-                    }
-                }
-                crate::tool_policy::PermissionDecision::Deny => {
-                    // Denied tools are already filtered by filter_tools_by_policy,
-                    // but if a deny rule targets content patterns, the tool stays
-                    // and ConfirmingTool handles per-call denial at runtime.
-                    ConfirmingTool::wrap(tool)
-                }
-                crate::tool_policy::PermissionDecision::Ask => ConfirmingTool::wrap(tool),
-                crate::tool_policy::PermissionDecision::NoMatch => {
-                    // Default behavior: read-only tools auto-approve (display-only),
-                    // guarded built-ins and MCP tools require confirmation
-                    if is_read_only_tool(name) {
-                        ConfirmingTool::wrap_display_only(tool)
-                    } else {
-                        match cfg.tool_confirmation_mode {
-                            ToolConfirmationMode::Always => ConfirmingTool::wrap(tool),
-                            ToolConfirmationMode::McpOnly => {
-                                if discovered_mcp_tool_names.contains(name)
-                                    || matches!(
-                                        name,
-                                        "fs_write" | "file_edit" | "execute_bash" | "github_ops"
-                                    )
-                                {
-                                    ConfirmingTool::wrap(tool)
-                                } else {
-                                    tool
-                                }
-                            }
-                            ToolConfirmationMode::Never => {
-                                // Still wrap guarded built-ins
-                                if matches!(
-                                    name,
-                                    "fs_write" | "file_edit" | "execute_bash" | "github_ops"
-                                ) {
-                                    ConfirmingTool::wrap(tool)
-                                } else {
-                                    tool
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        .collect();
-
-    let mcp_tool_names = tools
-        .iter()
-        .map(|tool| tool.name().to_string())
-        .filter(|name| discovered_mcp_tool_names.contains(name))
-        .collect::<BTreeSet<String>>();
-
-    tracing::info!(
-        built_in_tools = built_in_count,
-        mcp_tools = mcp_count,
-        total_tools = tools.len(),
-        agent_allow_tools = cfg.agent_allow_tools.len(),
-        agent_deny_tools = cfg.agent_deny_tools.len(),
-        "Resolved runtime toolset"
-    );
-
-    // Add tool_search if total tools exceed threshold (gives LLM discovery for large tool sets)
-    if tools.len() > 15 {
-        let all_tools_for_search = tools.clone();
-        let search_tool = FunctionTool::new(
-            "tool_search",
-            "Search available tools by keyword. Use when you need a tool that isn't in your current set. \
-             Args: query (required, space-separated keywords to match against tool names and descriptions). \
-             Returns matching tool names, descriptions, and parameter schemas.",
-            move |_ctx, args| {
-                let tools_ref = all_tools_for_search.clone();
-                async move {
-                    let query = args.get("query").and_then(serde_json::Value::as_str).unwrap_or("");
-                    Ok(crate::tools::tool_search::tool_search_response(query, &tools_ref))
-                }
-            },
-        )
-        .with_read_only(true)
-        .with_concurrency_safe(true);
-        tools.push(Arc::new(search_tool));
-    }
-
-    // Feature-gated: browser automation tools
-    #[cfg(feature = "browser")]
-    {
-        if let Ok(session) = crate::tools::browser::get_browser().await {
-            let browser_tools = crate::tools::browser::build_browser_tools(session);
-            tracing::info!(count = browser_tools.len(), "Browser tools loaded");
-            tools.extend(browser_tools);
-        }
-    }
-
-    ResolvedRuntimeTools {
-        tools,
-        mcp_tool_names,
     }
 }
 
@@ -543,6 +550,18 @@ pub async fn build_runner_with_session_service(
         builder = builder.memory_service(mem);
     }
 
+    match crate::skills::load_workspace_skills() {
+        Ok(index) if !index.is_empty() => {
+            let injector = adk_skill::SkillInjector::from_index(
+                index,
+                adk_skill::SkillInjectorConfig::default(),
+            );
+            builder = builder.plugin_manager(Arc::new(injector.build_plugin_manager("skills")));
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "skill injection unavailable"),
+    }
+
     if let Some(cc) = compaction_config {
         builder = builder.compaction_config(cc);
     }
@@ -570,7 +589,7 @@ pub async fn build_single_runner_for_chat(
     );
     let agent = build_single_agent_with_tools_and_telemetry(
         model,
-        &runtime_tools.tools,
+        runtime_tools.tools(),
         tool_confirmation.policy.clone(),
         Duration::from_secs(cfg.tool_timeout_secs),
         Some(cfg),

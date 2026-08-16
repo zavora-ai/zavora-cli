@@ -180,12 +180,26 @@ impl LspManager {
             .args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            // Piped, not null: a language server that refuses to start says why
+            // on stderr, and discarding it left zero diagnosability.
+            // Requirement 14.5.
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to spawn LSP server: {}", config.command))?;
 
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let language = lang.id().to_string();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(language = %language, "lsp stderr: {line}");
+                }
+            });
+        }
 
         let client = LspClient::new(stdin, stdout);
 

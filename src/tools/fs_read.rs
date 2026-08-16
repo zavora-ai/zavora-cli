@@ -7,9 +7,11 @@ pub const FS_READ_DEFAULT_MAX_LINES: usize = 200;
 pub const FS_READ_MAX_LINES_LIMIT: usize = 2000;
 pub const FS_READ_DEFAULT_MAX_ENTRIES: usize = 100;
 pub const FS_READ_MAX_ENTRIES_LIMIT: usize = 500;
-pub const FS_READ_DENIED_SEGMENTS: &[&str] = &[".git", ".zavora"];
-pub const FS_READ_DENIED_FILE_NAMES: &[&str] =
-    &[".env", ".env.local", ".env.development", ".env.production"];
+// Containment lists live in `secret_policy` so that the read-only shell fast
+// path applies exactly the same rules. Re-exported for backward compatibility.
+pub use crate::tools::secret_policy::{
+    DENIED_FILE_NAMES as FS_READ_DENIED_FILE_NAMES, DENIED_SEGMENTS as FS_READ_DENIED_SEGMENTS,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsReadRequest {
@@ -61,6 +63,13 @@ pub fn parse_fs_read_usize_arg(
             format!("'{key}' must be a positive integer"),
         ));
     };
+
+    // Some providers include every optional numeric property in a function
+    // call and use zero to mean "not set". Preserve the documented default in
+    // that case instead of turning an otherwise valid tool call into a retry.
+    if value == 0 {
+        return Ok(default);
+    }
 
     let parsed = usize::try_from(value).map_err(|_| {
         FsReadToolError::new(
@@ -177,12 +186,8 @@ pub fn enforce_workspace_path_policy(
         ));
     }
 
-    for component in resolved.components() {
-        let segment = component.as_os_str().to_string_lossy();
-        if FS_READ_DENIED_SEGMENTS
-            .iter()
-            .any(|denied| segment.eq_ignore_ascii_case(denied))
-        {
+    match crate::tools::secret_policy::deny_reason(resolved) {
+        Some(crate::tools::secret_policy::DenyReason::Segment(segment)) => {
             return Err(FsReadToolError::new(
                 "denied_path",
                 format!(
@@ -191,20 +196,16 @@ pub fn enforce_workspace_path_policy(
                 ),
             ));
         }
-    }
-
-    if let Some(name) = resolved.file_name().and_then(|value| value.to_str())
-        && FS_READ_DENIED_FILE_NAMES
-            .iter()
-            .any(|denied| name.eq_ignore_ascii_case(denied))
-    {
-        return Err(FsReadToolError::new(
-            "denied_path",
-            format!(
-                "fs_read denied path '{}': filename '{}' is blocked by policy",
-                requested_path, name
-            ),
-        ));
+        Some(crate::tools::secret_policy::DenyReason::FileName(name)) => {
+            return Err(FsReadToolError::new(
+                "denied_path",
+                format!(
+                    "fs_read denied path '{}': filename '{}' is blocked by policy",
+                    requested_path, name
+                ),
+            ));
+        }
+        None => {}
     }
 
     Ok(())

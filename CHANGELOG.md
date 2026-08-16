@@ -4,27 +4,54 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
-## [Unreleased]
+## [2.0.0] — 2026-08-15
 
 ### Added
 
 - Retained full-screen Ratatui workspace with responsive conversation and activity layouts, a multiline Unicode-aware composer, BUILD/PLAN mode, keyboard overlay, in-place tool approvals, and automatic bottom-following output.
 - Terminal-native Markdown presentation with headings, emphasis, inline code, fenced code surfaces, and lightweight Rust syntax treatment.
 - Tool activity correlation by provider call ID so parallel calls with the same tool name remain distinct.
-- Render tests at wide, standard, and narrow terminal sizes plus cursor, Markdown, and parallel-tool reducer coverage.
+- Versioned automation surface (`--output-format text|json|stream-json`) with clean stdout, repeatable `--file` inputs, automatic piped stdin, and stable exit codes. See `docs/HEADLESS.md`.
+- Cross-CLI plugin system normalizing Zavora, Codex, Claude, Gemini, Grok, and OpenCode packages, with `plugins list|validate|install|doctor` and namespaced skill, agent, command, and MCP contribution.
+- Portable skills at `.agents/skills/<name>/SKILL.md` with install, link, update, enable, disable, and uninstall, injected through ADK-Rust's plugin runtime for every provider.
+- Live capability model with five categories and MCP recipes, reporting `configured`, `connected`, and `authorized` separately (`capabilities list|search|info`).
+- Comment-preserving MCP configuration via `mcp catalog`, `mcp add`, and `mcp remove`, plus `mcp protocol --json` reporting remaining transport and authorization gates.
+- Project instruction discovery for the `AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` families with scope resolution and `AGENTS.override.md` precedence (`instructions list|show`).
+- Five specialist subagents — `artifact_agent`, `developer_agent`, `research_agent`, `operations_agent`, `reviewer_agent`.
+- Single tool-surface enforcement point: tools are classified as read-only, mutating, or network-egress, then filtered and wrapped once. The sealed surface cannot be extended afterwards.
+- Lifecycle hooks now run: a `pre_tool` hook exiting with code 2 blocks the call, and `post_tool` hooks observe the result.
+- Multi-strategy automatic compaction — stale-tool-result elision and file-read deduplication first, LLM summarization as fallback, bounded repeat as escalation — in both the workspace and the classic shell.
+- `doctor` reports the external binaries the enabled features require, including `rg` and language servers.
+- Release gates as executable scripts: `scripts/check_clean_clone.sh`, `scripts/check_wiring.sh`, and `scripts/check_docs.sh`, all wired into `make ci`.
 
 ### Changed
 
 - Interactive TTY chat now opens the full-screen workspace; redirected, dumb-terminal, and `ZAVORA_CLASSIC=1` sessions retain the line-oriented interface.
 - Console tracing is suppressed while the alternate-screen renderer owns the terminal, while structured OTLP telemetry remains available.
 - TUI text follows the terminal foreground/background instead of assuming a dark theme.
+- Migrated the complete runtime to ADK-Rust 2.0 and `rmcp` 3.1.
+- Stdio MCP tool discovery prefers the `2026-07-28` `server/discover` lifecycle and falls back to `2025-11-25` for compliant legacy servers, and now retries with bounded exponential backoff.
+- ADK-Rust dependencies are consumed from crates.io, so a clean checkout builds with no sibling repositories. Use `make local-adk` for local ADK development.
+- Rust MSRV is now 1.95 and the crate uses the Rust 2024 edition. The toolchain is pinned by `rust-toolchain.toml`.
+- The workspace transcript and prompt history are bounded, with a single visible marker recording any elision, and each message renders once per revision rather than once per frame.
 
 ### Fixed
 
 - Input and output guardrails remain active in retained TUI sessions, including buffered output for block and redact modes.
 - Raw mode and the alternate screen are restored when terminal initialization fails.
+- Read-only shell auto-approval no longer discloses secrets: `env` and `printenv` were removed from the allowlist, and every path argument is checked against the same containment policy `fs_read` applies.
+- A shell command that times out or is cancelled is killed along with its process group, and a timed-out command is never retried.
+- The shell tool no longer uses a login shell, which had re-sourced profile files and undone the PATH and `LD_PRELOAD` protections the validators enforce.
+- Browser tools and `web_fetch` can no longer bypass confirmation and allow/deny policy.
+- Model-supplied `approved` and `allow_dangerous` arguments are stripped before the enforcement decision.
+- The system prompt no longer advertises `file_search_agent`, `sequential_agent`, or `quality_agent`, none of which was registered. The `/orchestrate` command and its placeholder agents were removed rather than shipped as no-ops.
+- A malformed skill, plugin, or agent manifest is reported on every surface instead of being presented as an empty capability set.
+- An unreachable MCP server is reported on the active surface rather than only in a log sink.
+- OAuth authorization now includes and verifies a `state` parameter, and the filesystem token fallback is written owner-only.
+- The HTTP server refuses a non-loopback bind without an authentication token, compares bearer tokens in constant time, and withholds workspace detail from unauthenticated health callers.
+- Closed six RUSTSEC advisories (quinn-proto, rustls-webpki ×3, time, crossbeam-epoch) and replaced a yanked transitive dependency.
 
-## [2.0.0] — 2026-07-14
+## [2.0.0-dev] — 2026-07-14
 
 ### Added
 
@@ -38,14 +65,17 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
-- Migrated the complete runtime to ADK-Rust 2.0 and `rmcp` 2.2.
+- Migrated the complete runtime to ADK-Rust 2.0 and `rmcp` 3.1.
+- Stdio MCP tool discovery prefers the `2026-07-28` `server/discover`
+  lifecycle and falls back to `2025-11-25` for compliant legacy servers.
 - OpenAI is now the default provider. Routine work defaults to `gpt-5.4-mini-2026-03-17`; planning defaults to `gpt-5.6-sol` with four calls per process.
 - OpenAI now uses the ADK-Rust v2 Responses API client.
 - Ralph now shares the v2 worker, planner, session, and tool runtime instead of pulling a duplicate ADK 0.5 dependency graph.
 - Replaced the large startup wordmark and model-generated greeting with a compact workspace, session, and model-routing surface.
 - Provider/model changes preserve the session and can update worker and planner independently.
 - Setup no longer creates a sample skill in every working directory.
-- Rust MSRV is now 1.94 and the crate uses the Rust 2024 edition.
+- Rust MSRV is now 1.95 and the crate uses the Rust 2024 edition. The
+  toolchain is pinned by `rust-toolchain.toml`.
 
 ### Fixed
 

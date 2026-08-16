@@ -2,7 +2,7 @@
 name = "zavora-cli"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 description = "Rust CLI AI agent built on ADK-Rust with provider-aware runtime, workflow orchestration, and tool safety controls"
 license = "MIT"
 repository = "https://github.com/zavora-ai/zavora-cli"
@@ -11,7 +11,10 @@ keywords = ["cli", "ai", "agent", "adk", "llm"]
 categories = ["command-line-utilities"]
 
 [features]
-default = []
+# `semantic-search` is on by default: it is a single small dependency (strsim)
+# and it powers the "did you mean" hint on a failed file_edit match, which is an
+# error path users actually hit. Without it the hint degrades to a prefix search.
+default = ["semantic-search"]
 semantic-search = ["dep:strsim"]
 checkpoints = []
 web-fetch = ["dep:reqwest", "dep:htmd"]
@@ -23,17 +26,23 @@ rag = ["dep:adk-rag"]
 lsp = ["dep:lsp-types"]
 
 [dependencies]
-adk-rust = { path = "../adk-rust/adk-rust", version = "2.0.0", features = ["standard", "openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
-adk-session = { path = "../adk-rust/adk-session", version = "2.0.0", features = ["database"] }
-adk-skill = { path = "../adk-rust/adk-skill", version = "2.0.0" }
-adk-memory = { path = "../adk-rust/adk-memory", version = "2.0.0", features = ["sqlite-memory"] }
+# ADK-Rust 2.0 crates are consumed from crates.io so that a clean checkout
+# builds with no sibling repositories. To develop against a local ADK-Rust
+# working tree, run `make local-adk`, which installs the ignored
+# `.cargo/config.toml` from `.cargo/config.toml.local-adk`. That file carries
+# a [patch.crates-io] section pointing at ../adk-rust; Cargo picks it up
+# automatically and no tracked file needs editing.
+adk-rust = { version = "2.0.0", features = ["standard", "openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
+adk-session = { version = "2.0.0", features = ["database"] }
+adk-skill = { version = "2.0.0" }
+adk-memory = { version = "2.0.0", features = ["sqlite-memory"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-adk-telemetry = { path = "../adk-rust/adk-telemetry", version = "2.0.0", features = ["otlp"] }
-adk-guardrail = { path = "../adk-rust/adk-guardrail", version = "2.0.0" }
-adk-browser = { path = "../adk-rust/adk-browser", version = "2.0.0", optional = true }
-adk-sandbox = { path = "../adk-rust/adk-sandbox", version = "2.0.0", optional = true }
-adk-rag = { path = "../adk-rust/adk-rag", version = "2.0.0", optional = true }
-adk-tool = { path = "../adk-rust/adk-tool", version = "2.0.0", features = ["http-transport"] }
+adk-telemetry = { version = "2.0.0", features = ["otlp"] }
+adk-guardrail = { version = "2.0.0" }
+adk-browser = { version = "2.0.0", optional = true }
+adk-sandbox = { version = "2.0.0", optional = true }
+adk-rag = { version = "2.0.0", optional = true }
+adk-tool = { version = "2.0.0", features = ["http-transport"] }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }
 chrono = "0.4"
@@ -53,7 +62,11 @@ base64 = { version = "0.22", optional = true }
 open = { version = "5", optional = true }
 url = { version = "2", optional = true }
 toml = "0.8.19"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "signal"] }
+toml_edit = "0.22"
+# `io-util` and `process` are declared explicitly: execute_bash drains child
+# pipes and reaps process groups directly rather than relying on another
+# crate in the graph to enable those features.
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "signal", "process", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 async-trait = "0.1.89"
@@ -64,11 +77,21 @@ rustyline = "15"
 similar = "2.7"
 winnow = "0.7"
 ignore = "0.4"
-rmcp = { version = "2.2", features = ["transport-io"] }
+# Features are listed explicitly rather than relying on another crate in the
+# graph to enable them: this crate is both an MCP client (src/mcp.rs) and an
+# MCP server over stdio (src/mcp_server.rs). It previously declared only
+# transport-io and compiled solely because adk-tool happened to enable rmcp's
+# client feature, which stopped applying when adk-tool moved to rmcp 3.
+rmcp = { version = "3.1", features = ["client", "server", "transport-io"] }
 schemars = "1"
+tempfile = "3.25.0"
 
 [dev-dependencies]
-tempfile = "3.25.0"
 
 [profile.dev]
 debug = 1  # line tables only (vs full debug = 2)
+
+# Process-group signalling for shell command timeouts, so a command that exceeds
+# its deadline leaves no surviving grandchildren.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

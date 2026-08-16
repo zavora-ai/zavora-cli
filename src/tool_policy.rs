@@ -81,6 +81,16 @@ impl Tool for AliasedTool {
         self.inner.is_long_running()
     }
 
+    /// Forwarded for the same reason as on `ConfirmingTool`: an alias must not
+    /// change what a tool is allowed to do. Requirement 7.3.
+    fn is_read_only(&self) -> bool {
+        self.inner.is_read_only()
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        self.inner.is_concurrency_safe()
+    }
+
     fn parameters_schema(&self) -> Option<Value> {
         self.inner.parameters_schema()
     }
@@ -258,20 +268,79 @@ impl PermissionRules {
     }
 }
 
-/// Read-only tools that should be auto-approved by default.
-pub const READ_ONLY_TOOLS: &[&str] = &[
-    "fs_read",
-    "glob",
-    "grep",
-    "current_unix_time",
-    "release_template",
-    "todo_list",
-    "lsp",
-];
+/// Where a tool came from. Provenance cannot be read off the `Tool` trait, so
+/// the surface builder records it when the tool is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProvenance {
+    /// Compiled into the binary.
+    BuiltIn,
+    /// Compiled in behind an optional feature that drives a remote surface.
+    FeatureGated,
+    /// Contributed by an installed plugin package.
+    Plugin,
+    /// Discovered from an MCP server at runtime.
+    Mcp,
+}
 
-/// Check if a tool is read-only by name.
-pub fn is_read_only_tool(name: &str) -> bool {
-    READ_ONLY_TOOLS.contains(&name)
+/// What a tool can do to the world. Derived from the tool itself rather than
+/// from a hand-maintained name list, so registering a new tool cannot
+/// accidentally create an unguarded path.
+///
+/// Requirement 7.3; Correctness Property 5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolClass {
+    /// Observes state without changing it. Auto-approvable.
+    ReadOnly,
+    /// Mutates the filesystem, a repository, or a process.
+    Mutating,
+    /// Sends data off the machine. Never auto-approved, in any mode.
+    NetworkEgress,
+}
+
+impl ToolClass {
+    /// True when this class may run without an explicit approval.
+    ///
+    /// `NetworkEgress` answers false even though a fetch mutates nothing
+    /// locally: the developer's data leaving the machine is the consequential
+    /// act, and it cannot be undone once it has happened.
+    pub fn is_auto_approvable(self) -> bool {
+        matches!(self, ToolClass::ReadOnly)
+    }
+}
+
+/// Built-in tools that send data off the machine.
+///
+/// This list names egress, not read/write, so it does not duplicate the
+/// classification that `Tool::is_read_only()` already carries. Adding a tool
+/// here is the only way to declare local-egress intent for a built-in.
+pub const NETWORK_EGRESS_TOOLS: &[&str] = &["web_fetch", "github_ops"];
+
+/// Classify a tool from its own declared capability plus its provenance.
+///
+/// Order matters. Egress is checked first because a tool can be read-only in
+/// the local sense and still exfiltrate: `web_fetch` mutates nothing on disk.
+/// Anything arriving from outside the binary — an MCP server, a plugin, a
+/// feature-gated remote surface such as the browser — is treated as egress
+/// because its blast radius is not knowable from here.
+pub fn classify(tool: &Arc<dyn Tool>, provenance: ToolProvenance) -> ToolClass {
+    let name = tool.name();
+
+    if NETWORK_EGRESS_TOOLS.contains(&name) {
+        return ToolClass::NetworkEgress;
+    }
+
+    match provenance {
+        ToolProvenance::Mcp | ToolProvenance::Plugin | ToolProvenance::FeatureGated => {
+            return ToolClass::NetworkEgress;
+        }
+        ToolProvenance::BuiltIn => {}
+    }
+
+    if tool.is_read_only() {
+        ToolClass::ReadOnly
+    } else {
+        ToolClass::Mutating
+    }
 }
 
 // StubTool moved to tests.rs — not needed in production code.

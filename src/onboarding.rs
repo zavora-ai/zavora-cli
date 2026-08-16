@@ -284,12 +284,10 @@ fn read_masked_input() -> Result<String> {
                     KeyCode::Enter => {
                         return Ok(buffer);
                     }
-                    KeyCode::Backspace => {
-                        if buffer.pop().is_some() {
-                            // Move cursor back, overwrite with space, move back again
-                            write!(stdout, "\x08 \x08")?;
-                            stdout.flush()?;
-                        }
+                    KeyCode::Backspace if buffer.pop().is_some() => {
+                        // Move cursor back, overwrite with space, move back again
+                        write!(stdout, "\x08 \x08")?;
+                        stdout.flush()?;
                     }
                     KeyCode::Char(c) => {
                         buffer.push(c);

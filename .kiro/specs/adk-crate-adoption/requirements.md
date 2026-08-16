@@ -1,5 +1,11 @@
 # Requirements: ADK Crate Adoption for Zavora-CLI
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Context
 
 Zavora-CLI v1.1.5 currently uses only 3 of 30+ ADK-Rust crates (`adk-rust`, `adk-session`, `adk-tool`). The ADK monorepo provides production-ready implementations for skills, memory, telemetry, guardrails, plugins, browser automation, code execution, and RAG — all with builder APIs that integrate directly into the existing `Runner::builder()` chain. Adopting these replaces hand-rolled implementations with battle-tested, maintained code.

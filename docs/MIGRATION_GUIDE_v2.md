@@ -4,7 +4,7 @@ Zavora CLI v2 uses ADK-Rust 2.0 throughout the application. The visible configur
 
 ## Toolchain
 
-Rust 1.94 or newer is required.
+Rust 1.95 or newer is required; `rust-toolchain.toml` pins it.
 
 ```bash
 rustup update stable

@@ -5,6 +5,7 @@ use clap::Parser;
 use serde_json::json;
 
 use zavora_cli::agent_catalog::*;
+use zavora_cli::capabilities::*;
 use zavora_cli::chat::*;
 use zavora_cli::cli::*;
 use zavora_cli::config::*;
@@ -12,16 +13,16 @@ use zavora_cli::doctor::*;
 use zavora_cli::error::*;
 use zavora_cli::eval::*;
 use zavora_cli::guardrail::*;
+use zavora_cli::headless::*;
 use zavora_cli::mcp::*;
 use zavora_cli::onboarding::{persist_onboarding_config, run_onboarding_wizard};
 use zavora_cli::profiles::*;
 use zavora_cli::provider::*;
-use zavora_cli::ralph::run_ralph;
+use zavora_cli::ralph::{RalphRunOptions, run_ralph};
 use zavora_cli::retrieval::*;
 use zavora_cli::runner::*;
 use zavora_cli::server::*;
 use zavora_cli::session::*;
-use zavora_cli::streaming::*;
 use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
@@ -69,37 +70,50 @@ fn init_tracing(log_filter: &str, use_stderr: bool, terminal_ui: bool) -> Result
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let show_sensitive_config = cli.show_sensitive_config;
+    let output_format = cli.output_format;
     if let Err(err) = run_cli(cli).await {
-        eprintln!("{}", format_cli_error(&err, show_sensitive_config));
+        if output_format == OutputFormat::Text {
+            eprintln!("{}", format_cli_error(&err, show_sensitive_config));
+        } else if let Err(render_error) =
+            write_structured_error(output_format, &err, show_sensitive_config)
+        {
+            eprintln!("failed to render structured error: {render_error}");
+        }
         tracing::error!(
             category = %categorize_error(&err).code(),
             error = %render_error_message(&err, show_sensitive_config),
             "command failed"
         );
         adk_telemetry::shutdown_telemetry();
-        std::process::exit(1);
+        std::process::exit(categorize_error(&err).exit_code());
     }
 
     adk_telemetry::shutdown_telemetry();
     Ok(())
 }
 
-async fn run_cli(cli: Cli) -> Result<()> {
+async fn run_cli(mut cli: Cli) -> Result<()> {
     use std::io::IsTerminal;
 
-    let terminal_ui = matches!(cli.command, None | Some(Commands::Chat))
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    if cli.command.is_none() && (cli.output_format != OutputFormat::Text || !stdin_is_terminal) {
+        cli.command = Some(Commands::Ask { prompt: Vec::new() });
+    }
+    let terminal_ui = cli.output_format == OutputFormat::Text
+        && matches!(cli.command, None | Some(Commands::Chat))
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && std::env::var_os("ZAVORA_CLASSIC").is_none()
         && std::env::var("TERM").map_or(true, |term| term != "dumb");
     init_tracing(
         &cli.log_filter,
-        matches!(
-            cli.command,
-            Some(Commands::Mcp {
-                command: McpCommands::Serve
-            })
-        ),
+        cli.output_format != OutputFormat::Text
+            || matches!(
+                cli.command,
+                Some(Commands::Mcp {
+                    command: McpCommands::Serve
+                })
+            ),
         terminal_ui,
     )?;
     let mut profiles = load_profiles(&cli.config_path)?;
@@ -122,9 +136,12 @@ async fn run_cli(cli: Cli) -> Result<()> {
             | Some(Commands::Chat)
             | Some(Commands::Workflow { .. })
             | Some(Commands::ReleasePlan { .. })
+            | Some(Commands::Agents {
+                command: AgentCommands::Run { .. }
+            })
             | Some(Commands::Ralph { .. })
     );
-    if needs_provider {
+    if needs_provider && cli.output_format == OutputFormat::Text && terminal_ui {
         let workspace = std::env::current_dir().unwrap_or_default();
         if zavora_cli::theme::is_first_run(&workspace) && !profiles.profiles.contains_key("default")
         {
@@ -135,16 +152,45 @@ async fn run_cli(cli: Cli) -> Result<()> {
     }
 
     let agent_paths = default_agent_paths();
-    let resolved_agents = load_resolved_agents(&agent_paths)?;
+    let mut resolved_agents = load_resolved_agents(&agent_paths)?;
+    resolved_agents.extend(zavora_cli::plugins::enabled_plugin_agents()?);
     let selected_agent_name = load_agent_selection(&agent_paths.selection_file)?;
-    let cfg = resolve_runtime_config_with_agents(
+    let mut cfg = resolve_runtime_config_with_agents(
         &cli,
         &profiles,
         &resolved_agents,
         selected_agent_name.as_deref(),
     )?;
+    let configured_mcp_names = cfg
+        .mcp_servers
+        .iter()
+        .map(|server| server.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for server in zavora_cli::plugins::enabled_plugin_mcp_servers()? {
+        if !configured_mcp_names.contains(&server.name) {
+            cfg.mcp_servers.push(server);
+        }
+    }
     let command = command_label(cli.command.as_ref().unwrap_or(&Commands::Chat));
     let telemetry = TelemetrySink::new(&cfg, command.clone());
+    let headless_options = HeadlessOptions {
+        output_format: cli.output_format,
+        input_files: cli.input_files.clone(),
+        read_stdin: cli.stdin,
+        no_stdin: cli.no_stdin,
+        always_approve: cli.always_approve,
+    };
+    let automation_command = matches!(
+        cli.command,
+        Some(Commands::Ask { .. })
+            | Some(Commands::Workflow { .. })
+            | Some(Commands::ReleasePlan { .. })
+            | Some(Commands::Agents {
+                command: AgentCommands::Run { .. }
+            })
+            | Some(Commands::Ralph { .. })
+    );
+    zavora_cli::tools::confirming::set_headless_mode(automation_command);
     let started_at = Instant::now();
     telemetry.emit(
         "command.started",
@@ -164,6 +210,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
             | Some(Commands::Chat)
             | Some(Commands::Workflow { .. })
             | Some(Commands::ReleasePlan { .. })
+            | Some(Commands::Agents {
+                command: AgentCommands::Run { .. }
+            })
+            | Some(Commands::Ralph { .. })
             | None
     ) {
         let service = build_retrieval_service(&cfg)?;
@@ -181,6 +231,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
 
     let execution: Result<()> = match cli.command.unwrap_or(Commands::Chat) {
         Commands::Ask { prompt } => {
+            let prompt = load_prompt(&prompt, &headless_options)?;
+            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, "Using model");
             telemetry.emit(
@@ -192,10 +246,11 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 }),
             );
             let runtime_tools = resolve_runtime_tools(&cfg).await;
+            approve_runtime_tools(&runtime_tools, headless_options.always_approve);
             let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let agent = build_single_agent_with_tools(
                 model,
-                &runtime_tools.tools,
+                runtime_tools.tools(),
                 tool_confirmation.policy,
                 Duration::from_secs(cfg.tool_timeout_secs),
                 Some(&cfg),
@@ -203,27 +258,29 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
-            let prompt = prompt.join(" ");
-            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
-            let prompt =
-                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for ask command")?;
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
-            let answer = apply_guardrail(
+            run_headless(
+                &runner,
                 &cfg,
+                &prompt,
+                retrieval,
                 &telemetry,
-                "output",
-                cfg.guardrail_output_mode,
-                &answer,
-            )?;
-            println!("{answer}");
+                &RunMetadata {
+                    command: "ask".to_string(),
+                    session_id: cfg.session_id.clone(),
+                    provider: format!("{resolved_provider:?}").to_ascii_lowercase(),
+                    model: model_name,
+                },
+                headless_options.output_format,
+            )
+            .await?;
             Ok(())
         }
         Commands::Chat => {
             let runtime_tools = resolve_runtime_tools(&cfg).await;
+            approve_runtime_tools(&runtime_tools, headless_options.always_approve);
             let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let retrieval = retrieval_service
                 .as_ref()
@@ -248,6 +305,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
             prompt,
             max_iterations,
         } => {
+            let prompt = load_prompt(&prompt, &headless_options)?;
+            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, workflow = ?mode, "Using workflow");
             telemetry.emit(
@@ -260,12 +321,17 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 }),
             );
             let runtime_tools = resolve_runtime_tools(&cfg).await;
+            report_degraded_surface(
+                &runtime_tools,
+                &format!("workflow.{}", workflow_mode_label(mode)),
+            );
+            approve_runtime_tools(&runtime_tools, headless_options.always_approve);
             let tool_confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
             let agent = build_workflow_agent(
                 mode,
                 model,
                 max_iterations,
-                &runtime_tools.tools,
+                runtime_tools.tools(),
                 tool_confirmation.policy,
                 Duration::from_secs(cfg.tool_timeout_secs),
                 Some(&cfg),
@@ -273,26 +339,31 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let runner =
                 build_runner_with_run_config(agent, &cfg, Some(tool_confirmation.run_config))
                     .await?;
-            let prompt = prompt.join(" ");
-            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
-            let prompt =
-                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for workflow command")?;
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
-            let answer = apply_guardrail(
+            run_headless(
+                &runner,
                 &cfg,
+                &prompt,
+                retrieval,
                 &telemetry,
-                "output",
-                cfg.guardrail_output_mode,
-                &answer,
-            )?;
-            println!("{answer}");
+                &RunMetadata {
+                    command: format!("workflow.{}", workflow_mode_label(mode)),
+                    session_id: cfg.session_id.clone(),
+                    provider: format!("{resolved_provider:?}").to_ascii_lowercase(),
+                    model: model_name,
+                },
+                headless_options.output_format,
+            )
+            .await?;
             Ok(())
         }
         Commands::ReleasePlan { goal, releases } => {
+            let prompt = load_prompt(&goal, &headless_options)?;
+            enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let (model, resolved_provider, model_name) = resolve_model(&cfg)?;
             tracing::info!(provider = ?resolved_provider, model = %model_name, releases, "Generating release plan");
             telemetry.emit(
@@ -303,24 +374,26 @@ async fn run_cli(cli: Cli) -> Result<()> {
                     "path": "release-plan"
                 }),
             );
-            let agent = build_release_planning_agent(model, releases)?;
+            let agent = build_release_planning_agent(model, releases, Some(&cfg))?;
             let runner = build_runner(agent, &cfg).await?;
-            let prompt = goal.join(" ");
-            let prompt =
-                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             let retrieval = retrieval_service
                 .as_deref()
                 .context("retrieval service should be initialized for release-plan command")?;
-            let answer =
-                run_prompt_with_retrieval(&runner, &cfg, &prompt, retrieval, &telemetry).await?;
-            let answer = apply_guardrail(
+            run_headless(
+                &runner,
                 &cfg,
+                &prompt,
+                retrieval,
                 &telemetry,
-                "output",
-                cfg.guardrail_output_mode,
-                &answer,
-            )?;
-            println!("{answer}");
+                &RunMetadata {
+                    command: "release-plan".to_string(),
+                    session_id: cfg.session_id.clone(),
+                    provider: format!("{resolved_provider:?}").to_ascii_lowercase(),
+                    model: model_name,
+                },
+                headless_options.output_format,
+            )
+            .await?;
             Ok(())
         }
         Commands::Doctor => {
@@ -354,8 +427,123 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 run_agents_select(&resolved_agents, &agent_paths, name)?;
                 Ok(())
             }
+            AgentCommands::Run { name, task } => {
+                let selected = resolved_agents.get(&name).ok_or_else(|| {
+                    anyhow::anyhow!("agent '{}' not found. Run 'zavora-cli agents list'.", name)
+                })?;
+                let mut agent_cfg = cfg.clone();
+                agent_cfg.agent_name = selected.name.clone();
+                agent_cfg.agent_source = selected.source;
+                agent_cfg.agent_description = selected.config.description.clone();
+                agent_cfg.agent_instruction = selected.config.instruction.clone();
+                agent_cfg.agent_resource_paths = selected.config.resource_paths.clone();
+                agent_cfg.agent_allow_tools = selected.config.allow_tools.clone();
+                agent_cfg.agent_deny_tools = selected.config.deny_tools.clone();
+                if let Some(provider) = selected.config.provider {
+                    agent_cfg.provider = provider;
+                    agent_cfg.worker_provider = provider;
+                }
+                if let Some(model) = selected.config.model.clone() {
+                    agent_cfg.model = Some(model.clone());
+                    agent_cfg.worker_model = model;
+                }
+                if let Some(mode) = selected.config.tool_confirmation_mode {
+                    agent_cfg.tool_confirmation_mode = mode;
+                }
+
+                let prompt = load_prompt(&task, &headless_options)?;
+                enforce_prompt_limit(&prompt, agent_cfg.max_prompt_chars)?;
+                let prompt = apply_guardrail(
+                    &agent_cfg,
+                    &telemetry,
+                    "input",
+                    agent_cfg.guardrail_input_mode,
+                    &prompt,
+                )?;
+                let (model, resolved_provider, model_name) = resolve_model(&agent_cfg)?;
+                let runtime_tools = resolve_runtime_tools(&agent_cfg).await;
+                approve_runtime_tools(&runtime_tools, headless_options.always_approve);
+                let confirmation = resolve_tool_confirmation_settings(&agent_cfg, &runtime_tools);
+                let agent = build_single_agent_with_tools(
+                    model,
+                    runtime_tools.tools(),
+                    confirmation.policy,
+                    Duration::from_secs(agent_cfg.tool_timeout_secs),
+                    Some(&agent_cfg),
+                )?;
+                let runner =
+                    build_runner_with_run_config(agent, &agent_cfg, Some(confirmation.run_config))
+                        .await?;
+                let retrieval = retrieval_service
+                    .as_deref()
+                    .context("retrieval service should be initialized for agents run")?;
+                run_headless(
+                    &runner,
+                    &agent_cfg,
+                    &prompt,
+                    retrieval,
+                    &telemetry,
+                    &RunMetadata {
+                        command: format!("agents.run.{name}"),
+                        session_id: agent_cfg.session_id.clone(),
+                        provider: format!("{resolved_provider:?}").to_ascii_lowercase(),
+                        model: model_name,
+                    },
+                    headless_options.output_format,
+                )
+                .await?;
+                Ok(())
+            }
         },
+        Commands::Capabilities { command } => {
+            let configured_servers = cfg
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect::<Vec<_>>();
+            match command {
+                CapabilityCommands::List {
+                    category,
+                    enabled,
+                    json,
+                } => run_capabilities_list(category, enabled, json, &configured_servers),
+                CapabilityCommands::Search { query, json } => {
+                    run_capabilities_search(&query.join(" "), json, &configured_servers)
+                }
+                CapabilityCommands::Info { id, json } => {
+                    run_capabilities_info(&id, json, &configured_servers)
+                }
+                CapabilityCommands::Enable { id } => run_capabilities_set_enabled(&id, true),
+                CapabilityCommands::Disable { id } => run_capabilities_set_enabled(&id, false),
+            }
+        }
         Commands::Mcp { command } => match command {
+            McpCommands::Catalog { query, json } => {
+                zavora_cli::mcp_catalog::run_catalog(&query.join(" "), json)
+            }
+            McpCommands::Add { server } => zavora_cli::mcp_catalog::run_add(
+                std::path::Path::new(&cfg.config_path),
+                &cfg.profile,
+                &server,
+            ),
+            McpCommands::Remove { server } => zavora_cli::mcp_catalog::run_remove(
+                std::path::Path::new(&cfg.config_path),
+                &cfg.profile,
+                &server,
+            ),
+            McpCommands::Enable { server } => zavora_cli::mcp_catalog::run_set_enabled(
+                std::path::Path::new(&cfg.config_path),
+                &cfg.profile,
+                &server,
+                true,
+            ),
+            McpCommands::Disable { server } => zavora_cli::mcp_catalog::run_set_enabled(
+                std::path::Path::new(&cfg.config_path),
+                &cfg.profile,
+                &server,
+                false,
+            ),
+            McpCommands::Auth { server } => zavora_cli::mcp::run_mcp_auth(&cfg, &server).await,
             McpCommands::List => {
                 run_mcp_list(&cfg).await?;
                 Ok(())
@@ -364,6 +552,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 run_mcp_discover(&cfg, server).await?;
                 Ok(())
             }
+            McpCommands::Info { server } => run_mcp_info(&cfg, &server),
+            McpCommands::Doctor { server, json } => run_mcp_doctor(&cfg, server, json).await,
+            McpCommands::Resources { server, uri, json } => {
+                run_mcp_resources(&cfg, &server, uri.as_deref(), json).await
+            }
+            McpCommands::Prompts {
+                server,
+                name,
+                arguments,
+                json,
+            } => run_mcp_prompts(&cfg, &server, name.as_deref(), arguments.as_deref(), json).await,
+            McpCommands::Protocol { json } => run_mcp_protocol(json),
             McpCommands::Serve => {
                 zavora_cli::mcp_server::run_mcp_server().await?;
                 Ok(())
@@ -398,10 +598,126 @@ async fn run_cli(cli: Cli) -> Result<()> {
             }
         },
         Commands::Skills { command } => match command {
-            SkillCommands::List => {
-                run_skills_list()?;
+            SkillCommands::Search { query, json } => run_skills_search(&query.join(" "), json),
+            SkillCommands::List { json } => run_skills_list(json),
+            SkillCommands::Info { name, json } => run_skill_info(&name, json),
+            SkillCommands::Validate { path, json } => run_skill_validate(&path, json),
+            SkillCommands::Install {
+                source,
+                scope,
+                link,
+            } => {
+                let skill = zavora_cli::skills::install_skill(&source, scope, link)?;
+                println!(
+                    "{} skill '{}' from {} scope: {}",
+                    if link { "Linked" } else { "Installed" },
+                    skill.name,
+                    scope,
+                    skill.path.display()
+                );
                 Ok(())
             }
+            SkillCommands::Link { source, scope } => {
+                let skill = zavora_cli::skills::install_skill(&source, scope, true)?;
+                println!(
+                    "Linked skill '{}' in {} scope: {}",
+                    skill.name,
+                    scope,
+                    skill.path.display()
+                );
+                Ok(())
+            }
+            SkillCommands::Update { name, scope } => {
+                for updated in zavora_cli::skills::update_skills(name.as_deref(), scope)? {
+                    println!("Updated {updated}");
+                }
+                Ok(())
+            }
+            SkillCommands::Enable { name, scope } => {
+                zavora_cli::skills::set_skill_enabled(&name, scope, true)?;
+                println!("Enabled skill '{name}' in {scope} scope");
+                Ok(())
+            }
+            SkillCommands::Disable { name, scope } => {
+                zavora_cli::skills::set_skill_enabled(&name, scope, false)?;
+                println!("Disabled skill '{name}' in {scope} scope");
+                Ok(())
+            }
+            SkillCommands::Uninstall { name, scope } => {
+                let removed = zavora_cli::skills::uninstall_skill(&name, scope)?;
+                println!(
+                    "{} skill '{name}' from {scope} scope",
+                    if removed { "Uninstalled" } else { "Unlinked" }
+                );
+                Ok(())
+            }
+        },
+        Commands::Plugins { command } => match command {
+            PluginCommands::List { json } => run_plugins_list(json),
+            PluginCommands::Info { name, json } => run_plugin_info(&name, json),
+            PluginCommands::Validate { path, json } => run_plugin_validate(&path, json),
+            PluginCommands::Install {
+                source,
+                scope,
+                link,
+            } => {
+                let plugin = zavora_cli::plugins::install_plugin(&source, scope, link)?;
+                println!(
+                    "{} {} plugin '{}' in {} scope: {}",
+                    if link { "Linked" } else { "Installed" },
+                    plugin.ecosystem,
+                    plugin.name,
+                    scope,
+                    plugin.root.display()
+                );
+                for warning in plugin.warnings {
+                    println!("warning: {warning}");
+                }
+                Ok(())
+            }
+            PluginCommands::Link { source, scope } => {
+                let plugin = zavora_cli::plugins::install_plugin(&source, scope, true)?;
+                println!(
+                    "Linked {} plugin '{}' in {} scope: {}",
+                    plugin.ecosystem,
+                    plugin.name,
+                    scope,
+                    plugin.root.display()
+                );
+                for warning in plugin.warnings {
+                    println!("warning: {warning}");
+                }
+                Ok(())
+            }
+            PluginCommands::Update { name, scope } => {
+                for updated in zavora_cli::plugins::update_plugins(name.as_deref(), scope)? {
+                    println!("Updated {updated}");
+                }
+                Ok(())
+            }
+            PluginCommands::Enable { name, scope } => {
+                zavora_cli::plugins::set_plugin_enabled(&name, scope, true)?;
+                println!("Enabled plugin '{name}' in {scope} scope");
+                Ok(())
+            }
+            PluginCommands::Disable { name, scope } => {
+                zavora_cli::plugins::set_plugin_enabled(&name, scope, false)?;
+                println!("Disabled plugin '{name}' in {scope} scope");
+                Ok(())
+            }
+            PluginCommands::Uninstall { name, scope } => {
+                let removed = zavora_cli::plugins::uninstall_plugin(&name, scope)?;
+                println!(
+                    "{} plugin '{name}' from {scope} scope",
+                    if removed { "Uninstalled" } else { "Unlinked" }
+                );
+                Ok(())
+            }
+            PluginCommands::Doctor { json } => run_plugin_doctor(json),
+        },
+        Commands::Instructions { command } => match command {
+            InstructionCommands::List { json } => run_instructions(false, json),
+            InstructionCommands::Show { json } => run_instructions(true, json),
         },
         #[cfg(feature = "rag")]
         Commands::Rag { command } => match command {
@@ -443,10 +759,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
             resume,
             output_dir,
         } => {
-            let prompt = prompt.join(" ");
-            if !resume {
+            let prompt = match load_prompt(&prompt, &headless_options) {
+                Ok(prompt) => prompt,
+                Err(error) if resume && error.to_string().contains("no prompt input") => {
+                    String::new()
+                }
+                Err(error) => return Err(error),
+            };
+            if !prompt.is_empty() {
                 enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
             }
+            let prompt =
+                apply_guardrail(&cfg, &telemetry, "input", cfg.guardrail_input_mode, &prompt)?;
             telemetry.emit(
                 "model.resolved",
                 json!({
@@ -455,7 +779,23 @@ async fn run_cli(cli: Cli) -> Result<()> {
                     "path": "ralph"
                 }),
             );
-            run_ralph(&cfg, prompt, phase, resume, output_dir, &telemetry).await?;
+            let retrieval = retrieval_service
+                .as_deref()
+                .context("retrieval service should be initialized for ralph")?;
+            run_ralph(
+                &cfg,
+                prompt,
+                RalphRunOptions {
+                    phase,
+                    resume,
+                    output_dir,
+                    output_format: headless_options.output_format,
+                    always_approve: headless_options.always_approve,
+                },
+                &telemetry,
+                retrieval,
+            )
+            .await?;
             Ok(())
         }
         Commands::Setup => {
@@ -517,21 +857,221 @@ async fn run_cli(cli: Cli) -> Result<()> {
         ),
     }
 
+    zavora_cli::tools::confirming::set_headless_mode(false);
+
     execution
 }
 
-fn run_skills_list() -> Result<()> {
-    let root = std::path::Path::new(".");
-    let index = adk_skill::load_skill_index(root)
-        .map_err(|e| anyhow::anyhow!("skill discovery failed: {e}"))?;
+/// Announce a degraded tool surface before a long run begins.
+///
+/// Requirement 13.5: a workflow or Ralph run that starts without tools it was
+/// configured to have must say so. Reporting after the fact is too late — the
+/// model has already planned around the tools it could see.
+fn report_degraded_surface(runtime_tools: &ResolvedRuntimeTools, command: &str) {
+    let failures = runtime_tools.connect_failure_report();
+    if failures.is_empty() {
+        return;
+    }
+    eprintln!(
+        "warning: {command} is starting with {} unreachable MCP server(s); its tools are unavailable for this run:",
+        failures.len()
+    );
+    for failure in failures {
+        eprintln!("  - {failure}");
+    }
+}
+
+fn approve_runtime_tools(runtime_tools: &ResolvedRuntimeTools, always_approve: bool) {
+    if always_approve {
+        for tool in runtime_tools.tools() {
+            zavora_cli::tools::confirming::trust_tool(tool.name());
+        }
+    }
+}
+
+fn run_skills_list(json_output: bool) -> Result<()> {
+    let index = zavora_cli::skills::load_workspace_skills()?;
     let skills = index.skills();
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&index.summaries())?);
+        return Ok(());
+    }
     if skills.is_empty() {
-        println!("No skills found. Add .md files to .skills/ or .claude/skills/");
+        println!(
+            "No skills found. Add <name>/SKILL.md under .agents, .zavora, .claude, .gemini, .grok, or .opencode skill roots."
+        );
         return Ok(());
     }
     println!("{} skill(s) discovered:\n", skills.len());
     for s in skills {
-        println!("  {} — {}", s.name, s.description);
+        println!("  {} — {}\n    {}", s.name, s.description, s.path.display());
+    }
+    Ok(())
+}
+
+fn run_skills_search(query: &str, json_output: bool) -> Result<()> {
+    let entries = zavora_cli::skills::search_registry(query)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if entries.is_empty() {
+        println!("No registry skills matched '{query}'.");
+    } else {
+        println!("{} registry skill(s):\n", entries.len());
+        for entry in entries {
+            println!(
+                "  {} — {}\n    {}",
+                entry.name, entry.category, entry.repository
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_skill_info(name: &str, json_output: bool) -> Result<()> {
+    let index = zavora_cli::skills::load_workspace_skills()?;
+    let skill = index
+        .find_by_name(name)
+        .with_context(|| format!("skill '{name}' was not found"))?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(skill)?);
+    } else {
+        println!(
+            "{}\n  {}\n  source: {}\n  version: {}\n  explicit trigger: {}",
+            skill.name,
+            skill.description,
+            skill.path.display(),
+            skill.version.as_deref().unwrap_or("unspecified"),
+            skill.trigger
+        );
+    }
+    Ok(())
+}
+
+fn run_skill_validate(path: &std::path::Path, json_output: bool) -> Result<()> {
+    let skill = zavora_cli::skills::validate_skill_path(path)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&skill)?);
+    } else {
+        println!("Valid skill '{}' at {}", skill.name, skill.path.display());
+    }
+    Ok(())
+}
+
+fn find_plugin(name: &str) -> Result<zavora_cli::plugins::PluginDescriptor> {
+    let matches = zavora_cli::plugins::discover_plugins()?
+        .into_iter()
+        .filter(|plugin| plugin.name == name)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Err(anyhow::anyhow!("plugin '{name}' was not found")),
+        [plugin] => Ok(plugin.clone()),
+        _ => Err(anyhow::anyhow!(
+            "plugin name '{name}' is ambiguous; inspect `plugins list --json` and use a unique installation"
+        )),
+    }
+}
+
+fn run_plugins_list(json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&zavora_cli::plugins::discover_plugins()?)?
+        );
+    } else {
+        println!("{}", zavora_cli::plugins::format_plugins_markdown()?);
+    }
+    Ok(())
+}
+
+fn run_plugin_info(name: &str, json_output: bool) -> Result<()> {
+    let plugin = find_plugin(name)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&plugin)?);
+    } else {
+        println!(
+            "{} ({})\n  ecosystem: {}\n  version: {}\n  state: {}{}\n  root: {}\n  skills: {}\n  MCP sources: {}\n  agents: {}\n  hooks: {}",
+            plugin.display_name,
+            plugin.name,
+            plugin.ecosystem,
+            plugin.version.as_deref().unwrap_or("unspecified"),
+            if plugin.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if plugin.linked { ", linked" } else { "" },
+            plugin.root.display(),
+            plugin.components.skill_roots.len(),
+            plugin.components.mcp_files.len() + usize::from(plugin.components.inline_mcp.is_some()),
+            plugin.components.agent_roots.len(),
+            plugin.components.hook_files.len(),
+        );
+        for warning in plugin.warnings {
+            println!("  warning: {warning}");
+        }
+    }
+    Ok(())
+}
+
+fn run_plugin_validate(path: &std::path::Path, json_output: bool) -> Result<()> {
+    let plugin = zavora_cli::plugins::inspect_plugin_root(path)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&plugin)?);
+    } else {
+        println!(
+            "Valid {} plugin '{}' at {}",
+            plugin.ecosystem,
+            plugin.name,
+            plugin.root.display()
+        );
+        for warning in plugin.warnings {
+            println!("warning: {warning}");
+        }
+    }
+    Ok(())
+}
+
+fn run_plugin_doctor(json_output: bool) -> Result<()> {
+    let report = zavora_cli::plugins::doctor_report()?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Plugin runtime: {}\nDiscovered: {} ({} enabled)",
+            report["status"].as_str().unwrap_or("unknown"),
+            report["plugin_count"],
+            report["enabled_count"]
+        );
+        if let Some(warnings) = report["warnings"].as_array() {
+            for warning in warnings {
+                println!(
+                    "warning [{}]: {}",
+                    warning["plugin"].as_str().unwrap_or("unknown"),
+                    warning["warning"].as_str().unwrap_or("unknown warning")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_instructions(show_content: bool, json_output: bool) -> Result<()> {
+    let resolved = zavora_cli::skills::resolve_workspace_instructions()?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "active": resolved.sources,
+                "deferred": resolved.deferred_sources,
+                "warnings": resolved.warnings,
+                "content": show_content.then_some(resolved.content),
+            }))?
+        );
+    } else {
+        println!(
+            "{}",
+            zavora_cli::skills::format_instructions_markdown(show_content)
+        );
     }
     Ok(())
 }

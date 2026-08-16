@@ -71,6 +71,12 @@ pub const COMMAND_PALETTE: &[(&str, &str)] = &[
     ("models", "show model roles and shared quota pools"),
     ("tools", "show active tools and confirmation policy"),
     ("mcp", "show MCP server and tool summary"),
+    ("mcps", "show configured MCP servers"),
+    ("capabilities", "browse bundled work capability packs"),
+    ("skills", "browse invocable workspace skills"),
+    ("agents", "browse specialist sub-agents"),
+    ("inspect", "inspect the resolved runtime"),
+    ("doctor", "check MCP configuration readiness"),
     ("usage", "show context usage and token breakdown"),
     ("compact", "summarize conversation to free context space"),
     (

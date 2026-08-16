@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, transport::stdio};
 use serde_json::Value;
@@ -70,7 +70,7 @@ impl ServerHandler for ZavoraMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let tool_name = request.name.to_string();
         let args: Value = request
             .arguments
@@ -96,11 +96,13 @@ impl ServerHandler for ZavoraMcpServer {
                     } else {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     };
-                    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+                    // rmcp 3 lets call_tool answer with a completed result, a
+                    // request for client input, or a task handle. These tools
+                    // always run to completion here, so the result converts
+                    // straight into the completed variant.
+                    Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
                 }
-                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                    e.to_string(),
-                )])),
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e.to_string())]).into()),
             }
         }
     }
