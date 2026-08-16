@@ -2,7 +2,8 @@
 
 ## 1. Install and configure
 
-Zavora CLI v2 requires Rust 1.94+ when installed from source.
+Zavora CLI v2 requires Rust 1.95+ when installed from source. The pinned
+toolchain is declared in `rust-toolchain.toml`.
 
 ```bash
 cargo install zavora-cli
