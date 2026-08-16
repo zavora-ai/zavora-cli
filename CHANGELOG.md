@@ -4,10 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
-## [2.0.0] — 2026-08-15
+## [2.0.0] — 2026-08-16
 
 ### Added
 
+- Capability enablement the agent can drive: `capability_status` reports, per capability, its risk, specialist agent, and whether each MCP server is installed and configured; `capability_enable` installs and configures behind an approval that names the exact install commands. The model supplies only a capability id validated against the built-in set, every install command comes from the curated catalogue, and installs run as an argument vector rather than through a shell.
+- Complete MCP server catalogue: every server a capability names now has an entry, so each capability can actually be provisioned. Four capabilities previously named only servers that did not exist.
+- Mid-session capability activation: because a sealed tool surface is one-shot, enabling marks it stale and the workspace re-resolves and rebuilds between turns, reporting how many servers answered rather than assuming.
+- Terminal-aware keyboard action registry: every chord is declared once with its description, category, and footer priority, and bindings adapt to what the host terminal actually delivers. Footer hints and `/keys` are generated from the same table the key handler dispatches through, so neither can name a chord that is unbound or undeliverable.
+- Response-level and line-level transcript navigation, a configurable mouse-wheel step (`/mouse speed`), and `/keys`.
 - Retained full-screen Ratatui workspace with responsive conversation and activity layouts, a multiline Unicode-aware composer, BUILD/PLAN mode, keyboard overlay, in-place tool approvals, and automatic bottom-following output.
 - Terminal-native Markdown presentation with headings, emphasis, inline code, fenced code surfaces, and lightweight Rust syntax treatment.
 - Tool activity correlation by provider call ID so parallel calls with the same tool name remain distinct.
@@ -36,6 +41,15 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - The workspace transcript and prompt history are bounded, with a single visible marker recording any elision, and each message renders once per revision rather than once per frame.
 
 ### Fixed
+
+- Scroll position is anchored to the conversation rather than to the newest line. Counting back from the end meant a view scrolled away from the tail drifted at exactly the rate output streamed in, carrying earlier output out of reach.
+- The visible transcript window is sliced in `usize` space instead of relying on `Paragraph::scroll`, whose `u16` offset made the top of a session past 65535 rendered rows unreachable.
+- The scroll indicator moved to the bottom border: as a top-edge title it consumed a content row whenever the view detached, so a one-line scroll moved the view two lines.
+- The mouse wheel is claimed by the workspace. Left to the terminal in the alternate screen it scrolls the terminal's own buffer, displacing the drawn frame so subsequent diffed redraws land at the wrong row and interleave old and new text.
+- `Ctrl+L` repaints the screen; clearing the conversation now takes a second press. The conventional reflex for a corrupted screen previously destroyed the transcript.
+- The terminal is handed back on a panic and on a signal, not only on exit. A killed process previously left mouse reporting enabled, so every pointer movement printed escape sequences into the shell.
+- The welcome screen starts at the top of the transcript pane instead of floating in its middle.
+- Specialist agents are called as `AgentTool`s rather than reached through `transfer_to_agent`, which handed over the turn and left an unpaired function call that the OpenAI Responses API rejects.
 
 - Input and output guardrails remain active in retained TUI sessions, including buffered output for block and redact modes.
 - Raw mode and the alternate screen are restored when terminal initialization fails.
