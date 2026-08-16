@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use adk_rust::prelude::*;
@@ -62,6 +63,13 @@ fn display_result(tool_name: &str, result: &Value) {
 /// Set of tool names trusted for the session (skip future prompts).
 static TRUSTED_TOOLS: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+static SESSION_RULES: std::sync::LazyLock<Mutex<crate::tool_policy::PermissionRules>> =
+    std::sync::LazyLock::new(|| Mutex::new(crate::tool_policy::PermissionRules::default()));
+static HEADLESS_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_headless_mode(enabled: bool) {
+    HEADLESS_MODE.store(enabled, Ordering::SeqCst);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalDecision {
@@ -97,6 +105,77 @@ fn tui_active() -> bool {
 /// Trust a tool for the remainder of the session.
 pub fn trust_tool(name: &str) {
     TRUSTED_TOOLS.lock().unwrap().insert(name.to_string());
+    SESSION_RULES
+        .lock()
+        .unwrap()
+        .always_allow
+        .push(crate::tool_policy::ToolPattern(name.to_string()));
+}
+
+/// Deny a tool or tool-content pattern for the remainder of the session.
+pub fn deny_tool(pattern: &str) {
+    SESSION_RULES
+        .lock()
+        .unwrap()
+        .always_deny
+        .push(crate::tool_policy::ToolPattern(pattern.to_string()));
+}
+
+/// Arguments a model must never be able to set, because they relax a safety
+/// decision this wrapper is responsible for making.
+///
+/// `approved` exists so the wrapper can record a human's yes; `allow_dangerous`
+/// exists so a human can override a denied pattern. Both are legitimate — from
+/// the enforcement layer, not from the model.
+pub const MODEL_FORBIDDEN_SAFETY_ARGS: &[&str] = &["approved", "allow_dangerous"];
+
+/// Lifecycle hooks for the pre/post-tool stage of the enforcement pipeline.
+///
+/// A process-global, matching how trust rules, the approval bridge, and headless
+/// mode are already installed here. The executor is set once when the tool
+/// surface is sealed, so every wrapped tool sees the same hooks.
+static HOOK_EXECUTOR: Mutex<Option<Arc<crate::hooks::HookExecutor>>> = Mutex::new(None);
+
+/// Install the hook executor for this process. Called during tool-surface seal.
+pub fn install_hook_executor(executor: Arc<crate::hooks::HookExecutor>) {
+    *HOOK_EXECUTOR.lock().unwrap_or_else(|err| err.into_inner()) = Some(executor);
+}
+
+/// Remove any installed hook executor. Used by tests and by runtime rebuilds.
+pub fn clear_hook_executor() {
+    *HOOK_EXECUTOR.lock().unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+fn hook_executor() -> Option<Arc<crate::hooks::HookExecutor>> {
+    HOOK_EXECUTOR
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// Remove safety-relaxing keys from a model-supplied argument object.
+///
+/// Requirement 7.6; Correctness Property 7: the enforcement decision for any
+/// argument set must equal the decision for that set with these keys removed.
+pub fn scrub_model_supplied_safety_args(mut args: Value) -> Value {
+    if let Some(object) = args.as_object_mut() {
+        for key in MODEL_FORBIDDEN_SAFETY_ARGS {
+            if object.remove(*key).is_some() {
+                tracing::debug!(
+                    argument = key,
+                    "stripped model-supplied safety argument before policy evaluation"
+                );
+            }
+        }
+    }
+    args
+}
+
+fn session_permission_decision(
+    tool_name: &str,
+    content: Option<&str>,
+) -> crate::tool_policy::PermissionDecision {
+    SESSION_RULES.lock().unwrap().evaluate(tool_name, content)
 }
 
 /// Check if agent mode is active (all core tools trusted).
@@ -129,12 +208,62 @@ impl ConfirmingTool {
     }
 
     /// Execute inner tool and display the result.
+    ///
+    /// This is the single place a wrapped tool actually runs, so it is where the
+    /// pre/post-tool hook stage belongs: after the approval decision, around the
+    /// call. A `pre_tool` hook exiting with `HOOK_EXIT_BLOCK` stops the call.
+    /// Requirement 7.8.
     async fn execute_and_display(
         &self,
         ctx: Arc<dyn ToolContext>,
         args: Value,
     ) -> adk_rust::Result<Value> {
-        let result = self.inner.execute(ctx, args).await?;
+        let executor = hook_executor().filter(|executor| !executor.is_empty());
+
+        if let Some(executor) = executor.as_ref() {
+            let tool_ctx = crate::hooks::HookToolContext {
+                tool_name: self.inner.name().to_string(),
+                tool_input: args.clone(),
+                tool_response: None,
+            };
+            let results = executor
+                .run(crate::hooks::HookPoint::PreTool, None, Some(&tool_ctx))
+                .await;
+            if let Some(block) = results.iter().find(|result| result.is_block()) {
+                tracing::info!(
+                    tool = self.inner.name(),
+                    hook = %block.command,
+                    "pre_tool hook blocked the call"
+                );
+                return Ok(serde_json::json!({
+                    "error": format!(
+                        "Tool '{}' blocked by pre_tool hook: {}",
+                        self.inner.name(),
+                        if block.output.trim().is_empty() {
+                            block.command.as_str()
+                        } else {
+                            block.output.trim()
+                        }
+                    )
+                }));
+            }
+        }
+
+        let result = self.inner.execute(ctx, args.clone()).await?;
+
+        if let Some(executor) = executor.as_ref() {
+            let tool_ctx = crate::hooks::HookToolContext {
+                tool_name: self.inner.name().to_string(),
+                tool_input: args,
+                tool_response: Some(result.clone()),
+            };
+            // post_tool cannot veto a call that already ran; results are
+            // observational.
+            let _ = executor
+                .run(crate::hooks::HookPoint::PostTool, None, Some(&tool_ctx))
+                .await;
+        }
+
         if !tui_active() {
             display_result(self.inner.name(), &result);
         }
@@ -257,8 +386,44 @@ impl Tool for ConfirmingTool {
         self.inner.response_schema()
     }
 
+    /// Forwarded so wrapping does not erase the tool's declared capability.
+    ///
+    /// The trait defaults are both `false`, so before this existed every
+    /// wrapped tool reported itself read-write and concurrency-unsafe. That
+    /// silently disabled ADK's parallel tool execution for the entire runtime
+    /// and forced policy to consult a name list instead. Requirement 7.3.
+    fn is_read_only(&self) -> bool {
+        self.inner.is_read_only()
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        self.inner.is_concurrency_safe()
+    }
+
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> adk_rust::Result<Value> {
-        let trusted = TRUSTED_TOOLS.lock().unwrap().contains(self.inner.name());
+        // Scrub model-supplied safety arguments before anything reads them.
+        //
+        // `execute_bash` accepts `approved` and `allow_dangerous` so that this
+        // wrapper can grant approval after a human says yes. Nothing stops a
+        // model from setting them itself, which would let it overrule a Deny
+        // verdict the enforcement layer already reached. Stripping them here
+        // means the decision is a function of the request alone.
+        // Requirement 7.6; Correctness Property 7.
+        let args = scrub_model_supplied_safety_args(args);
+
+        let content = match self.inner.name() {
+            "execute_bash" => args.get("command").and_then(Value::as_str),
+            "fs_read" | "fs_write" | "file_edit" => args.get("path").and_then(Value::as_str),
+            _ => None,
+        };
+        let session_decision = session_permission_decision(self.inner.name(), content);
+        if session_decision == crate::tool_policy::PermissionDecision::Deny {
+            return Ok(serde_json::json!({
+                "error": format!("Tool '{}' denied by session policy", self.inner.name())
+            }));
+        }
+        let trusted = TRUSTED_TOOLS.lock().unwrap().contains(self.inner.name())
+            || session_decision == crate::tool_policy::PermissionDecision::Allow;
 
         theme::pause_spinner();
 
@@ -312,6 +477,17 @@ impl Tool for ConfirmingTool {
                 obj.insert("approved".to_string(), Value::Bool(true));
             }
             return self.execute_and_display(ctx, approved_args).await;
+        }
+
+        if HEADLESS_MODE.load(Ordering::SeqCst) {
+            theme::resume_spinner();
+            return Ok(serde_json::json!({
+                "error": format!(
+                    "Tool '{}' requires approval in headless mode; use --approve-tool {} or --always-approve",
+                    self.inner.name(),
+                    self.inner.name()
+                )
+            }));
         }
 
         let approval_sender = APPROVAL_SENDER.lock().unwrap().clone();
@@ -401,5 +577,25 @@ impl Tool for ConfirmingTool {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_deny_rules_override_allow_rules_and_match_content() {
+        trust_tool("test_shell:git *");
+        deny_tool("test_shell:git push*");
+
+        assert_eq!(
+            session_permission_decision("test_shell", Some("git status")),
+            crate::tool_policy::PermissionDecision::Allow
+        );
+        assert_eq!(
+            session_permission_decision("test_shell", Some("git push origin main")),
+            crate::tool_policy::PermissionDecision::Deny
+        );
     }
 }

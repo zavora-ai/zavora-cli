@@ -15,6 +15,7 @@ pub mod lsp;
 pub mod rag;
 #[cfg(feature = "sandbox")]
 pub mod sandbox;
+pub mod secret_policy;
 pub mod tool_search;
 #[cfg(feature = "web-fetch")]
 pub mod web_fetch;
@@ -22,6 +23,8 @@ pub mod web_fetch;
 use std::sync::Arc;
 
 use adk_rust::prelude::*;
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::todos;
@@ -35,6 +38,117 @@ pub const GLOB_TOOL_NAME: &str = "glob";
 pub const GREP_TOOL_NAME: &str = "grep";
 pub const TODO_TOOL_NAME: &str = "todo_list";
 
+#[derive(JsonSchema, Serialize)]
+struct EmptyArgs {}
+
+#[derive(JsonSchema, Serialize)]
+struct ReleaseTemplateArgs {
+    /// Number of staged releases to include in the checklist.
+    releases: Option<u64>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct FsReadArgs {
+    /// Workspace-relative file or directory path.
+    path: String,
+    /// First line to return, using one-based indexing.
+    start_line: Option<usize>,
+    /// Maximum number of lines to return.
+    max_lines: Option<usize>,
+    /// Maximum number of bytes to return.
+    max_bytes: Option<usize>,
+    /// Maximum number of directory entries to return.
+    max_entries: Option<usize>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct FsWritePatchArgs {
+    /// Exact text to replace.
+    find: String,
+    /// Replacement text.
+    replace: String,
+    /// Replace every match instead of requiring one unique match.
+    replace_all: Option<bool>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct FsWriteArgs {
+    /// Workspace-relative file path.
+    path: String,
+    /// Write mode: create, overwrite, append, or patch.
+    mode: Option<String>,
+    /// File content for create, overwrite, or append.
+    content: Option<String>,
+    /// Text replacement for patch mode.
+    patch: Option<FsWritePatchArgs>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct FileEditArgs {
+    /// Workspace-relative path of the existing file to edit.
+    file_path: String,
+    /// Exact text currently present in the file.
+    old_string: String,
+    /// Replacement text.
+    new_string: String,
+    /// Replace every match instead of requiring one unique match.
+    replace_all: Option<bool>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct GlobArgs {
+    /// Glob pattern such as **/*.rs or src/**/*.{ts,tsx}.
+    pattern: String,
+    /// Optional workspace-relative directory to search.
+    path: Option<String>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct GrepArgs {
+    /// Regular expression to search for.
+    pattern: String,
+    /// Optional workspace-relative path to search.
+    path: Option<String>,
+    /// Optional file glob such as *.rs.
+    glob: Option<String>,
+    /// Result shape: content, files_with_matches, or count.
+    output_mode: Option<String>,
+    /// Search case-insensitively.
+    #[serde(rename = "-i")]
+    case_insensitive: Option<bool>,
+    /// Lines of context before each match.
+    #[serde(rename = "-B")]
+    before_context: Option<usize>,
+    /// Lines of context after each match.
+    #[serde(rename = "-A")]
+    after_context: Option<usize>,
+    /// Lines of context before and after each match.
+    #[serde(rename = "-C")]
+    context: Option<usize>,
+    /// Ripgrep file type such as rust or py.
+    file_type: Option<String>,
+    /// Enable multiline matching.
+    multiline: Option<bool>,
+    /// Maximum number of results to return.
+    head_limit: Option<usize>,
+    /// Number of results to skip.
+    offset: Option<usize>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct TodoArgs {
+    /// Operation: create, complete, view, list, or delete.
+    action: String,
+    /// List identifier used by create, complete, view, and delete.
+    id: Option<String>,
+    /// Short description used when creating a list.
+    description: Option<String>,
+    /// Task descriptions used when creating a list.
+    tasks: Option<Vec<String>>,
+    /// Zero-based task index used by complete.
+    task_index: Option<usize>,
+}
+
 pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
     let current_time = FunctionTool::new(
         "current_unix_time",
@@ -47,6 +161,7 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
             Ok(json!({ "unix_utc_seconds": now }))
         },
     )
+    .with_parameters_schema::<EmptyArgs>()
     .with_read_only(true)
     .with_concurrency_safe(true);
 
@@ -67,6 +182,7 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
             }))
         },
     )
+    .with_parameters_schema::<ReleaseTemplateArgs>()
     .with_read_only(true)
     .with_concurrency_safe(true);
 
@@ -76,6 +192,7 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          Args: path (required), start_line, max_lines, max_bytes, max_entries.",
         |_ctx, args| async move { Ok(fs_read::fs_read_tool_response(&args)) },
     )
+    .with_parameters_schema::<FsReadArgs>()
     .with_read_only(true)
     .with_concurrency_safe(true);
 
@@ -84,7 +201,8 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         "Writes files within the workspace with safe modes. \
          Args: path (required), mode=create|overwrite|append|patch, content, patch={find,replace,replace_all}.",
         |_ctx, args| async move { Ok(fs_write::fs_write_tool_response(&args)) },
-    );
+    )
+    .with_parameters_schema::<FsWriteArgs>();
 
     let file_edit = FunctionTool::new(
         "file_edit",
@@ -93,7 +211,8 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          new_string (required, replacement text), replace_all (optional bool, default false). \
          Returns a unified diff of the change. Fails if old_string is not found or matches multiple locations (unless replace_all=true).",
         |_ctx, args| async move { Ok(file_edit::file_edit_tool_response(&args)) },
-    );
+    )
+    .with_parameters_schema::<FileEditArgs>();
 
     let glob_tool = FunctionTool::new(
         "glob",
@@ -102,6 +221,7 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          Returns { numFiles, filenames, truncated, durationMs }. Max 100 results.",
         |_ctx, args| async move { Ok(glob::glob_tool_response(&args)) },
     )
+    .with_parameters_schema::<GlobArgs>()
     .with_read_only(true)
     .with_concurrency_safe(true);
 
@@ -115,6 +235,7 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          Falls back to grep -rn if rg is not installed.",
         |_ctx, args| async move { Ok(grep::grep_tool_response(&args)) },
     )
+    .with_parameters_schema::<GrepArgs>()
     .with_read_only(true)
     .with_concurrency_safe(true);
 
@@ -173,7 +294,10 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
          complete: {id, task_index: number}. \
          view: {id}. list: {}. delete: {id}.",
         |_ctx, args| async move { Ok(todo_tool_response(&args)) },
-    );
+    )
+    .with_parameters_schema::<TodoArgs>()
+    .with_read_only(true)
+    .with_concurrency_safe(true);
 
     // Agent tools
     let workspace = std::env::current_dir().unwrap_or_default();
@@ -285,5 +409,56 @@ fn todo_tool_response(args: &Value) -> Value {
         _ => {
             json!({"error": format!("unknown action '{action}'. Use create|complete|view|list|delete")})
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn file_tools_publish_the_arguments_models_need() {
+        let tools = build_builtin_tools();
+
+        for (name, required_field) in [
+            ("fs_read", "path"),
+            ("fs_write", "path"),
+            ("file_edit", "file_path"),
+            ("glob", "pattern"),
+            ("grep", "pattern"),
+            ("todo_list", "action"),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap_or_else(|| panic!("missing built-in tool {name}"));
+            let schema = tool
+                .parameters_schema()
+                .unwrap_or_else(|| panic!("{name} did not publish a parameter schema"));
+
+            assert!(
+                schema
+                    .get("properties")
+                    .and_then(|properties| properties.get(required_field))
+                    .is_some(),
+                "{name} schema did not describe {required_field}: {schema}"
+            );
+            assert!(
+                schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|field| field == required_field)),
+                "{name} schema did not require {required_field}: {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_zero_for_optional_read_limit_uses_the_default() {
+        let args = json!({ "start_line": 0 });
+        assert_eq!(
+            fs_read::parse_fs_read_usize_arg(&args, "start_line", 1, 1, 1_000_000).unwrap(),
+            1
+        );
     }
 }
