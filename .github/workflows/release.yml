@@ -48,8 +48,9 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.95.0"
           components: rustfmt, clippy
 
       - name: Cache Cargo
@@ -87,8 +88,9 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
@@ -172,7 +174,9 @@ jobs:
 
       - name: Setup Rust
         if: steps.cargo_token.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
 
       - name: Cache Cargo
         if: steps.cargo_token.outputs.present == 'true'
@@ -234,3 +238,38 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-formula:
+    needs: [resolve, publish-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_ref }}
+
+      # The formula digest can only be computed after the tag archive exists,
+      # so it is regenerated here rather than maintained by hand.
+      - name: Regenerate Homebrew formula
+        run: ./scripts/generate_homebrew_formula.sh "${{ needs.resolve.outputs.release_tag }}"
+
+      - name: Verify the formula version matches the tag
+        run: |
+          TAG_VERSION="${{ needs.resolve.outputs.release_tag }}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          FORMULA_VERSION="$(sed -n 's|.*/tags/v\([0-9][^.]*\.[0-9]*\.[0-9]*\)\.tar\.gz.*|\1|p' Formula/zavora-cli.rb | head -n 1)"
+          test "${TAG_VERSION}" = "${FORMULA_VERSION}"
+
+      - name: Commit the regenerated formula
+        run: |
+          if git diff --quiet Formula/zavora-cli.rb; then
+            echo "Formula already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/zavora-cli.rb
+          git commit -m "chore(release): refresh Homebrew formula for ${{ needs.resolve.outputs.release_tag }}"
+          git push origin HEAD:main
