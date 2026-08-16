@@ -1,0 +1,6 @@
+[toolchain]
+# Must match `rust-version` in Cargo.toml. Cargo refuses to build with an
+# older compiler, and pinning here makes the failure comprehensible instead of
+# a bare "rustc 1.94.0 is not supported by the following packages".
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

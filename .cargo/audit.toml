@@ -1,13 +1,38 @@
-# Temporary advisory policy for transitive dependencies we do not directly control.
-# Review this file on every release and remove ignores as soon as upstream fixes exist.
+# Advisory policy for transitive dependencies we do not directly control.
+#
+# Every entry is an explicit, dated exception as required by the v2-vision spec
+# (Requirement 16.7). Review on every release and remove an ignore as soon as
+# an upstream fix exists. Do not add an entry for an advisory that has a
+# published fixed version — bump the dependency instead.
+#
+# Last reviewed: 2026-08-15
 [advisories]
 ignore = [
-  # Transitive via sqlx-mysql in adk-session; no upstream fix currently available.
+  # Transitive via sqlx-mysql in adk-session; no upstream fix available.
+  # Reviewed 2026-08-15.
   "RUSTSEC-2023-0071",
-  # Transitive via async-openai in adk-model; upstream crate marked unmaintained.
+  # Transitive via async-openai in adk-model; upstream crate unmaintained.
+  # Reviewed 2026-08-15.
   "RUSTSEC-2025-0012",
-  # Transitive via backoff in async-openai path; unmaintained warning.
+  # Transitive via backoff in the async-openai path; unmaintained warning.
+  # Reviewed 2026-08-15.
   "RUSTSEC-2024-0384",
-  # Transitive via reqwest 0.11 path in claudius/adk-model; unmaintained warning.
+  # Transitive via the reqwest 0.11 path in adk-model; unmaintained warning.
+  # Reviewed 2026-08-15.
   "RUSTSEC-2025-0134",
+  # paste 1.0.15 — proc-macro crate marked unmaintained. No fixed version
+  # published; reached through several proc-macro dependencies. Reviewed
+  # 2026-08-15.
+  "RUSTSEC-2024-0436",
+  # lru 0.12.5 — panic-safety and Stacked Borrows unsoundness. No fixed
+  # version in the 0.12 line; the version is pinned by ratatui 0.29, so
+  # clearing it requires a ratatui major bump. Not reachable from Zavora code:
+  # the cache is internal to ratatui's text layout. Reviewed 2026-08-15.
+  "RUSTSEC-2026-0253",
+  "RUSTSEC-2026-0002",
+  # rand 0.8.5 and 0.9.2 — unsound only when a custom logger calls
+  # rand::rng() re-entrantly. No fixed version published; both versions are
+  # pinned transitively by async-openai through adk-model. Zavora installs no
+  # such logger. Reviewed 2026-08-15.
+  "RUSTSEC-2026-0097",
 ]
