@@ -69,6 +69,15 @@ impl TelemetrySink {
         }
     }
 
+    pub fn emit_content(&self, event: &str, payload: Value) {
+        let capture_enabled = std::env::var("ZAVORA_TELEMETRY_CAPTURE_CONTENT")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+        if capture_enabled {
+            self.emit(event, payload);
+        }
+    }
+
     fn append_event_line(&self, value: &Value) -> Result<()> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()

@@ -75,11 +75,36 @@ impl Tool for BudgetedPlannerTool {
 }
 
 pub fn build_planner_agent(model: Arc<dyn Llm>) -> adk_rust::Result<Arc<dyn Agent>> {
+    build_planner_agent_with_workspace(model, false)
+}
+
+pub fn build_workspace_planner_agent(model: Arc<dyn Llm>) -> adk_rust::Result<Arc<dyn Agent>> {
+    build_planner_agent_with_workspace(model, true)
+}
+
+fn build_planner_agent_with_workspace(
+    model: Arc<dyn Llm>,
+    include_workspace: bool,
+) -> adk_rust::Result<Arc<dyn Agent>> {
+    let workspace = if include_workspace {
+        crate::skills::resolve_workspace_instructions()
+            .ok()
+            .filter(|instructions| !instructions.content.is_empty())
+            .map(|instructions| {
+                format!(
+                    "\n\n<workspace_instructions>\n{}\n</workspace_instructions>",
+                    instructions.content
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let agent = LlmAgentBuilder::new("planner")
         .description("Designs implementation plans for complex engineering work")
-        .instruction(
-            "You are Zavora's planning specialist. Turn the request and supplied evidence into a concise, executable plan for another agent. State the outcome, assumptions, files or systems involved, ordered implementation steps, verification, and material risks. Resolve architectural questions, but do not perform the work, call tools, or repeat the request. Keep the plan under 700 words.",
-        )
+        .instruction(format!(
+            "You are Zavora's planning specialist. Turn the request and supplied evidence into a concise, executable plan for another agent. State the outcome, assumptions, files or systems involved, ordered implementation steps, verification, and material risks. Resolve architectural questions, but do not perform the work, call tools, or repeat the request. Keep the plan under 700 words.{workspace}"
+        ))
         .model(model)
         .max_iterations(1)
         .build()?;

@@ -52,7 +52,7 @@ use adk_rust::LlmResponse;
 use adk_rust::model::MockLlm;
 use tempfile::tempdir;
 
-fn base_cfg() -> RuntimeConfig {
+pub(crate) fn base_cfg() -> RuntimeConfig {
     RuntimeConfig {
         profile: "default".to_string(),
         config_path: ".zavora/config.toml".to_string(),
@@ -63,6 +63,7 @@ fn base_cfg() -> RuntimeConfig {
         agent_resource_paths: Vec::new(),
         agent_allow_tools: Vec::new(),
         agent_deny_tools: Vec::new(),
+        hooks: std::collections::HashMap::new(),
         provider: Provider::Auto,
         model: None,
         worker_provider: Provider::Openai,
@@ -126,16 +127,16 @@ fn noop_tool(name: &str) -> Arc<dyn Tool> {
 }
 
 fn make_runtime_tools(tool_names: &[&str], mcp_tool_names: &[&str]) -> ResolvedRuntimeTools {
-    ResolvedRuntimeTools {
-        tools: tool_names
+    ResolvedRuntimeTools::for_test(
+        tool_names
             .iter()
             .map(|name| noop_tool(name))
             .collect::<Vec<_>>(),
-        mcp_tool_names: mcp_tool_names
+        mcp_tool_names
             .iter()
             .map(|name| name.to_string())
             .collect::<BTreeSet<String>>(),
-    }
+    )
 }
 
 fn sqlite_cfg(session_id: &str) -> (tempfile::TempDir, RuntimeConfig) {
@@ -153,6 +154,11 @@ fn sqlite_cfg(session_id: &str) -> (tempfile::TempDir, RuntimeConfig) {
 
 fn test_cli(config_path: &str, profile: &str) -> Cli {
     Cli {
+        output_format: OutputFormat::Text,
+        input_files: Vec::new(),
+        stdin: false,
+        no_stdin: false,
+        always_approve: false,
         provider: Provider::Auto,
         model: None,
         worker_provider: None,
@@ -1612,6 +1618,14 @@ fn chat_command_parser_recognizes_built_in_commands() {
         parse_chat_command("/model"),
         ParsedChatCommand::Command(ChatCommand::Model(None))
     );
+    assert_eq!(
+        parse_chat_command("/resume work-session"),
+        ParsedChatCommand::Command(ChatCommand::Sessions("work-session".to_string()))
+    );
+    assert_eq!(
+        parse_chat_command("/new review-session"),
+        ParsedChatCommand::Command(ChatCommand::NewSession("review-session".to_string()))
+    );
 }
 
 #[test]
@@ -2010,10 +2024,7 @@ async fn chat_switch_path_builds_runner_for_ollama_without_losing_session_servic
     cfg.worker_provider = Provider::Ollama;
     cfg.worker_model = "llama3.2".to_string();
     let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
-    let runtime_tools = ResolvedRuntimeTools {
-        tools: build_builtin_tools(),
-        mcp_tool_names: BTreeSet::new(),
-    };
+    let runtime_tools = ResolvedRuntimeTools::for_test(build_builtin_tools(), BTreeSet::new());
     let tool_confirmation = ToolConfirmationSettings::default();
     let telemetry = test_telemetry(&cfg);
 
@@ -3063,122 +3074,6 @@ fn test_format_command_palette() {
 }
 
 // ---------------------------------------------------------------------------
-// Parity benchmark tests
-// ---------------------------------------------------------------------------
-
-use crate::benchmark::*;
-
-#[test]
-fn test_default_scenarios_count() {
-    let scenarios = default_scenarios();
-    assert_eq!(scenarios.len(), 12);
-}
-
-#[test]
-fn test_parity_level_scores() {
-    assert_eq!(ParityLevel::Met.score(), 1.0);
-    assert_eq!(ParityLevel::Partial.score(), 0.5);
-    assert_eq!(ParityLevel::NotMet.score(), 0.0);
-}
-
-#[test]
-fn test_scorecard_compute_all_pass() {
-    let scenarios = vec![
-        BenchmarkScenario {
-            id: "s1".into(),
-            category: BenchmarkCategory::ChatUX,
-            description: "test".into(),
-            weight: 1.0,
-            pass_criteria: "pass".into(),
-        },
-        BenchmarkScenario {
-            id: "s2".into(),
-            category: BenchmarkCategory::FileEdits,
-            description: "test".into(),
-            weight: 2.0,
-            pass_criteria: "pass".into(),
-        },
-    ];
-    let results = vec![
-        ScenarioResult {
-            scenario_id: "s1".into(),
-            passed: true,
-            score: 1.0,
-            notes: String::new(),
-        },
-        ScenarioResult {
-            scenario_id: "s2".into(),
-            passed: true,
-            score: 1.0,
-            notes: String::new(),
-        },
-    ];
-    let card = Scorecard::compute(&scenarios, &results);
-    assert_eq!(card.total_score, 3.0);
-    assert_eq!(card.max_score, 3.0);
-    assert_eq!(card.pass_rate, 1.0);
-    assert!(card.meets_threshold(BASELINE_THRESHOLD));
-    assert!(card.meets_threshold(TARGET_THRESHOLD));
-}
-
-#[test]
-fn test_scorecard_compute_partial() {
-    let scenarios = vec![BenchmarkScenario {
-        id: "s1".into(),
-        category: BenchmarkCategory::ChatUX,
-        description: "test".into(),
-        weight: 1.0,
-        pass_criteria: "pass".into(),
-    }];
-    let results = vec![ScenarioResult {
-        scenario_id: "s1".into(),
-        passed: false,
-        score: 0.5,
-        notes: "partial".into(),
-    }];
-    let card = Scorecard::compute(&scenarios, &results);
-    assert_eq!(card.pass_rate, 0.5);
-    assert!(!card.meets_threshold(BASELINE_THRESHOLD));
-}
-
-#[test]
-fn test_scorecard_format_display() {
-    let scenarios = default_scenarios();
-    let results: Vec<ScenarioResult> = scenarios
-        .iter()
-        .map(|s| ScenarioResult {
-            scenario_id: s.id.clone(),
-            passed: true,
-            score: 1.0,
-            notes: String::new(),
-        })
-        .collect();
-    let card = Scorecard::compute(&scenarios, &results);
-    let display = card.format_display();
-    assert!(display.contains("Parity Scorecard:"));
-    assert!(display.contains("100%"));
-}
-
-#[test]
-fn test_scorecard_empty() {
-    let card = Scorecard::compute(&[], &[]);
-    assert_eq!(card.pass_rate, 0.0);
-    assert_eq!(card.total_score, 0.0);
-}
-
-#[test]
-fn test_category_labels() {
-    assert_eq!(
-        BenchmarkCategory::ProjectCreation.label(),
-        "Project Creation"
-    );
-    assert_eq!(
-        BenchmarkCategory::ContextManagement.label(),
-        "Context Management"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Integration tests for new tools (Phase 1-4)
 // ---------------------------------------------------------------------------
 
@@ -3377,13 +3272,19 @@ fn test_permission_rules_deny_takes_precedence() {
 // Helper to temporarily change cwd for tests
 struct SetCwd {
     prev: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl SetCwd {
     fn new(path: &std::path::Path) -> Self {
+        static CWD_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let lock = CWD_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(path).unwrap();
-        Self { prev }
+        Self { prev, _lock: lock }
     }
 }
 

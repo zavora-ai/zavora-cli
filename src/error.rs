@@ -37,6 +37,16 @@ impl ErrorCategory {
             }
         }
     }
+
+    pub fn exit_code(self) -> i32 {
+        match self {
+            ErrorCategory::Provider => 10,
+            ErrorCategory::Session => 11,
+            ErrorCategory::Tooling => 12,
+            ErrorCategory::Input => 42,
+            ErrorCategory::Internal => 70,
+        }
+    }
 }
 
 pub fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
@@ -54,6 +64,9 @@ pub fn categorize_error(err: &anyhow::Error) -> ErrorCategory {
         || msg.contains("invalid value")
         || msg.contains("unknown argument")
         || msg.contains("failed to read input")
+        || msg.contains("no prompt input")
+        || msg.contains("input limit")
+        || msg.contains("not valid utf-8")
         || msg.contains("profile")
     {
         return ErrorCategory::Input;
