@@ -8,15 +8,12 @@ use adk_session::SessionService;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::agents::{
-    orchestrator::{Orchestrator, OrchestratorConfig},
-    time::TimeAgent,
-};
+use crate::agents::time::TimeAgent;
 use crate::checkpoint::{
     CheckpointStore, format_checkpoint_list, restore_session_events, snapshot_session_events,
 };
 use crate::cli::{GuardrailMode, Provider};
-use crate::compact::{CompactStrategy, compact_session, compact_to_target};
+use crate::compact::{CompactStrategy, compact_session};
 use crate::config::RuntimeConfig;
 use crate::context::{ContextUsage, compute_context_usage};
 use crate::error::format_cli_error;
@@ -39,7 +36,16 @@ pub enum ChatCommand {
     Help,
     Tools,
     Mcp,
+    Capabilities,
+    Skills,
+    Plugins,
+    Instructions(String),
+    Agents,
+    Inspect,
+    Doctor,
     Usage,
+    Sessions(String),
+    NewSession(String),
     Compact,
     Checkpoint(String),
     Tangent(String),
@@ -55,7 +61,6 @@ pub enum ChatCommand {
     AutoCompact,
     Memory(String),
     Time(String),
-    Orchestrate(String),
     Ralph(String),
     Allow(String),
     Deny(String),
@@ -99,13 +104,26 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         "help" => ParsedChatCommand::Command(ChatCommand::Help),
         "tools" => ParsedChatCommand::Command(ChatCommand::Tools),
         "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
+        "mcps" => ParsedChatCommand::Command(ChatCommand::Mcp),
+        "capabilities" => ParsedChatCommand::Command(ChatCommand::Capabilities),
+        "skills" => ParsedChatCommand::Command(ChatCommand::Skills),
+        "plugins" | "extensions" => ParsedChatCommand::Command(ChatCommand::Plugins),
+        "instructions" | "context" => {
+            ParsedChatCommand::Command(ChatCommand::Instructions(arg.to_string()))
+        }
+        "agents" => ParsedChatCommand::Command(ChatCommand::Agents),
+        "inspect" => ParsedChatCommand::Command(ChatCommand::Inspect),
+        "doctor" => ParsedChatCommand::Command(ChatCommand::Doctor),
         "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
+        "sessions" | "resume" | "continue" => {
+            ParsedChatCommand::Command(ChatCommand::Sessions(arg.to_string()))
+        }
+        "new" => ParsedChatCommand::Command(ChatCommand::NewSession(arg.to_string())),
         "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
         "agent" => ParsedChatCommand::Command(ChatCommand::Agent),
         "autocompact" => ParsedChatCommand::Command(ChatCommand::AutoCompact),
         "memory" => ParsedChatCommand::Command(ChatCommand::Memory(arg.to_string())),
         "time" => ParsedChatCommand::Command(ChatCommand::Time(arg.to_string())),
-        "orchestrate" => ParsedChatCommand::Command(ChatCommand::Orchestrate(arg.to_string())),
         "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
         "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
         "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
@@ -171,17 +189,32 @@ pub fn print_chat_help() {
     println!("  {BOLD}Commands{RESET}");
     println!("  {CYAN}/help{RESET}              {DIM}show this reference{RESET}");
     println!("  {CYAN}/status{RESET}            {DIM}active provider, model, session{RESET}");
+    println!("  {CYAN}/capabilities{RESET}      {DIM}browse bundled work capability packs{RESET}");
+    println!("  {CYAN}/mcps{RESET}              {DIM}show configured MCP servers and tools{RESET}");
+    println!("  {CYAN}/skills{RESET}            {DIM}browse invocable workspace skills{RESET}");
+    println!(
+        "  {CYAN}/plugins{RESET}           {DIM}inspect cross-CLI plugins and extensions{RESET}"
+    );
+    println!(
+        "  {CYAN}/instructions{RESET} [show] {DIM}inspect active project instruction files{RESET}"
+    );
+    println!("  {CYAN}/agents{RESET}            {DIM}browse specialist sub-agents{RESET}");
+    println!(
+        "  {CYAN}/inspect{RESET}           {DIM}inspect resolved runtime configuration{RESET}"
+    );
+    println!("  {CYAN}/doctor{RESET}            {DIM}check MCP configuration readiness{RESET}");
     println!("  {CYAN}/usage{RESET}             {DIM}context window token breakdown{RESET}");
     println!("  {CYAN}/compact{RESET}           {DIM}summarize history to free context{RESET}");
     println!("  {CYAN}/autocompact{RESET}       {DIM}toggle automatic compaction{RESET}");
     println!("  {CYAN}/memory{RESET} <cmd>      {DIM}recall|remember|forget learnings{RESET}");
     println!("  {CYAN}/time{RESET} <query>      {DIM}get time context or parse dates{RESET}");
-    println!("  {CYAN}/orchestrate{RESET} <goal> {DIM}run full agent orchestration loop{RESET}");
     println!("  {CYAN}/ralph{RESET} <prompt>     {DIM}run Ralph autonomous dev pipeline{RESET}");
     println!("  {CYAN}/tools{RESET}             {DIM}list active tools and policy{RESET}");
     println!("  {CYAN}/mcp{RESET}               {DIM}MCP server diagnostics{RESET}");
     println!();
     println!("  {BOLD}Session{RESET}");
+    println!("  {CYAN}/sessions{RESET} [list]   {DIM}list persisted sessions{RESET}");
+    println!("  {CYAN}/new{RESET} [id]          {DIM}start a clean session{RESET}");
     println!("  {CYAN}/checkpoint{RESET} save|list|restore  {DIM}manage snapshots{RESET}");
     println!("  {CYAN}/tangent{RESET} start|end  {DIM}exploratory branch{RESET}");
     println!("  {CYAN}/todos{RESET} list|show|clear  {DIM}task lists{RESET}");
@@ -444,9 +477,9 @@ pub fn print_chat_tools(
     let mut built_in_tools = Vec::<String>::new();
     let mut mcp_tools = Vec::<String>::new();
 
-    for tool in &runtime_tools.tools {
+    for tool in runtime_tools.tools() {
         let name = tool.name().to_string();
-        if runtime_tools.mcp_tool_names.contains(&name) {
+        if runtime_tools.mcp_tool_names().contains(&name) {
             mcp_tools.push(name);
         } else {
             built_in_tools.push(name);
@@ -471,7 +504,7 @@ pub fn print_chat_tools(
 
     println!(
         "Tools: total={} built_in={} mcp={}",
-        runtime_tools.tools.len(),
+        runtime_tools.tools().len(),
         built_in_tools.len(),
         mcp_tools.len()
     );
@@ -549,8 +582,14 @@ pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools)
         "MCP: configured_servers={} enabled={} discovered_tools={}",
         cfg.mcp_servers.len(),
         enabled_servers,
-        runtime_tools.mcp_tool_names.len()
+        runtime_tools.mcp_tool_names().len()
     );
+
+    // Requirement 10.4: report servers that could not be reached rather than
+    // presenting a smaller tool set as if it were complete.
+    for failure in runtime_tools.connect_failure_report() {
+        println!("  unreachable: {failure}");
+    }
 
     for server in cfg.mcp_servers.iter().filter(|s| s.enabled.unwrap_or(true)) {
         let auth_hint = crate::mcp::check_auth_hint(server);
@@ -559,7 +598,7 @@ pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools)
             None if server.auth_bearer_env.is_some() => "✓ configured".to_string(),
             None => "none".to_string(),
         };
-        let server_tools: Vec<&String> = runtime_tools.mcp_tool_names.iter().collect();
+        let server_tools: Vec<&String> = runtime_tools.mcp_tool_names().iter().collect();
         let tool_count = server_tools.len();
         println!(
             "  {} endpoint={} auth={} tools={}",
@@ -567,11 +606,11 @@ pub fn print_chat_mcp(cfg: &RuntimeConfig, runtime_tools: &ResolvedRuntimeTools)
         );
     }
 
-    if runtime_tools.mcp_tool_names.is_empty() {
+    if runtime_tools.mcp_tool_names().is_empty() {
         println!("Discovered MCP tools: <none>");
     } else {
         println!("Discovered MCP tools:");
-        for name in &runtime_tools.mcp_tool_names {
+        for name in runtime_tools.mcp_tool_names() {
             println!("  - {name}");
         }
     }
@@ -621,6 +660,71 @@ pub async fn dispatch_chat_command(
             } else {
                 print_chat_usage();
             }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Sessions(subcommand) => {
+            let parts = subcommand.split_whitespace().collect::<Vec<_>>();
+            let requested = match parts.as_slice() {
+                [] | ["list"] => None,
+                ["switch", session_id, ..] => Some(*session_id),
+                [session_id, ..] => Some(*session_id),
+            };
+            if let Some(session_id) = requested {
+                session_service
+                    .get(adk_session::GetRequest {
+                        app_name: cfg.app_name.clone(),
+                        user_id: cfg.user_id.clone(),
+                        session_id: session_id.to_string(),
+                        num_recent_events: None,
+                        after: None,
+                    })
+                    .await?;
+                cfg.session_id = session_id.to_string();
+                println!("Switched to session '{}'.", cfg.session_id);
+            } else {
+                let mut sessions = session_service
+                    .list(adk_session::ListRequest {
+                        app_name: cfg.app_name.clone(),
+                        user_id: cfg.user_id.clone(),
+                        limit: None,
+                        offset: None,
+                    })
+                    .await?;
+                sessions.sort_by_key(|session| std::cmp::Reverse(session.last_update_time()));
+                if sessions.is_empty() {
+                    println!("No sessions found.");
+                } else {
+                    println!("Sessions:");
+                    for session in sessions {
+                        println!(
+                            "  {} {} ({})",
+                            if session.id() == cfg.session_id {
+                                "*"
+                            } else {
+                                "-"
+                            },
+                            session.id(),
+                            session.last_update_time().to_rfc3339()
+                        );
+                    }
+                }
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::NewSession(session_id) => {
+            cfg.session_id = if session_id.trim().is_empty() {
+                format!(
+                    "session-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                )
+            } else {
+                session_id.trim().to_string()
+            };
+            crate::session::ensure_session_exists(session_service, cfg).await?;
+            println!("Started session '{}'.", cfg.session_id);
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Compact => {
@@ -784,6 +888,101 @@ pub async fn dispatch_chat_command(
         }
         ChatCommand::Mcp => {
             print_chat_mcp(cfg, runtime_tools);
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Capabilities => {
+            let configured = cfg
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect::<Vec<_>>();
+            print!(
+                "{}",
+                crate::capabilities::format_catalog_markdown_with_runtime(
+                    &configured,
+                    &runtime_tools
+                        .mcp_tool_names()
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Skills => {
+            println!("{}", crate::skills::format_skills_markdown());
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Plugins => {
+            println!("{}", crate::plugins::format_plugins_markdown()?);
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Instructions(subcommand) => {
+            println!(
+                "{}",
+                crate::skills::format_instructions_markdown(subcommand.trim() == "show")
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Agents => {
+            let configured = cfg
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect::<Vec<_>>();
+            println!("Agents:");
+            for agent in crate::capabilities::CapabilitySnapshot::load(&configured, &[])?.agents {
+                println!(
+                    "  - {} [{}]: {}",
+                    agent.name,
+                    agent.source,
+                    if agent.description.is_empty() {
+                        "No description"
+                    } else {
+                        &agent.description
+                    }
+                );
+            }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Inspect => {
+            println!("Profile: {}", cfg.profile);
+            println!("Agent: {}", cfg.agent_name);
+            println!("Worker: {} / {}", cfg.worker_provider, cfg.worker_model);
+            println!("Planner: {} / {}", cfg.planner_provider, cfg.planner_model);
+            println!("MCP servers: {} configured", cfg.mcp_servers.len());
+            println!("Runtime tools: {}", runtime_tools.tools().len());
+            match crate::skills::resolve_workspace_instructions() {
+                Ok(instructions) => println!(
+                    "Instructions: {} active / {} deferred",
+                    instructions.sources.len(),
+                    instructions.deferred_sources.len()
+                ),
+                Err(error) => println!("Instructions: unavailable ({error})"),
+            }
+            println!(
+                "Capability state: {}",
+                crate::capabilities::state_path().display()
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Doctor => {
+            if cfg.mcp_servers.is_empty() {
+                println!("No MCP servers are configured.");
+            }
+            for server in &cfg.mcp_servers {
+                if !server.enabled.unwrap_or(true) {
+                    println!("- {}: disabled", server.name);
+                } else if let Some(hint) = crate::mcp::check_auth_hint(server) {
+                    println!(
+                        "- {}: authentication needs attention: {}",
+                        server.name, hint
+                    );
+                } else {
+                    println!("- {}: configuration ready", server.name);
+                }
+            }
+            println!("Run 'zavora-cli mcp doctor' for live connectivity diagnostics.");
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Models => {
@@ -1086,40 +1285,14 @@ pub async fn dispatch_chat_command(
             }
             Ok(ChatCommandAction::Continue)
         }
-        ChatCommand::Orchestrate(goal) => {
-            if goal.trim().is_empty() {
-                println!("Usage: /orchestrate <goal>");
-                println!("Example: /orchestrate Implement feature X with tests");
-                return Ok(ChatCommandAction::Continue);
-            }
-
-            println!(
-                "{}Starting orchestration...{}",
-                crate::theme::DIM,
-                crate::theme::RESET
-            );
-
-            let mut orchestrator = Orchestrator::new(OrchestratorConfig::default());
-
-            match orchestrator.execute(goal.clone(), vec![]).await {
-                Ok(result) => {
-                    println!("\n{}", result.format_summary());
-                }
-                Err(e) => {
-                    eprintln!("Orchestration failed: {e}");
-                }
-            }
-
-            Ok(ChatCommandAction::Continue)
-        }
         ChatCommand::Allow(pattern) => {
             crate::tools::confirming::trust_tool(&pattern);
             println!("Session rule added: always allow '{pattern}'");
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Deny(pattern) => {
-            println!("Session rule noted: deny '{pattern}'");
-            println!("  Note: Denied patterns take effect on next tool rebuild (/agent).");
+            crate::tools::confirming::deny_tool(&pattern);
+            println!("Session rule added: always deny '{pattern}'");
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Undo => {
@@ -1143,7 +1316,22 @@ pub async fn dispatch_chat_command(
                 }),
             );
             println!("Starting Ralph pipeline...");
-            match crate::ralph::run_ralph(cfg, prompt, None, false, None, telemetry).await {
+            let retrieval = crate::retrieval::DisabledRetrievalService;
+            match crate::ralph::run_ralph(
+                cfg,
+                prompt,
+                crate::ralph::RalphRunOptions {
+                    phase: None,
+                    resume: false,
+                    output_dir: None,
+                    output_format: crate::cli::OutputFormat::Text,
+                    always_approve: false,
+                },
+                telemetry,
+                &retrieval,
+            )
+            .await
+            {
                 Ok(()) => println!("Ralph pipeline completed."),
                 Err(e) => eprintln!("Ralph pipeline failed: {e}"),
             }
@@ -1238,6 +1426,7 @@ async fn run_chat_classic(
         if input.eq_ignore_ascii_case("/exit") || input.eq_ignore_ascii_case("exit") {
             break;
         }
+        let mut prompt_input = input.to_string();
 
         match parse_chat_command(input) {
             ParsedChatCommand::NotACommand => {}
@@ -1246,13 +1435,22 @@ async fn run_chat_classic(
                 continue;
             }
             ParsedChatCommand::UnknownCommand(command) => {
-                let bare = command.trim_start_matches('/');
-                if let Some(suggestion) = suggest_command(bare) {
-                    println!("Unknown command '{command}'. {suggestion}");
-                } else {
-                    println!("Unknown command '{command}'. Use /help.");
+                match crate::skills::expand_skill_command(input) {
+                    Ok(Some(expanded)) => prompt_input = expanded,
+                    Ok(None) => {
+                        let bare = command.trim_start_matches('/');
+                        if let Some(suggestion) = suggest_command(bare) {
+                            println!("Unknown command '{command}'. {suggestion}");
+                        } else {
+                            println!("Unknown command '{command}'. Use /help.");
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        println!("Skill discovery failed: {error}");
+                        continue;
+                    }
                 }
-                continue;
             }
             ParsedChatCommand::Command(command) => {
                 let action = dispatch_chat_command(
@@ -1278,14 +1476,19 @@ async fn run_chat_classic(
             }
         }
 
-        let guarded_input =
-            match apply_guardrail(&cfg, telemetry, "input", cfg.guardrail_input_mode, input) {
-                Ok(text) => text,
-                Err(err) => {
-                    eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
-                    continue;
-                }
-            };
+        let guarded_input = match apply_guardrail(
+            &cfg,
+            telemetry,
+            "input",
+            cfg.guardrail_input_mode,
+            &prompt_input,
+        ) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("{}", format_cli_error(&err, cfg.show_sensitive_config));
+                continue;
+            }
+        };
 
         if buffered_output_required(cfg.guardrail_output_mode) {
             println!();
@@ -1366,8 +1569,11 @@ async fn run_chat_classic(
                     (usage.utilization() * 100.0) as u32,
                     crate::theme::RESET
                 );
-                let target_util = cfg.compaction_target;
-                match compact_to_target(&session_service, &cfg, target_util).await {
+                // Multi-strategy compaction: cheap stale-tool-result elision
+                // first, LLM summarization only as a fallback. `auto_compact`
+                // re-checks the threshold itself and names the strategy it used,
+                // which is what makes Requirement 12.4 observable.
+                match crate::compact::auto_compact(&session_service, &cfg).await {
                     Ok(msg) => println!("{}{}{}", crate::theme::DIM, msg, crate::theme::RESET),
                     Err(e) => eprintln!("Auto-compaction failed: {e}"),
                 }
