@@ -43,8 +43,11 @@ pub struct ServerState {
 #[derive(Debug, Serialize)]
 pub struct ServerHealthResponse {
     pub status: &'static str,
-    pub app_name: String,
-    pub profile: String,
+    /// Withheld from unauthenticated callers. Requirement 11.4.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,7 +153,7 @@ pub fn check_server_auth(
         .unwrap_or_default()
         .trim();
 
-    if provided_token.is_empty() || provided_token != expected_token {
+    if provided_token.is_empty() || !constant_time_eq(provided_token, expected_token) {
         return Err(api_error(
             StatusCode::UNAUTHORIZED,
             "missing or invalid Authorization bearer token",
@@ -160,13 +163,36 @@ pub fn check_server_auth(
     Ok(())
 }
 
+/// Compare two secrets without leaking their common prefix length through
+/// timing. Requirement 11.3.
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    // Length is not secret; comparing unequal lengths in constant time would
+    // still reveal the mismatch, so short-circuit and keep the loop uniform.
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
 pub async fn handle_server_health(
     State(state): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
 ) -> Json<ServerHealthResponse> {
+    // Liveness is safe to expose; the app name and profile are workspace detail.
+    // They are included only when a token is actually configured *and* the caller
+    // presented it — "no token configured" means there is no authentication, not
+    // that everyone is authenticated. Requirement 11.4.
+    let authenticated = state.auth_token.is_some() && check_server_auth(&state, &headers).is_ok();
     Json(ServerHealthResponse {
         status: "ok",
-        app_name: state.cfg.app_name.clone(),
-        profile: state.cfg.profile.clone(),
+        app_name: authenticated.then(|| state.cfg.app_name.clone()),
+        profile: authenticated.then(|| state.cfg.profile.clone()),
     })
 }
 
@@ -388,7 +414,7 @@ pub async fn run_server(
     );
     let server_agent = build_single_agent_with_tools(
         model,
-        &runtime_tools.tools,
+        runtime_tools.tools(),
         tool_confirmation.policy.clone(),
         Duration::from_secs(cfg.tool_timeout_secs),
         Some(&cfg),
@@ -438,6 +464,16 @@ pub async fn run_server(
         "Server mode listening on http://{} (health: /healthz, ask: /v1/ask, interrupt: /v1/interrupt, a2a: /v1/a2a/ping)",
         addr
     );
+
+    // Requirement 11.2: a non-loopback bind with no token is an unauthenticated
+    // remote tool-execution endpoint. Refuse rather than warn, because the
+    // failure mode is silent and the blast radius is the whole workspace.
+    if !addr.ip().is_loopback() && state.auth_token.is_none() {
+        anyhow::bail!(
+            "refusing to bind {addr}: tool execution would be unauthenticated.\n\
+             Set ZAVORA_SERVER_AUTH_TOKEN to require a bearer token, or bind 127.0.0.1."
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -506,4 +542,43 @@ pub fn run_a2a_smoke(telemetry: &TelemetrySink) -> Result<()> {
     );
     println!("A2A smoke passed: basic request/ack contract is valid.");
     Ok(())
+}
+
+#[cfg(test)]
+mod exposure_tests {
+    use super::*;
+
+    /// Requirement 11.3: token comparison must not leak a common prefix through
+    /// timing, and must still be correct.
+    #[test]
+    fn constant_time_comparison_is_correct() {
+        assert!(constant_time_eq("secret-token", "secret-token"));
+        assert!(!constant_time_eq("secret-token", "secret-tokeN"));
+        assert!(!constant_time_eq("secret", "secret-token"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    /// Requirement 11.2: the guard that refuses an unauthenticated non-loopback
+    /// bind must distinguish loopback from routable addresses.
+    #[test]
+    fn only_loopback_may_bind_without_a_token() {
+        use std::net::SocketAddr;
+
+        for loopback in ["127.0.0.1:8787", "[::1]:8787"] {
+            let addr: SocketAddr = loopback.parse().expect("valid address");
+            assert!(
+                addr.ip().is_loopback(),
+                "{loopback} should be recognized as loopback"
+            );
+        }
+
+        for routable in ["0.0.0.0:8787", "192.168.1.10:8787", "[::]:8787"] {
+            let addr: SocketAddr = routable.parse().expect("valid address");
+            assert!(
+                !addr.ip().is_loopback(),
+                "{routable} must not be treated as loopback"
+            );
+        }
+    }
 }

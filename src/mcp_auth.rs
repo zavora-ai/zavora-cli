@@ -85,9 +85,19 @@ async fn run_auth_flow(oauth: &McpOAuthConfig) -> Result<OAuthTokens> {
     let client_id = oauth.client_id.as_deref().unwrap_or("zavora-cli");
 
     // Build authorization URL
+    // CSRF protection. Without a `state` parameter, any page the developer
+    // visits during the flow can deliver an attacker's authorization code to the
+    // loopback callback and have it exchanged for a token bound to their
+    // account. Requirement 10.8.
+    let state = {
+        use rand::Rng;
+        let bytes: [u8; 32] = rand::rng().random();
+        base64_url_encode(&bytes)
+    };
+
     let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
-        metadata.authorization_endpoint, client_id, redirect_uri, challenge
+        "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}",
+        metadata.authorization_endpoint, client_id, redirect_uri, challenge, state
     );
 
     // Open browser
@@ -96,7 +106,7 @@ async fn run_auth_flow(oauth: &McpOAuthConfig) -> Result<OAuthTokens> {
     println!("If browser didn't open, visit:\n{}\n", auth_url);
 
     // Listen for callback
-    let code = listen_for_callback(port).await?;
+    let code = listen_for_callback(port, &state).await?;
 
     // Exchange code for tokens
     let client = reqwest::Client::new();
@@ -196,7 +206,7 @@ async fn discover_metadata(oauth: &McpOAuthConfig) -> Result<AuthMetadata> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "oauth")]
-async fn listen_for_callback(port: u16) -> Result<String> {
+async fn listen_for_callback(port: u16, expected_state: &str) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -216,16 +226,31 @@ async fn listen_for_callback(port: u16) -> Result<String> {
     let n = stream.read(&mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    // Extract code from GET /callback?code=XXX
-    let code = request
+    // Parse the callback query once; both `code` and `state` come from it.
+    let query = request
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|path| {
-            url::form_urlencoded::parse(path.split('?').nth(1).unwrap_or("").as_bytes())
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.to_string())
-        })
+        .and_then(|path| path.split('?').nth(1).map(str::to_string))
+        .unwrap_or_default();
+    let params = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect::<std::collections::HashMap<String, String>>();
+
+    // Verify state before touching the code. An unexpected state means this
+    // callback did not originate from the authorization request we started, so
+    // the code must not be exchanged. Requirement 10.8.
+    let returned_state = params
+        .get("state")
+        .map(String::as_str)
+        .context("no state parameter in callback; refusing to exchange the code")?;
+    if returned_state != expected_state {
+        anyhow::bail!("authorization callback state mismatch; refusing to exchange the code");
+    }
+
+    let code = params
+        .get("code")
+        .cloned()
         .context("no authorization code in callback")?;
 
     // Send response
@@ -269,7 +294,24 @@ fn load_tokens(server_name: &str) -> Option<OAuthTokens> {
 fn save_tokens_file(server_name: &str, json: &str) -> Result<()> {
     let dir = std::path::Path::new(".zavora/tokens");
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(format!("{}.json", server_name)), json)?;
+    let path = dir.join(format!("{}.json", server_name));
+    std::fs::write(&path, json)?;
+
+    // Owner-only. This is the fallback used when the OS credential vault is
+    // unavailable, so the file holds a live bearer token. Requirement 10.9.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "failed to restrict permissions on token file '{}'",
+                    path.display()
+                )
+            },
+        )?;
+    }
+
     Ok(())
 }
 
