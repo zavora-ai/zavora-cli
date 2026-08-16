@@ -5,7 +5,7 @@
 
 Zavora is an ADK-Rust 2.0 coding agent for the terminal. It keeps routine implementation work on an efficient worker model and brings in a stronger planning model only when a task needs architectural reasoning or a material replan.
 
-![The Zavora terminal workspace](docs/images/welcome.jpg)
+![The Zavora terminal workspace](https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/docs/images/welcome.jpg)
 
 The workspace is built for long sessions: streamed Markdown and code, retained tool activity, context usage, model-role status, multiline editing, and in-place approvals for consequential actions. It adapts from a side-by-side wide layout to a compact stacked layout without losing the active conversation.
 
