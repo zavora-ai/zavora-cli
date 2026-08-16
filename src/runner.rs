@@ -14,6 +14,16 @@ use crate::provider::{resolve_model, resolve_planner_model};
 use crate::session::{build_session_service, ensure_session_exists};
 use crate::telemetry::TelemetrySink;
 
+/// How long a specialist may run before the orchestrator gives up on it.
+///
+/// Bounded so a stuck specialist cannot hang the turn indefinitely; derived from
+/// the tool timeout so it moves with the rest of the runtime.
+fn cfg_or_default_specialist_timeout(runtime_cfg: Option<&RuntimeConfig>) -> u64 {
+    runtime_cfg
+        .map(|cfg| cfg.tool_timeout_secs.saturating_mul(4).max(120))
+        .unwrap_or(300)
+}
+
 /// Descriptions for every agent the orchestrator may be told about.
 ///
 /// The prompt section is rendered from this table filtered against what is
@@ -41,15 +51,17 @@ const AGENT_TOOL_CATALOGUE: &[(&str, &str)] = &[
     ),
 ];
 
-/// Specialists registered with `builder.sub_agent(...)`.
+/// Specialist agents, exposed as callable tools.
 ///
-/// These are reached through ADK's `transfer_to_agent`, which **hands over
-/// control** rather than returning a value. Describing them as callable tools
-/// caused exactly the failure it sounds like: the orchestrator "called" one, ADK
-/// turned that into a transfer, and the receiving specialist read the same
-/// instruction and transferred onward — three models paid to pass a task around
-/// without doing it. The framing below is deliberately different for that reason.
-/// Requirement 13.2, 13.3.
+/// They were briefly registered with `builder.sub_agent(...)`, which routes
+/// through ADK's `transfer_to_agent`. Two problems: a specialist that receives
+/// control can transfer again, so one request produced three hops and no work;
+/// and ADK emits no `Part::FunctionResponse` on a successful transfer
+/// (adk-agent/src/llm_agent.rs), leaving a function call the OpenAI Responses
+/// API rejects with "No tool output found for function call".
+///
+/// As `AgentTool`s they are called, they return a result, and control stays with
+/// the orchestrator — the composition pattern ADK documents for this.
 const SUBAGENT_CATALOGUE: &[(&str, &str)] = &[
     ("search_agent", "News, current events, and web searches"),
     (
@@ -341,27 +353,23 @@ pub fn build_single_agent_with_tools_and_telemetry(
 
     let surface = crate::prompt_surface::PromptSurface::from_names(advertised);
 
-    // Two sections, because there are two mechanisms. Tools return a value and
-    // keep control here; sub-agents take over the turn. Collapsing them into one
-    // "call as tools" list made the orchestrator transfer instead of work.
+    // One section: every agent is now a callable tool that returns a result, so
+    // the earlier split between "call as tools" and "transferring hands over the
+    // turn" no longer describes anything real.
     let tool_section = surface.render_section(AGENT_TOOL_CATALOGUE);
-    let subagent_section = surface.render_section(SUBAGENT_CATALOGUE);
+    let specialist_section = surface.render_section(SUBAGENT_CATALOGUE);
 
     let mut instruction = instruction;
-    if !tool_section.is_empty() {
-        instruction.push_str("\n\nAGENT TOOLS (call these; they return a result to you):\n");
-        instruction.push_str(&tool_section);
-    }
-    if !subagent_section.is_empty() {
+    if !tool_section.is_empty() || !specialist_section.is_empty() {
         instruction.push_str(
-            "\n\nSPECIALISTS (transferring hands the whole turn to them; you do not get \
-             control back):\n",
+            "\n\nAGENTS (call these like any other tool; each returns a result to you):\n",
         );
-        instruction.push_str(&subagent_section);
+        instruction.push_str(&tool_section);
+        instruction.push_str(&specialist_section);
         instruction.push_str(
-            "\nTransfer only when the specialist's domain is clearly the whole task. \
-             If you transfer, you are done. If you receive a transfer, complete the work \
-             yourself and answer the user — do not transfer again.\n",
+            "\nCall a specialist only when its domain is clearly the task, and use its \
+             result to answer the user yourself. Prefer your own tools for anything \
+             straightforward.\n",
         );
     }
 
@@ -396,12 +404,32 @@ pub fn build_single_agent_with_tools_and_telemetry(
         }
     }
 
-    // Add search subagent if available
+    // Same reasoning as the specialists below: a callable tool rather than a
+    // transfer target.
     if let Some(search_agent) = search_subagent {
-        builder = builder.sub_agent(search_agent);
+        builder = builder.tool(Arc::new(adk_tool::AgentTool::new(search_agent).timeout(
+            Duration::from_secs(cfg_or_default_specialist_timeout(runtime_cfg)),
+        )));
     }
+    // Specialists are registered as callable tools, not as sub-agents.
+    //
+    // As sub-agents they were reached through ADK's `transfer_to_agent`, which
+    // hands over the turn. That produced two failures. First, churn: a single
+    // request yielded three transfers (assistant → developer_agent →
+    // operations_agent) and no work, because a specialist that receives control
+    // can transfer again. Second, and fatally, the OpenAI Responses API requires
+    // every `function_call` to be followed by a `function_call_output`; a
+    // transfer records the call and ends the turn without one, so the next
+    // request fails with `No tool output found for function call`.
+    //
+    // As `AgentTool`s they are called, they return a result, and control never
+    // leaves the orchestrator — which is also what the prompt now claims.
     for specialist in capability_subagents {
-        builder = builder.sub_agent(specialist);
+        let name = specialist.name().to_string();
+        builder = builder.tool(Arc::new(adk_tool::AgentTool::new(specialist).timeout(
+            Duration::from_secs(cfg_or_default_specialist_timeout(runtime_cfg)),
+        )));
+        tracing::debug!(specialist = %name, "registered specialist as a callable tool");
     }
 
     if let Some(cfg) = runtime_cfg {
@@ -432,7 +460,7 @@ pub fn build_single_agent_with_tools_and_telemetry(
     Ok(Arc::new(builder.build()?))
 }
 
-fn build_search_subagent_for_provider(
+pub(crate) fn build_search_subagent_for_provider(
     runtime_cfg: Option<&RuntimeConfig>,
     model: Arc<dyn Llm>,
 ) -> Option<Arc<dyn Agent>> {
