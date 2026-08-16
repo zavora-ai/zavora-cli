@@ -18,6 +18,11 @@ pub struct RuntimeConfig {
     pub agent_resource_paths: Vec<String>,
     pub agent_allow_tools: Vec<String>,
     pub agent_deny_tools: Vec<String>,
+    /// Lifecycle hooks keyed by hook point, resolved from the active agent.
+    ///
+    /// Previously the agent config accepted a `hooks` table that nothing ever
+    /// read, so documented configuration silently did nothing. Requirement 7.8.
+    pub hooks: HashMap<crate::hooks::HookPoint, Vec<HookConfig>>,
     pub provider: Provider,
     pub model: Option<String>,
     pub worker_provider: Provider,
@@ -118,6 +123,7 @@ pub enum AgentSource {
     Implicit,
     Global,
     Local,
+    Plugin,
 }
 
 impl AgentSource {
@@ -126,6 +132,7 @@ impl AgentSource {
             AgentSource::Implicit => "implicit",
             AgentSource::Global => "global",
             AgentSource::Local => "local",
+            AgentSource::Plugin => "plugin",
         }
     }
 }
@@ -177,7 +184,7 @@ pub struct AgentPaths {
     pub selection_file: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct McpServerConfig {
     pub name: String,
     /// HTTP endpoint URL. Required for HTTP transport, omit for stdio.
@@ -335,6 +342,29 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
             },
         },
     );
+    for name in crate::agents::capability::specialist_names() {
+        resolved.insert(
+            name.to_string(),
+            ResolvedAgent {
+                name: name.to_string(),
+                source: AgentSource::Implicit,
+                config: AgentFileConfig {
+                    description: crate::agents::capability::specialist_description(name)
+                        .map(str::to_string),
+                    instruction: Some(format!(
+                        "Act as the built-in {name} specialist. Use only capabilities relevant to this role and verify the result."
+                    )),
+                    provider: None,
+                    model: None,
+                    tool_confirmation_mode: None,
+                    resource_paths: Vec::new(),
+                    allow_tools: Vec::new(),
+                    deny_tools: Vec::new(),
+                    hooks: HashMap::new(),
+                },
+            },
+        );
+    }
     resolved
 }
 
@@ -524,6 +554,7 @@ pub fn resolve_runtime_config_with_agents(
         agent_resource_paths: active_agent.config.resource_paths.clone(),
         agent_allow_tools: active_agent.config.allow_tools.clone(),
         agent_deny_tools: active_agent.config.deny_tools.clone(),
+        hooks: resolve_agent_hooks(&active_agent.config.hooks),
         provider,
         model: Some(worker_model.clone()),
         worker_provider: provider,
@@ -535,7 +566,20 @@ pub fn resolve_runtime_config_with_agents(
             .or(profile.planner_call_budget)
             .unwrap_or(4)
             .max(1),
-        api_key: profile.api_key,
+        api_key: {
+            // Requirement 3.5: keep working, but say that the value belongs in
+            // the OS credential vault. Setup has written to the vault since v2;
+            // a plaintext key here is a leftover that will be committed by
+            // accident sooner or later.
+            if profile.api_key.is_some() {
+                tracing::warn!(
+                    "a plaintext api_key is set in profile configuration; \
+                     run `zavora-cli setup` to move it into the OS credential vault \
+                     and remove it from the file"
+                );
+            }
+            profile.api_key
+        },
         ollama_host: profile.ollama_host,
         app_name: cli
             .app_name
@@ -655,4 +699,33 @@ pub fn display_session_db_url(cfg: &RuntimeConfig) -> String {
             crate::error::redact_sqlite_url_value(&cfg.session_db_url)
         )
     }
+}
+
+/// Map the string-keyed `hooks` table from agent configuration onto typed hook
+/// points, discarding unknown keys with a warning rather than failing the whole
+/// configuration load.
+fn resolve_agent_hooks(
+    raw: &HashMap<String, Vec<HookConfig>>,
+) -> HashMap<crate::hooks::HookPoint, Vec<HookConfig>> {
+    use crate::hooks::HookPoint;
+
+    let mut resolved: HashMap<HookPoint, Vec<HookConfig>> = HashMap::new();
+    for (key, configs) in raw {
+        let point = match key.as_str() {
+            "agent_spawn" => HookPoint::AgentSpawn,
+            "prompt_submit" => HookPoint::PromptSubmit,
+            "pre_tool" => HookPoint::PreTool,
+            "post_tool" => HookPoint::PostTool,
+            "stop" => HookPoint::Stop,
+            other => {
+                tracing::warn!(
+                    hook_point = other,
+                    "unknown hook point in agent configuration; ignoring"
+                );
+                continue;
+            }
+        };
+        resolved.entry(point).or_default().extend(configs.clone());
+    }
+    resolved
 }

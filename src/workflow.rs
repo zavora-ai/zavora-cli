@@ -28,11 +28,32 @@ pub fn build_workflow_agent(
             tool_timeout,
             runtime_cfg,
         ),
-        WorkflowMode::Sequential => build_sequential_agent(model),
-        WorkflowMode::Parallel => build_parallel_agent(model),
-        WorkflowMode::Loop => build_loop_agent(model, max_iterations),
-        WorkflowMode::Graph => build_graph_workflow_agent(model),
+        WorkflowMode::Sequential => build_sequential_agent(model, runtime_cfg),
+        WorkflowMode::Parallel => build_parallel_agent(model, runtime_cfg),
+        WorkflowMode::Loop => build_loop_agent(model, max_iterations, runtime_cfg),
+        WorkflowMode::Graph => build_graph_workflow_agent(model, runtime_cfg),
     }
+}
+
+fn workspace_instruction_block(runtime_cfg: Option<&RuntimeConfig>) -> String {
+    if runtime_cfg.is_none() {
+        return String::new();
+    }
+    match crate::skills::resolve_workspace_instructions() {
+        Ok(instructions) if !instructions.content.is_empty() => format!(
+            "\n\n<workspace_instructions>\n{}\n</workspace_instructions>",
+            instructions.content
+        ),
+        Ok(_) => String::new(),
+        Err(error) => {
+            tracing::warn!(%error, "workflow project instruction loading unavailable");
+            String::new()
+        }
+    }
+}
+
+fn with_workspace_instructions(base: &str, workspace: &str) -> String {
+    format!("{base}{workspace}")
 }
 
 pub fn classify_workflow_route(input: &str) -> &'static str {
@@ -117,7 +138,11 @@ async fn generate_model_text(model: Arc<dyn Llm>, prompt: &str) -> Result<String
     Ok(trimmed.to_string())
 }
 
-fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
+fn build_graph_workflow_agent(
+    model: Arc<dyn Llm>,
+    runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    let workspace = workspace_instruction_block(runtime_cfg);
     let route_classifier = |ctx: adk_rust::graph::NodeContext| async move {
         let input = ctx
             .get("input")
@@ -128,56 +153,79 @@ fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
         Ok(NodeOutput::new().with_update("route", json!(route)))
     };
 
-    let release_prep = |ctx: adk_rust::graph::NodeContext| async move {
-        let input = ctx
-            .get("input")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let prompt = format!(
-            "{}\n\nUser request:\n{}",
-            workflow_template("release"),
-            input
-        );
-        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    let release_workspace = workspace.clone();
+    let release_prep = move |ctx: adk_rust::graph::NodeContext| {
+        let workspace = release_workspace.clone();
+        async move {
+            let input = ctx
+                .get("input")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let prompt = format!(
+                "{}{}\n\nUser request:\n{}",
+                workflow_template("release"),
+                workspace,
+                input
+            );
+            Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+        }
     };
 
-    let architecture_prep = |ctx: adk_rust::graph::NodeContext| async move {
-        let input = ctx
-            .get("input")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let prompt = format!(
-            "{}\n\nUser request:\n{}",
-            workflow_template("architecture"),
-            input
-        );
-        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    let architecture_workspace = workspace.clone();
+    let architecture_prep = move |ctx: adk_rust::graph::NodeContext| {
+        let workspace = architecture_workspace.clone();
+        async move {
+            let input = ctx
+                .get("input")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let prompt = format!(
+                "{}{}\n\nUser request:\n{}",
+                workflow_template("architecture"),
+                workspace,
+                input
+            );
+            Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+        }
     };
 
-    let risk_prep = |ctx: adk_rust::graph::NodeContext| async move {
-        let input = ctx
-            .get("input")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let prompt = format!("{}\n\nUser request:\n{}", workflow_template("risk"), input);
-        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    let risk_workspace = workspace.clone();
+    let risk_prep = move |ctx: adk_rust::graph::NodeContext| {
+        let workspace = risk_workspace.clone();
+        async move {
+            let input = ctx
+                .get("input")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let prompt = format!(
+                "{}{}\n\nUser request:\n{}",
+                workflow_template("risk"),
+                workspace,
+                input
+            );
+            Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+        }
     };
 
-    let delivery_prep = |ctx: adk_rust::graph::NodeContext| async move {
-        let input = ctx
-            .get("input")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let prompt = format!(
-            "{}\n\nUser request:\n{}",
-            workflow_template("delivery"),
-            input
-        );
-        Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+    let delivery_prep = move |ctx: adk_rust::graph::NodeContext| {
+        let workspace = workspace.clone();
+        async move {
+            let input = ctx
+                .get("input")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let prompt = format!(
+                "{}{}\n\nUser request:\n{}",
+                workflow_template("delivery"),
+                workspace,
+                input
+            );
+            Ok(NodeOutput::new().with_update("branch_prompt", json!(prompt)))
+        }
     };
 
     let model_for_draft = model.clone();
@@ -244,14 +292,19 @@ fn build_graph_workflow_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     Ok(Arc::new(agent))
 }
 
-fn build_sequential_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
+fn build_sequential_agent(
+    model: Arc<dyn Llm>,
+    runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    let workspace = workspace_instruction_block(runtime_cfg);
     let scope = Arc::new(
         LlmAgentBuilder::new("scope_analyst")
             .description("Defines a concise project scope.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Analyze the user's request and produce a compact scope. Include assumptions, \
                  constraints, and high-risk areas.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("scope_summary")
             .build()?,
@@ -260,10 +313,11 @@ fn build_sequential_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let release_planner = Arc::new(
         LlmAgentBuilder::new("release_planner")
             .description("Breaks scope into release increments.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Using {scope_summary}, produce release-by-release slices with explicit acceptance \
                  criteria.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("release_breakdown")
             .build()?,
@@ -272,10 +326,11 @@ fn build_sequential_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let execution_writer = Arc::new(
         LlmAgentBuilder::new("execution_writer")
             .description("Produces the final actionable response.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Using {release_breakdown}, write the final answer as a practical execution guide \
                  with milestones, quality gates, and risks.",
-            )
+                &workspace,
+            ))
             .model(model)
             .build()?,
     );
@@ -292,14 +347,19 @@ fn build_sequential_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     Ok(Arc::new(agent))
 }
 
-fn build_parallel_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
+fn build_parallel_agent(
+    model: Arc<dyn Llm>,
+    runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    let workspace = workspace_instruction_block(runtime_cfg);
     let architecture = Arc::new(
         LlmAgentBuilder::new("architecture_analyst")
             .description("Focuses architecture and decomposition.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Analyze architecture decisions and implementation decomposition for the user \
                  request.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("architecture_notes")
             .build()?,
@@ -307,10 +367,11 @@ fn build_parallel_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let risk = Arc::new(
         LlmAgentBuilder::new("risk_analyst")
             .description("Focuses delivery and operational risk.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Analyze delivery, security, and rollout risks for the user request. Keep it \
                  concrete.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("risk_notes")
             .build()?,
@@ -318,10 +379,11 @@ fn build_parallel_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let quality = Arc::new(
         LlmAgentBuilder::new("quality_analyst")
             .description("Focuses test and quality gates.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Analyze quality strategy, testing layers, and release criteria for the user \
                  request.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("quality_notes")
             .build()?,
@@ -339,13 +401,14 @@ fn build_parallel_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     let synthesizer = Arc::new(
         LlmAgentBuilder::new("synthesizer")
             .description("Merges parallel analysis into one plan.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Synthesize the results into one coherent plan.\n\
                  Architecture: {architecture_notes?}\n\
                  Risks: {risk_notes?}\n\
                  Quality: {quality_notes?}\n\
                  Return a single clear execution plan.",
-            )
+                &workspace,
+            ))
             .model(model)
             .build()?,
     );
@@ -357,14 +420,20 @@ fn build_parallel_agent(model: Arc<dyn Llm>) -> Result<Arc<dyn Agent>> {
     Ok(Arc::new(root))
 }
 
-fn build_loop_agent(model: Arc<dyn Llm>, max_iterations: u32) -> Result<Arc<dyn Agent>> {
+fn build_loop_agent(
+    model: Arc<dyn Llm>,
+    max_iterations: u32,
+    runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    let workspace = workspace_instruction_block(runtime_cfg);
     let iterative = Arc::new(
         LlmAgentBuilder::new("iterative_refiner")
             .description("Refines the answer until quality is acceptable.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Maintain and improve a draft in {draft?}. Initialize from user request if empty. \
                  Improve one step per turn. Call exit_loop when the draft is release-ready.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .tool(Arc::new(ExitLoopTool::new()))
             .output_key("draft")
@@ -380,10 +449,11 @@ fn build_loop_agent(model: Arc<dyn Llm>, max_iterations: u32) -> Result<Arc<dyn 
     let finalizer = Arc::new(
         LlmAgentBuilder::new("loop_finalizer")
             .description("Formats the final loop result.")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Return the final polished response from {draft?}. If draft is empty, provide the \
                  best concise answer directly.",
-            )
+                &workspace,
+            ))
             .model(model)
             .build()?,
     );
@@ -395,13 +465,19 @@ fn build_loop_agent(model: Arc<dyn Llm>, max_iterations: u32) -> Result<Arc<dyn 
     Ok(Arc::new(root))
 }
 
-pub fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Result<Arc<dyn Agent>> {
+pub fn build_release_planning_agent(
+    model: Arc<dyn Llm>,
+    releases: u32,
+    runtime_cfg: Option<&RuntimeConfig>,
+) -> Result<Arc<dyn Agent>> {
+    let workspace = workspace_instruction_block(runtime_cfg);
     let scoper = Arc::new(
         LlmAgentBuilder::new("product_scoper")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Turn the user goal into a product scope with assumptions, constraints, and \
                  measurable outcomes.",
-            )
+                &workspace,
+            ))
             .model(model.clone())
             .output_key("product_scope")
             .build()?,
@@ -409,10 +485,13 @@ pub fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Resul
 
     let release_architect = Arc::new(
         LlmAgentBuilder::new("release_architect")
-            .instruction(format!(
-                "Create an agile release plan across {} releases from {{product_scope}}. \
+            .instruction(with_workspace_instructions(
+                &format!(
+                    "Create an agile release plan across {} releases from {{product_scope}}. \
                  For each release include objective, scope, validation, and demo output.",
-                releases
+                    releases
+                ),
+                &workspace,
             ))
             .model(model.clone())
             .output_key("release_plan")
@@ -421,7 +500,7 @@ pub fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Resul
 
     let final_writer = Arc::new(
         LlmAgentBuilder::new("release_writer")
-            .instruction(
+            .instruction(with_workspace_instructions(
                 "Return the final answer in markdown with sections:\n\
                  - Vision\n\
                  - Release Breakdown\n\
@@ -429,7 +508,8 @@ pub fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Resul
                  - Risks and mitigations\n\
                  - Next sprint start tasks\n\
                  Use {release_plan}.",
-            )
+                &workspace,
+            ))
             .model(model)
             .build()?,
     );
@@ -443,4 +523,93 @@ pub fn build_release_planning_agent(model: Arc<dyn Llm>, releases: u32) -> Resul
         ],
     );
     Ok(Arc::new(root))
+}
+
+/// Coverage for workflow route classification and templates, which had none.
+///
+/// Requirement 13.7. Route classification decides which template a prompt gets,
+/// so a silent misclassification changes every downstream section heading.
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+
+    #[test]
+    fn risk_language_routes_to_risk() {
+        for prompt in [
+            "assess the rollback risk",
+            "incident review for the outage",
+            "what mitigation do we need",
+            "RISK register",
+        ] {
+            assert_eq!(classify_workflow_route(prompt), "risk", "{prompt}");
+        }
+    }
+
+    #[test]
+    fn architecture_language_routes_to_architecture() {
+        for prompt in [
+            "design the ingestion system",
+            "how should this scale",
+            "review the architecture",
+        ] {
+            assert_eq!(classify_workflow_route(prompt), "architecture", "{prompt}");
+        }
+    }
+
+    #[test]
+    fn release_language_routes_to_release() {
+        for prompt in ["plan the next sprint", "milestone roadmap", "cut a release"] {
+            assert_eq!(classify_workflow_route(prompt), "release", "{prompt}");
+        }
+    }
+
+    #[test]
+    fn unclassified_input_falls_back_to_delivery() {
+        for prompt in ["add a button", "", "fix the typo in the header"] {
+            assert_eq!(classify_workflow_route(prompt), "delivery", "{prompt}");
+        }
+    }
+
+    /// Risk is checked before architecture, so a prompt naming both is routed to
+    /// risk. Pinning the precedence prevents an accidental reorder.
+    #[test]
+    fn risk_takes_precedence_over_architecture() {
+        assert_eq!(
+            classify_workflow_route("architecture risk review"),
+            "risk",
+            "risk must be checked before architecture"
+        );
+    }
+
+    #[test]
+    fn classification_is_case_insensitive() {
+        assert_eq!(classify_workflow_route("ROLLBACK plan"), "risk");
+        assert_eq!(classify_workflow_route("DESIGN doc"), "architecture");
+    }
+
+    /// Every route must have a distinct, non-empty template; a missing one would
+    /// silently degrade to the fallback and lose the section contract.
+    #[test]
+    fn every_route_has_a_distinct_template() {
+        let routes = ["risk", "architecture", "release", "delivery"];
+        let mut templates = Vec::new();
+        for route in routes {
+            let template = workflow_template(route);
+            assert!(!template.is_empty(), "{route} has an empty template");
+            assert!(
+                template.contains("Template:"),
+                "{route} template lacks a header: {template}"
+            );
+            templates.push(template);
+        }
+        let unique = templates.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), routes.len(), "templates are not distinct");
+    }
+
+    /// An unknown route must still produce a usable template rather than panic.
+    #[test]
+    fn an_unknown_route_still_yields_a_template() {
+        let template = workflow_template("not-a-route");
+        assert!(!template.is_empty());
+    }
 }
