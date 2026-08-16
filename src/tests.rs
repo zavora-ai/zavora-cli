@@ -3381,3 +3381,26 @@ enabled = true
     );
     assert!(cfg.mcp_servers.is_empty());
 }
+
+/// `--version` reports the package version.
+///
+/// Clap only offers the flag when the command declares it, and it declined to for
+/// v2.0.0 until this was noticed during release preparation. It is the first thing
+/// anyone runs against a released binary and the first thing packaging scripts read,
+/// so the wiring is asserted rather than assumed.
+#[test]
+fn the_cli_reports_its_version() {
+    use clap::CommandFactory;
+    let command = crate::cli::Cli::command();
+    let declared = command
+        .get_version()
+        .expect("the CLI must declare a version, or clap omits --version entirely");
+    assert_eq!(declared, env!("CARGO_PKG_VERSION"));
+
+    // And the flag is actually reachable.
+    let rendered = command.clone().render_version();
+    assert!(
+        rendered.contains(env!("CARGO_PKG_VERSION")),
+        "rendered version should name the package version: {rendered}"
+    );
+}

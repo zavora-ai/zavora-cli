@@ -483,6 +483,10 @@ Switching behavior:\n\
 
 #[derive(Debug, Parser)]
 #[command(name = "zavora-cli")]
+// Taken from `CARGO_PKG_VERSION`, so `--version` cannot drift from the package.
+// Without it clap declines the flag entirely, which is the first thing anyone runs
+// against a released binary and the first thing packaging scripts read.
+#[command(version)]
 #[command(about = "Rust CLI agent shell built on ADK-Rust")]
 #[command(after_long_help = CLI_EXAMPLES)]
 pub struct Cli {
