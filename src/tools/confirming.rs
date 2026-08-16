@@ -497,6 +497,12 @@ impl Tool for ConfirmingTool {
                     .and_then(Value::as_str)
                     .unwrap_or("?")
                     .to_string()
+            } else if self.inner.name() == "capability_enable" {
+                // Describe the change rather than the call. The arguments name a
+                // capability; what approval actually buys is a set of installs,
+                // and which ones are needed depends on the machine, so it has to
+                // be computed here rather than taken from the model.
+                crate::tools::capability::describe_enable_request(&args)
             } else {
                 crate::text::truncate(&args.to_string(), 300, "…")
             };

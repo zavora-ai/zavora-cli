@@ -1,6 +1,7 @@
 pub mod bash_security;
 #[cfg(feature = "browser")]
 pub mod browser;
+pub mod capability;
 pub mod confirming;
 pub mod execute_bash;
 pub mod file_edit;
@@ -323,6 +324,11 @@ pub fn build_builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(time_agent),
         Arc::new(memory_agent),
     ];
+
+    // Capability discovery and enablement. Discovery is read-only; enabling
+    // installs software and goes through the same approval path as any other
+    // mutating tool, with a prompt that names the exact install commands.
+    tools.extend(capability::build_capability_tools());
 
     // Feature-gated: sandbox code execution
     #[cfg(feature = "sandbox")]

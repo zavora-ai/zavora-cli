@@ -298,58 +298,62 @@ async fn workflow_modes_return_deterministic_mock_output() {
     }
 }
 
+/// Search is available only when the invocation explicitly runs Gemini.
+///
+/// Tests the provider gate directly. The specialists moved from `sub_agent` to
+/// `AgentTool` because ADK emits no `Part::FunctionResponse` on a successful
+/// `transfer_to_agent` (adk-agent/src/llm_agent.rs), leaving an unpaired
+/// function call that the OpenAI Responses API rejects with "No tool output
+/// found for function call". Since the `Agent` trait exposes no tool list, the
+/// gate is asserted at its source rather than through the assembled agent.
 #[test]
 fn search_subagent_is_only_attached_for_explicit_gemini_provider() {
+    use crate::runner::build_search_subagent_for_provider;
+
     let mut cfg = base_cfg();
+
     cfg.provider = Provider::Gemini;
-    let gemini_agent = build_single_agent_with_tools(
-        mock_model("gemini"),
-        &[],
-        ToolConfirmationPolicy::Never,
-        Duration::from_secs(45),
-        Some(&cfg),
-    )
-    .expect("gemini agent should build");
     assert!(
-        gemini_agent
-            .sub_agents()
-            .iter()
-            .any(|agent| agent.name() == "search_agent"),
-        "search sub-agent should be available for explicit Gemini provider"
+        build_search_subagent_for_provider(Some(&cfg), mock_model("gemini")).is_some(),
+        "search agent should be available for explicit Gemini provider"
     );
 
-    cfg.provider = Provider::Auto;
-    let auto_agent = build_single_agent_with_tools(
-        mock_model("auto"),
-        &[],
-        ToolConfirmationPolicy::Never,
-        Duration::from_secs(45),
-        Some(&cfg),
-    )
-    .expect("auto agent should build");
-    assert!(
-        auto_agent
-            .sub_agents()
-            .iter()
-            .all(|agent| agent.name() != "search_agent"),
-        "search sub-agent should not be attached in auto provider mode"
-    );
+    for provider in [Provider::Auto, Provider::Openai, Provider::Anthropic] {
+        cfg.provider = provider;
+        assert!(
+            build_search_subagent_for_provider(Some(&cfg), mock_model("other")).is_none(),
+            "search agent must not attach for {provider:?}"
+        );
+    }
 
-    cfg.provider = Provider::Openai;
-    let openai_agent = build_single_agent_with_tools(
+    // No runtime config at all: nothing to gate on, so nothing attaches.
+    assert!(build_search_subagent_for_provider(None, mock_model("none")).is_none());
+}
+
+/// Specialists must never be registered as transfer targets, because a
+/// successful ADK transfer leaves an unpaired function call.
+#[test]
+fn specialists_are_not_registered_as_transfer_targets() {
+    let cfg = base_cfg();
+    let agent = build_single_agent_with_tools(
         mock_model("openai"),
         &[],
         ToolConfirmationPolicy::Never,
         Duration::from_secs(45),
         Some(&cfg),
     )
-    .expect("openai agent should build");
+    .expect("agent should build");
+
     assert!(
-        openai_agent
+        agent.sub_agents().is_empty(),
+        "found {} sub-agent(s); specialists must be AgentTools so their results \
+         pair with their calls: {:?}",
+        agent.sub_agents().len(),
+        agent
             .sub_agents()
             .iter()
-            .all(|agent| agent.name() != "search_agent"),
-        "search sub-agent should not be attached for non-Gemini providers"
+            .map(|a| a.name())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -3317,4 +3321,63 @@ fn test_adk_skill_parses_anthropic_skills() {
             println!("Parse error: {}", e);
         }
     }
+}
+
+/// Reloading picks up servers added to the profile since start, and leaves the
+/// session's own route choices alone.
+///
+/// Enabling a capability appends MCP servers to the profile on disk. A running
+/// session has to see them without discarding a `/worker` or `/planner` switch
+/// made since it started, which is why only that one field is refreshed.
+#[test]
+fn reloading_mcp_servers_preserves_session_route_choices() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[profiles.default]
+worker_provider = "openai"
+worker_model = "from-disk"
+
+[[profiles.default.mcp_servers]]
+name = "mcp-search"
+command = "mcp-search"
+enabled = true
+
+[[profiles.default.mcp_servers]]
+name = "mcp-browser"
+command = "mcp-browser"
+enabled = true
+"#,
+    )
+    .expect("write");
+
+    let mut cfg = base_cfg();
+    cfg.config_path = path.to_string_lossy().into_owned();
+    cfg.profile = "default".to_string();
+    // Stand in for a mid-session `/worker` switch.
+    cfg.worker_model = "chosen-in-session".to_string();
+    assert!(cfg.mcp_servers.is_empty());
+
+    let declared = crate::config::reload_mcp_servers(&mut cfg).expect("reload");
+    assert_eq!(declared, 2);
+    let names: Vec<&str> = cfg
+        .mcp_servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["mcp-search", "mcp-browser"]);
+    assert_eq!(
+        cfg.worker_model, "chosen-in-session",
+        "reloading must not discard a route chosen during the session"
+    );
+
+    // A profile with no servers reloads to empty rather than erroring.
+    cfg.profile = "absent".to_string();
+    assert_eq!(
+        crate::config::reload_mcp_servers(&mut cfg).expect("reload"),
+        0
+    );
+    assert!(cfg.mcp_servers.is_empty());
 }

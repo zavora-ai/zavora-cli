@@ -225,6 +225,23 @@ impl McpServerConfig {
     }
 }
 
+/// Re-read this profile's MCP servers from disk, returning how many are declared.
+///
+/// Only that one field is refreshed. A running session may have switched worker
+/// or planner route since it started, and reloading the whole configuration would
+/// silently discard those choices. Used after a capability is enabled, which
+/// appends servers to the profile that the running tool surface has never seen.
+pub fn reload_mcp_servers(cfg: &mut RuntimeConfig) -> Result<usize> {
+    let profiles = load_profiles(&cfg.config_path)?;
+    let servers = profiles
+        .profiles
+        .get(&cfg.profile)
+        .map(|profile| profile.mcp_servers.clone())
+        .unwrap_or_default();
+    cfg.mcp_servers = servers;
+    Ok(cfg.mcp_servers.len())
+}
+
 pub fn load_profiles(config_path: &str) -> Result<ProfilesFile> {
     let path = Path::new(config_path);
     if !path.exists() {

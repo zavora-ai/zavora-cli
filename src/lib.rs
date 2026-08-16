@@ -45,6 +45,9 @@ pub mod tool_surface;
 mod tool_surface_tests;
 pub mod tools;
 pub mod tui;
+pub mod tui_keys;
+pub mod tui_restore;
+pub mod tui_text;
 pub mod workflow;
 
 #[cfg(test)]
