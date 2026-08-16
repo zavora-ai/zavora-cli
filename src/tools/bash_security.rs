@@ -742,3 +742,92 @@ mod tests {
         ));
     }
 }
+
+/// Allow/deny coverage for the validators that had none.
+///
+/// Requirement 8.8: every validator in the pipeline needs at least one allow
+/// case and one deny case. An untested validator is indistinguishable from an
+/// unreachable one.
+#[cfg(test)]
+mod validator_coverage_tests {
+    use super::*;
+
+    fn denied(command: &str) -> bool {
+        matches!(validate_bash_command(command), SecurityResult::Deny(_))
+    }
+
+    fn asked(command: &str) -> bool {
+        matches!(validate_bash_command(command), SecurityResult::Ask(_))
+    }
+
+    fn allowed_or_passthrough(command: &str) -> bool {
+        matches!(
+            validate_bash_command(command),
+            SecurityResult::Allow(_) | SecurityResult::Passthrough
+        )
+    }
+
+    #[test]
+    fn redirections_ask_but_safe_forms_pass() {
+        assert!(asked("echo hi > /tmp/out"), "output redirection should ask");
+        assert!(asked("wc -l < Cargo.toml"), "input redirection should ask");
+        // A heredoc is not input redirection.
+        assert!(
+            !asked("cat <<'EOF'\n"),
+            "heredoc should not be treated as `<`"
+        );
+        assert!(allowed_or_passthrough("echo hi"));
+    }
+
+    #[test]
+    fn obfuscated_flags_are_denied_but_ordinary_flags_pass() {
+        assert!(denied("ls -l|a"), "flag containing a pipe should be denied");
+        assert!(
+            denied("grep -\u{2013}color x"),
+            "non-ascii flag should be denied"
+        );
+        assert!(denied("ls -$x"), "flag containing $ should be denied");
+        assert!(allowed_or_passthrough("ls -la"));
+        assert!(allowed_or_passthrough("grep --color=never x file"));
+    }
+
+    #[test]
+    fn ifs_injection_is_denied_but_the_word_ifs_elsewhere_passes() {
+        assert!(denied("IFS=x; echo a"), "IFS assignment should be denied");
+        assert!(
+            allowed_or_passthrough("grep IFS notes.md"),
+            "the token IFS as an argument is not manipulation"
+        );
+    }
+
+    #[test]
+    fn mid_word_hash_is_denied_but_parameter_forms_pass() {
+        assert!(denied("echo a#b"), "mid-word # should be denied");
+        // Note: `${#var}` cannot reach this validator — `${}` parameter
+        // substitution is denied earlier by policy. `$#` is the reachable
+        // positional-parameter form the carve-out protects.
+        assert!(
+            allowed_or_passthrough("echo $#"),
+            "$# is a positional-parameter count, not parser confusion"
+        );
+        assert!(
+            allowed_or_passthrough("echo hi # trailing comment"),
+            "a spaced comment is not mid-word"
+        );
+    }
+
+    #[test]
+    fn ansi_c_quoting_with_escapes_is_denied_but_plain_quotes_pass() {
+        assert!(denied("echo $'\\x41'"), "hex escape should be denied");
+        assert!(denied("echo $'\\u0041'"), "unicode escape should be denied");
+        assert!(allowed_or_passthrough("echo 'plain single quoted'"));
+    }
+
+    #[test]
+    fn backslash_escaped_operators_are_denied() {
+        assert!(denied("echo a \\| b"), "escaped pipe should be denied");
+        assert!(denied("echo a \\& b"), "escaped ampersand should be denied");
+        assert!(denied("echo a \\; b"), "escaped semicolon should be denied");
+        assert!(allowed_or_passthrough("echo a b"));
+    }
+}
