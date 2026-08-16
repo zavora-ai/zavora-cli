@@ -1,5 +1,11 @@
 # Design Document: Cross-Platform npm Install
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Overview
 
 This design extends the `@zavora-ai/zavora-cli` npm package to support Windows alongside the existing macOS and Linux platforms. The changes span four areas:

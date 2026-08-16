@@ -1,5 +1,11 @@
 # Requirements: Claude Code Capability Extraction for Zavora-CLI
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Context
 
 Zavora-CLI is a Rust CLI AI agent built on ADK-Rust. Analysis of the Claude Code v2.1.88 source reveals production-grade patterns for tool safety, code intelligence, MCP infrastructure, and agent orchestration that would significantly improve zavora-cli's capabilities. This spec defines the requirements for extracting and adapting those patterns into zavora-cli's Rust codebase.

@@ -1,5 +1,11 @@
 # Design Document: Provider Onboarding
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Overview
 
 This design introduces an interactive onboarding wizard to zavora-cli that replaces the current static `print_onboarding()` welcome message. The wizard is a synchronous, terminal-based flow using stdin/stdout that guides users through provider selection, model selection, and API key entry. On completion it persists a fully functional default profile to `.zavora/config.toml`.

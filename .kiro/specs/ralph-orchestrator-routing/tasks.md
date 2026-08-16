@@ -1,5 +1,11 @@
 # Implementation Plan: Ralph Orchestrator Routing
 
+> **Superseded by [`.kiro/specs/v2-vision`](../v2-vision/requirements.md) on 2026-08-15.**
+> That spec is the authoritative v2 contract and holds the reconciled backlog.
+> This document is retained for provenance. Checkbox state here was reconciled
+> against the runtime on 2026-08-15; where the implementation deliberately
+> diverged, the divergence is recorded in v2-vision task 23.4.
+
 ## Overview
 
 Add `/ralph <prompt>` as a chat slash command and register Ralph as an adk-rust sub-agent on the main assistant for autonomous LLM-based routing when agent mode is active. Builds on the existing `run_ralph()` infrastructure from the ralph-subagent-integration spec.
@@ -34,7 +40,8 @@ Add `/ralph <prompt>` as a chat slash command and register Ralph as an adk-rust 
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 3. Build Ralph sub-agent module
-  - [x] 3.1 Create `src/agents/ralph_agent.rs` with `RalphPipelineTool` and `build_ralph_agent()`
+  - [ ] 3.1 Create `src/agents/ralph_agent.rs` with `RalphPipelineTool` and `build_ralph_agent()`
+    - **Corrected 2026-08-15:** was marked complete, but the file does not exist and no `RalphPipelineTool` is registered. See `.kiro/specs/v2-vision` task 23.3 for the de-scope decision.
     - Implement `RalphPipelineTool` struct holding `Arc<RuntimeConfig>` and `Arc<TelemetrySink>`
     - Implement `Tool` trait: name `run_ralph_pipeline`, parameter schema with `prompt` string field
     - Implement `execute()` to call `run_ralph()` with the prompt, emit `ralph_agent.tool.invoked` telemetry
@@ -48,12 +55,14 @@ Add `/ralph <prompt>` as a chat slash command and register Ralph as an adk-rust 
     - _Requirements: 2.2, 3.3_
 
 - [x] 4. Wire Ralph sub-agent into runner
-  - [x] 4.1 Add conditional ralph sub-agent registration in `build_agent()` in `src/runner.rs`
+  - [ ] 4.1 Add conditional ralph sub-agent registration in `build_agent()` in `src/runner.rs`
+    - **Corrected 2026-08-15:** no such registration exists in `src/runner.rs`.
     - Add `build_ralph_subagent_if_agent_mode()` function that checks `is_agent_mode()` and calls `build_ralph_agent()`
     - Attach via `builder.sub_agent(ralph_agent)` alongside existing search sub-agent
     - _Requirements: 2.3, 2.4, 2.5_
 
-  - [x] 4.2 Update system prompt in `src/runner.rs` to mention ralph_agent in SUBAGENTS section
+  - [ ] 4.2 Update system prompt in `src/runner.rs` to mention ralph_agent in SUBAGENTS section
+    - **Corrected 2026-08-15:** deliberately not done. A prompt may only name registered tools (v2-vision Requirement 6.2), enforced by a test.
     - Add `- ralph_agent: For greenfield projects and multi-phase development (enabled only in agent mode)`
     - _Requirements: 3.5_
 
