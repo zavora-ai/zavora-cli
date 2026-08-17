@@ -27,7 +27,7 @@ Prebuilt release wrappers are also available:
 
 ```bash
 npm i -g @zavora-ai/zavora-cli
-brew install --formula https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/Formula/zavora-cli.rb
+brew install zavora-ai/tap/zavora-cli
 ```
 
 ## Start

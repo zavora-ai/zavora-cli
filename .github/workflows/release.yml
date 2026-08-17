@@ -293,37 +293,71 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # The formula lives in zavora-ai/homebrew-tap, because Homebrew 6 no longer
+  # installs a formula from a URL or a loose file — `brew install` takes a formula
+  # or cask name and rejects anything outside a tap. It is pinned there by git tag
+  # and revision rather than by a digest over the generated source tarball, which
+  # GitHub does not guarantee to be byte-stable, so there is no digest for a release
+  # job to compute and push back. That job used to do exactly that, and its failure
+  # left the old in-repo formula carrying a placeholder sha256.
+  #
+  # Updating the tap means writing to another repository, which GITHUB_TOKEN cannot
+  # do, so it needs a PAT in HOMEBREW_TAP_TOKEN with contents:write on the tap.
+  # Without it the release still succeeds and says what is left to do by hand.
   publish-formula:
     needs: [resolve, publish-release]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      # Deliberately `main`, not the release ref. This job commits the formula, and
-      # the branch it pushes to is the one it must be based on: checking out a tag
-      # and pushing `HEAD:main` is a non-fast-forward whenever main has moved past
-      # the tag, which is exactly how the v2.0.0 run failed. The generator only
-      # needs the tag *name* — it downloads the tag archive from GitHub to compute
-      # the digest — so nothing here requires the tag to be checked out.
-      - name: Checkout main
+      - name: Check tap token
+        id: tap_token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -n "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_TOKEN is not set, so zavora-ai/homebrew-tap still points at the previous release."
+            {
+              echo "- Homebrew: **not updated**, \`HOMEBREW_TAP_TOKEN\` not set"
+              echo "  Update by hand in zavora-ai/homebrew-tap: set \`tag\` and \`revision\` in \`Formula/zavora-cli.rb\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Checkout the tap
+        if: steps.tap_token.outputs.present == 'true'
         uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 0
+          repository: zavora-ai/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
 
-      # The formula digest can only be computed after the tag archive exists,
-      # so it is regenerated here rather than maintained by hand.
-      - name: Regenerate Homebrew formula
-        run: ./scripts/generate_homebrew_formula.sh "${{ needs.resolve.outputs.release_tag }}"
-
-      - name: Verify the formula version matches the tag
+      - name: Point the formula at this release
+        if: steps.tap_token.outputs.present == 'true'
+        working-directory: tap
+        env:
+          TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
-          TAG_VERSION="${{ needs.resolve.outputs.release_tag }}"
-          TAG_VERSION="${TAG_VERSION#v}"
-          FORMULA_VERSION="$(sed -n 's|.*/tags/v\([0-9][^.]*\.[0-9]*\.[0-9]*\)\.tar\.gz.*|\1|p' Formula/zavora-cli.rb | head -n 1)"
-          test "${TAG_VERSION}" = "${FORMULA_VERSION}"
+          REVISION="$(git ls-remote https://github.com/zavora-ai/zavora-cli.git "refs/tags/${TAG}^{}" | cut -f1)"
+          if [[ -z "${REVISION}" ]]; then
+            echo "::error title=Tag not found::${TAG} has no commit on zavora-ai/zavora-cli."
+            exit 1
+          fi
+          python3 - "$TAG" "$REVISION" <<'PY'
+          import re, sys
+          tag, revision = sys.argv[1], sys.argv[2]
+          path = "Formula/zavora-cli.rb"
+          text = open(path).read()
+          text = re.sub(r'tag:\s+"[^"]*"', f'tag:      "{tag}"', text, count=1)
+          text = re.sub(r'revision:\s+"[^"]*"', f'revision: "{revision}"', text, count=1)
+          open(path, "w").write(text)
+          print(f"{path} -> {tag} @ {revision}")
+          PY
+          git diff --stat
 
-      - name: Commit the regenerated formula
+      - name: Commit the formula to the tap
+        if: steps.tap_token.outputs.present == 'true'
+        working-directory: tap
         run: |
           if git diff --quiet Formula/zavora-cli.rb; then
             echo "Formula already current."
@@ -332,16 +366,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/zavora-cli.rb
-          git commit -m "chore(release): refresh Homebrew formula for ${{ needs.resolve.outputs.release_tag }}"
-          # Another push can land between checkout and here. Rebase once and retry
-          # rather than failing a release for a race on an unrelated commit.
+          git commit -m "zavora-cli ${{ needs.resolve.outputs.release_tag }}"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
+              echo "- Homebrew: tap updated to ${{ needs.resolve.outputs.release_tag }}" >> "${GITHUB_STEP_SUMMARY}"
               exit 0
             fi
-            echo "push rejected (attempt ${attempt}); rebasing onto origin/main"
-            git fetch origin main
-            git rebase origin/main || exit 1
+            git fetch origin main && git rebase origin/main || exit 1
           done
-          echo "::error title=Homebrew formula not pushed::Could not push the regenerated formula to main after 3 attempts."
+          echo "::error title=Tap not pushed::Could not push to zavora-ai/homebrew-tap after 3 attempts."
           exit 1
