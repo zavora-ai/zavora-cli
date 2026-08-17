@@ -299,10 +299,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      # Deliberately `main`, not the release ref. This job commits the formula, and
+      # the branch it pushes to is the one it must be based on: checking out a tag
+      # and pushing `HEAD:main` is a non-fast-forward whenever main has moved past
+      # the tag, which is exactly how the v2.0.0 run failed. The generator only
+      # needs the tag *name* — it downloads the tag archive from GitHub to compute
+      # the digest — so nothing here requires the tag to be checked out.
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source_ref }}
+          ref: main
+          fetch-depth: 0
 
       # The formula digest can only be computed after the tag archive exists,
       # so it is regenerated here rather than maintained by hand.
@@ -326,4 +333,15 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/zavora-cli.rb
           git commit -m "chore(release): refresh Homebrew formula for ${{ needs.resolve.outputs.release_tag }}"
-          git push origin HEAD:main
+          # Another push can land between checkout and here. Rebase once and retry
+          # rather than failing a release for a race on an unrelated commit.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}); rebasing onto origin/main"
+            git fetch origin main
+            git rebase origin/main || exit 1
+          done
+          echo "::error title=Homebrew formula not pushed::Could not push the regenerated formula to main after 3 attempts."
+          exit 1
