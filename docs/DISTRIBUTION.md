@@ -4,7 +4,7 @@
 
 1. Cargo: `cargo install zavora-cli`
 2. npm: `npm i -g @zavora-ai/zavora-cli`
-3. Homebrew: `brew install --formula https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/Formula/zavora-cli.rb`
+3. Homebrew: `brew install zavora-ai/tap/zavora-cli`
 
 ## Release Artifacts
 
@@ -23,6 +23,9 @@ The npm package downloads these artifacts during `postinstall`.
 Optional publish steps run only when secrets are configured:
 
 - `NPM_TOKEN`: stage `@zavora-ai/zavora-cli` for a maintainer to approve
+- `HOMEBREW_TAP_TOKEN`: update `Formula/zavora-cli.rb` in `zavora-ai/homebrew-tap`
+  (a PAT with `contents:write` on that repository; `GITHUB_TOKEN` cannot write to
+  another repo)
 - `CARGO_REGISTRY_TOKEN`: publish `zavora-cli` to crates.io from CI
 
 Without these secrets, GitHub release artifacts are still produced — but the jobs
@@ -73,8 +76,9 @@ rather than trusting whichever npm the runner image ships.
    - `Cargo.toml`: `version = "X.Y.Z"`
    - `npm/zavora-cli/package.json`: `"version": "X.Y.Z"`
 2. Run checks: `make dist-check`
-3. Refresh Homebrew formula for the target tag:
-   - `./scripts/generate_homebrew_formula.sh vX.Y.Z`
+3. Nothing to do for Homebrew by hand: the release workflow repoints
+   `zavora-ai/homebrew-tap` at the new tag. The formula is pinned by git tag and
+   revision, so there is no digest to regenerate.
 4. Commit, push, and create tag:
    - `git tag -a vX.Y.Z -m "zavora-cli vX.Y.Z"`
    - `git push origin main --tags`
@@ -85,4 +89,4 @@ rather than trusting whichever npm the runner image ships.
 7. Verify installs in clean environments:
    - `cargo install zavora-cli`
    - `npm i -g @zavora-ai/zavora-cli`
-   - `brew install --formula https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/Formula/zavora-cli.rb`
+   - `brew install zavora-ai/tap/zavora-cli`

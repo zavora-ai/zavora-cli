@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test eval quality-gate security-check perf-check ci release-check npm-pack-check brew-formula dist-check version-check local-adk unlink-adk clean-clone-check docs-check wiring-check audit feature-matrix
+.PHONY: fmt fmt-check check lint test eval quality-gate security-check perf-check ci release-check npm-pack-check dist-check version-check local-adk unlink-adk clean-clone-check docs-check wiring-check audit feature-matrix
 
 local-adk:
 	cp .cargo/config.toml.local-adk .cargo/config.toml
@@ -59,18 +59,17 @@ release-check: ci clean-clone-check version-check
 npm-pack-check:
 	cd npm/zavora-cli && npm pack --dry-run >/dev/null
 
+# The Homebrew formula is no longer checked here. It lives in
+# zavora-ai/homebrew-tap, because Homebrew 6 will not install a formula from a URL
+# or a loose file, and it is pinned there by the release tag itself — so its version
+# cannot disagree with the tag by construction. Checking a copy in this repository
+# only asserted that an unused file was consistent.
 version-check:
 	@CARGO_VERSION="$$(awk -F'\"' '/^version = / { print $$2; exit }' Cargo.toml)"; \
 	NPM_VERSION="$$(node -e 'console.log(require("./npm/zavora-cli/package.json").version)')"; \
-	BREW_VERSION="$$(sed -n 's|.*/tags/v\([0-9][^.]*\.[0-9]*\.[0-9]*\)\.tar\.gz.*|\1|p' Formula/zavora-cli.rb | head -n 1)"; \
 	test "$$CARGO_VERSION" = "$$NPM_VERSION" || \
 	( echo "Version mismatch: Cargo.toml=$$CARGO_VERSION npm/zavora-cli/package.json=$$NPM_VERSION" >&2; exit 1 ); \
-	test "$$CARGO_VERSION" = "$$BREW_VERSION" || \
-	( echo "Version mismatch: Cargo.toml=$$CARGO_VERSION Formula/zavora-cli.rb=$$BREW_VERSION" >&2; exit 1 ); \
 	echo "Versions agree: $$CARGO_VERSION"
-
-brew-formula:
-	./scripts/generate_homebrew_formula.sh
 
 dist-check: release-check npm-pack-check
 	@echo "Distribution checks passed."
