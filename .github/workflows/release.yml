@@ -226,7 +226,7 @@ jobs:
             echo "present=true" >> "${GITHUB_OUTPUT}"
           else
             echo "present=false" >> "${GITHUB_OUTPUT}"
-            echo "::warning title=npm publish skipped::NPM_TOKEN is not set, so @zavora-ai/zavora-cli was not published. The npm wrapper downloads release assets, so a published wrapper without them fails at install time."
+            echo "::warning title=npm stage skipped::NPM_TOKEN is not set, so @zavora-ai/zavora-cli was not staged. The npm wrapper downloads release assets, so a published wrapper without them fails at install time."
             echo "- npm: **skipped**, \`NPM_TOKEN\` not set" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
@@ -234,8 +234,18 @@ jobs:
         if: steps.npm_token.outputs.present == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # `npm stage` arrived in npm 11.19.0. The npm bundled with a Node release is
+      # older than that for some time after, so pin the CLI rather than inherit
+      # whichever version the runner image happens to ship.
+      - name: Ensure npm supports staged publishing
+        if: steps.npm_token.outputs.present == 'true'
+        run: |
+          npm install --global npm@^11.19.0
+          npm --version
+          npm stage --help >/dev/null
 
       - name: Validate npm package version matches tag
         if: steps.npm_token.outputs.present == 'true'
@@ -245,10 +255,41 @@ jobs:
           PKG_VERSION="$(node -p "require('./npm/zavora-cli/package.json').version")"
           test "${TAG_VERSION}" = "${PKG_VERSION}"
 
-      - name: Publish npm package
+      # Staged rather than published outright. `npm stage publish` uploads the
+      # version in a non-public state and never prompts for 2FA, which is what
+      # makes it usable from CI; a maintainer then approves it with 2FA, so every
+      # release carries proof that a human was present. A trust relationship can be
+      # configured stage-only, in which case `npm publish` from here is rejected
+      # outright.
+      #
+      # Nothing is installable until the approval, so this job succeeding does not
+      # mean the package is live. The summary says which stage id to approve.
+      - name: Stage npm package
         if: steps.npm_token.outputs.present == 'true'
         working-directory: npm/zavora-cli
-        run: npm publish --access public
+        run: |
+          npm stage publish --access public --tag latest
+          {
+            echo "### npm staged, awaiting approval"
+            echo
+            echo "\`@zavora-ai/zavora-cli@$(node -p "require('./package.json').version")\` is staged and **not yet installable**."
+            echo
+            echo "A maintainer must approve it with 2FA:"
+            echo
+            echo '```bash'
+            echo "npm stage list @zavora-ai/zavora-cli"
+            echo "npm stage view <stage-id>        # inspect metadata"
+            echo "npm stage download <stage-id>    # inspect the tarball"
+            echo "npm stage approve <stage-id>     # publish, prompts for 2FA"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Report the staged version
+        if: steps.npm_token.outputs.present == 'true'
+        working-directory: npm/zavora-cli
+        run: npm stage list @zavora-ai/zavora-cli || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
