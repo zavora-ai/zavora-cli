@@ -96,16 +96,24 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      # Only the cross linker is needed. The previous version also ran
+      # `dpkg --add-architecture arm64` and installed `libssl-dev:arm64`, which is
+      # what broke every v2.0.0 release run: Ubuntu serves arm64 from
+      # ports.ubuntu.com, not archive/security.ubuntu.com, so adding the
+      # architecture without repointing the sources made each arm64 index 404 and
+      # apt exited 100.
+      #
+      # The arm64 OpenSSL packages were never required. `openssl-sys` and
+      # `native-tls` are absent from the default-feature build graph — TLS goes
+      # through rustls — and the release binary links no libssl or libcrypto.
+      # `gcc-aarch64-linux-gnu` and `libc6-dev-arm64-cross` are amd64-hosted cross
+      # packages in the ordinary archive, so no foreign architecture is involved.
       - name: Install Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross libssl-dev:arm64 pkg-config
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "${GITHUB_ENV}"
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "${GITHUB_ENV}"
-          echo "AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> "${GITHUB_ENV}"
-          echo "AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR=/usr/include" >> "${GITHUB_ENV}"
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -169,7 +177,11 @@ jobs:
             echo "present=true" >> "${GITHUB_OUTPUT}"
           else
             echo "present=false" >> "${GITHUB_OUTPUT}"
-            echo "CARGO_REGISTRY_TOKEN not set; skipping crates publish."
+            # An annotation and a summary line, not a plain echo. A silent skip is
+            # how the v2.0.0 run reported this job green while publishing nothing,
+            # which is worse than failing.
+            echo "::warning title=crates.io publish skipped::CARGO_REGISTRY_TOKEN is not set, so this release was not published to crates.io."
+            echo "- crates.io: **skipped**, \`CARGO_REGISTRY_TOKEN\` not set" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Setup Rust
@@ -214,7 +226,8 @@ jobs:
             echo "present=true" >> "${GITHUB_OUTPUT}"
           else
             echo "present=false" >> "${GITHUB_OUTPUT}"
-            echo "NPM_TOKEN not set; skipping npm publish."
+            echo "::warning title=npm publish skipped::NPM_TOKEN is not set, so @zavora-ai/zavora-cli was not published. The npm wrapper downloads release assets, so a published wrapper without them fails at install time."
+            echo "- npm: **skipped**, \`NPM_TOKEN\` not set" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Setup Node

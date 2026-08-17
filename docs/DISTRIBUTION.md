@@ -25,7 +25,18 @@ Optional publish steps run only when secrets are configured:
 - `NPM_TOKEN`: publish `@zavora-ai/zavora-cli`
 - `CARGO_REGISTRY_TOKEN`: publish `zavora-cli` to crates.io from CI
 
-Without these secrets, GitHub release artifacts are still produced.
+Without these secrets, GitHub release artifacts are still produced — but the jobs
+that need them now raise a workflow warning and record a line in the run summary
+rather than passing quietly. A release that publishes nothing previously reported
+those jobs green, which is how v2.0.0 was tagged with no assets attached and no npm
+package published.
+
+The two failure modes are not symmetric. A missing `CARGO_REGISTRY_TOKEN` simply
+means crates.io is not updated. A published npm wrapper *without* release assets is
+worse than no wrapper at all: the package installs, `postinstall` tries to download
+`zavora-cli-<tag>-<platform>.tar.gz` from the release, and every install fails. So
+`publish-npm` depends on `publish-release`, which depends on every `build` matrix
+entry succeeding.
 
 ## Maintainer Release Steps
 
