@@ -59,7 +59,7 @@ The live Zavora audit is less mature than the code breadth suggests:
 
 ## ADK-Rust adoption audit
 
-| Capability | Published ADK-Rust 2.0 baseline | Local ADK-Rust 2.1 | Zavora exposure | Next product decision |
+| Capability | ADK-Rust 2.0 foundation | Published ADK-Rust 2.1 additions | Zavora exposure | Next product decision |
 |---|---|---|---|---|
 | Nested subagents | `LlmAgent::sub_agent`, transfer handoffs, multi-level trees | Retained for compatibility | Partly exposed through imported agent definitions; the default coordinator deliberately uses `AgentTool` to avoid transfer-loop/provider-response issues | Keep `AgentTool` for return-to-caller delegation; expose handoff explicitly as a distinct relationship |
 | Deterministic workflows | Sequential, parallel, loop, conditional and LLM-conditional agents; parallel branches can share state | Adds portable sequential, parallel, fan-out/fan-in and review-loop templates | General `kind: workflow` definitions, built-in evidence review, validation, topology and all execution surfaces | Add richer workflow-state inspection |
@@ -87,7 +87,7 @@ Remote agents                               ADK-Rust A2A via TeamAgentRegistry
 ## Priority to reach frontier parity
 
 1. **Finish the team operations view:** the portable runtime and command surfaces are implemented; add snapshot restore/resume commands, topology-aware JSONL edge events, blackboard transcript inspection, and an expandable live TUI tree while preserving the current supervisor as the durable process layer.
-2. **Make the ADK 2.1 source reproducible:** publish the audited 2.1 crates or pin an audited source so clean clones do not depend on a sibling checkout.
+2. **Keep the ADK 2.1 source reproducible:** retain registry-pinned ADK 2.1 dependencies and the clean-checkout registry-resolution release gate.
 3. **Make capabilities real on first use:** searchable registries, one-command install/configure/authenticate, connection health, and explicit cataloged → installed → enabled → configured → connected → authorized state transitions.
 4. **Finish MCP 2026 and OAuth:** Streamable HTTP discovery lifecycle, issuer/resource-indicator validation, form/URL elicitation, MRTR resume, secure credentials, and end-to-end conformance tests.
 5. **Complete the plugin runtime on ADK hooks:** use `EnhancedPlugin` and team lifecycle hooks for in-process behavior, then add signed packages, lockfiles, trust review, marketplace search/update and a sandboxed executable compatibility host for approved external extensions.
