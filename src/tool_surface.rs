@@ -22,7 +22,7 @@ use crate::cli::ToolConfirmationMode;
 use crate::config::RuntimeConfig;
 use crate::tool_policy::{
     PermissionDecision, PermissionRules, ToolClass, ToolPattern, ToolProvenance, classify,
-    filter_tools_by_policy,
+    filter_tools_by_policy, make_provider_safe_tool_names,
 };
 use crate::tools::confirming::ConfirmingTool;
 
@@ -244,14 +244,29 @@ impl ToolSurface {
             "Sealed runtime toolset"
         );
 
-        // Deny filtering may have removed names; keep the reported MCP set and
-        // the class map aligned with what actually survived.
-        let surviving = wrapped
+        // Provider APIs impose a narrower function-name grammar than MCP does.
+        // Apply the portable alias outside the policy wrapper so policy, hooks,
+        // and execution retain the original name while the model sees a valid,
+        // collision-safe name. Re-key provenance metadata to those aliases.
+        let metadata = wrapped
             .iter()
-            .map(|tool| tool.name().to_string())
-            .collect::<BTreeSet<_>>();
-        classes.retain(|name, _| surviving.contains(name));
-        mcp_names.retain(|name| surviving.contains(name));
+            .map(|tool| {
+                let name = tool.name();
+                (
+                    classes.get(name).copied().unwrap_or(ToolClass::Mutating),
+                    mcp_names.contains(name),
+                )
+            })
+            .collect::<Vec<_>>();
+        let wrapped = make_provider_safe_tool_names(wrapped);
+        classes.clear();
+        mcp_names.clear();
+        for (tool, (class, is_mcp)) in wrapped.iter().zip(metadata) {
+            classes.insert(tool.name().to_string(), class);
+            if is_mcp {
+                mcp_names.insert(tool.name().to_string());
+            }
+        }
 
         ResolvedRuntimeTools {
             tools: wrapped,

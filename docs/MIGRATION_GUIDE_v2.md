@@ -8,7 +8,7 @@ Rust 1.95 or newer is required; `rust-toolchain.toml` pins it.
 
 ```bash
 rustup update stable
-cargo install zavora-cli --version 2.1.0
+cargo install zavora-cli --version 2.1.1
 ```
 
 ## Model configuration

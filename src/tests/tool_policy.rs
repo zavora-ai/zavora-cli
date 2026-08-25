@@ -123,3 +123,42 @@ fn test_alias_plus_wildcard_deny() {
     let names: Vec<&str> = filtered.iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["run_query"]);
 }
+
+#[test]
+fn provider_safe_names_preserve_valid_tools_and_normalize_mcp_names() {
+    let tools = make_provider_safe_tool_names(vec![
+        make_mock_tool("fs_read"),
+        make_mock_tool("mcp:docx-mcp:add_bookmark"),
+    ]);
+    let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["fs_read", "mcp__docx-mcp__add_bookmark"]);
+}
+
+#[test]
+fn provider_safe_names_bound_length_and_disambiguate_collisions() {
+    let long = format!("mcp:server:{}", "very_long_tool_name_".repeat(5));
+    let tools = make_provider_safe_tool_names(vec![
+        make_mock_tool("mcp:server:a.b"),
+        make_mock_tool("mcp:server:a/b"),
+        make_mock_tool(&long),
+    ]);
+    let names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+
+    assert_ne!(names[0], names[1]);
+    assert_eq!(
+        names.len(),
+        names.iter().collect::<std::collections::HashSet<_>>().len()
+    );
+    for name in names {
+        assert!(name.len() <= PROVIDER_TOOL_NAME_MAX_LEN);
+        assert!(
+            name.chars().all(
+                |character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            ),
+            "provider-unsafe name: {name}"
+        );
+    }
+}

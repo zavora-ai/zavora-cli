@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use adk_rust::Result as AdkResult;
@@ -108,8 +109,6 @@ impl Tool for AliasedTool {
 // Apply aliases to a set of discovered tools
 // ---------------------------------------------------------------------------
 
-use std::collections::HashMap;
-
 /// Rename tools according to alias mappings. Keys are original names, values
 /// are the desired alias. Tools not in the map pass through unchanged.
 pub fn apply_tool_aliases(
@@ -131,6 +130,97 @@ pub fn apply_tool_aliases(
                 Arc::new(AliasedTool::new(alias.clone(), tool)) as Arc<dyn Tool>
             } else {
                 tool
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Provider-safe names
+// ---------------------------------------------------------------------------
+
+/// Widest portable function-name contract across the supported model APIs.
+pub const PROVIDER_TOOL_NAME_MAX_LEN: usize = 64;
+
+fn provider_name_candidate(name: &str) -> String {
+    let mut candidate = String::with_capacity(name.len());
+    let mut replacing = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            candidate.push(character);
+            replacing = false;
+        } else if !replacing {
+            // Two underscores keep namespace boundaries visible while remaining
+            // valid for OpenAI, Gemini, Anthropic, and compatible providers.
+            candidate.push_str("__");
+            replacing = true;
+        }
+    }
+    if candidate.is_empty() {
+        candidate.push_str("tool");
+    }
+    candidate
+}
+
+fn provider_name_with_hash(candidate: &str, identity: &str) -> String {
+    let digest = format!("{:x}", md5::compute(identity.as_bytes()));
+    let suffix = format!("__{}", &digest[..12]);
+    let keep = PROVIDER_TOOL_NAME_MAX_LEN - suffix.len();
+    let mut shortened = candidate[..candidate.len().min(keep)].to_string();
+    shortened.push_str(&suffix);
+    shortened
+}
+
+/// Present tools to model providers under deterministic portable names.
+///
+/// Policy, hooks, and execution stay on the wrapped inner tool's original name;
+/// only the provider-facing alias changes. Colliding sanitized names and names
+/// longer than 64 bytes receive a stable digest suffix.
+pub fn make_provider_safe_tool_names(tools: Vec<Arc<dyn Tool>>) -> Vec<Arc<dyn Tool>> {
+    let candidates = tools
+        .iter()
+        .map(|tool| provider_name_candidate(tool.name()))
+        .collect::<Vec<_>>();
+    let mut candidate_counts = HashMap::<String, usize>::new();
+    for candidate in &candidates {
+        *candidate_counts.entry(candidate.clone()).or_default() += 1;
+    }
+
+    let mut used = HashSet::<String>::new();
+    let mut occurrences = HashMap::<String, usize>::new();
+    tools
+        .into_iter()
+        .zip(candidates)
+        .map(|(tool, candidate)| {
+            let original = tool.name().to_string();
+            let collision = candidate_counts
+                .get(&candidate)
+                .copied()
+                .unwrap_or_default()
+                > 1;
+            let mut safe = candidate.clone();
+
+            if collision || safe.len() > PROVIDER_TOOL_NAME_MAX_LEN || used.contains(&safe) {
+                let occurrence = occurrences.entry(original.clone()).or_default();
+                loop {
+                    let identity = if *occurrence == 0 {
+                        original.clone()
+                    } else {
+                        format!("{original}#{}", *occurrence)
+                    };
+                    *occurrence += 1;
+                    safe = provider_name_with_hash(&candidate, &identity);
+                    if !used.contains(&safe) {
+                        break;
+                    }
+                }
+            }
+            used.insert(safe.clone());
+
+            if safe == original {
+                tool
+            } else {
+                Arc::new(AliasedTool::new(safe, tool)) as Arc<dyn Tool>
             }
         })
         .collect()
