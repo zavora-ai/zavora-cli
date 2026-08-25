@@ -63,7 +63,7 @@ To keep an existing provider for both roles, set both role fields explicitly or 
 
 ## Ralph and automation
 
-The old `adk-ralph` 0.5 runtime has been removed. `zavora-cli ralph` now uses the same ADK-Rust 2.0 runner, tools, sessions, worker, and bounded planner as interactive chat. Review automation that relied on internal Ralph phase behavior; the public CLI flags remain available.
+The old `adk-ralph` 0.5 runtime has been removed. `zavora-cli ralph` now uses the same ADK-Rust 2.1 runner, tools, sessions, worker, and bounded planner as interactive chat. Review automation that relied on internal Ralph phase behavior; the public CLI flags remain available.
 
 Zavora no longer tells an agent to run `git add -A`, commit, or push as a default completion step. Ask for those operations explicitly when required.
 

@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/zavora-cli.svg)](https://crates.io/crates/zavora-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Zavora is an ADK-Rust 2.0 coding agent for the terminal. It keeps routine implementation work on an efficient worker model and brings in a stronger planning model only when a task needs architectural reasoning or a material replan.
+Zavora is an ADK-Rust 2.1 coding agent for the terminal. It keeps routine implementation work on an efficient worker model and brings in a stronger planning model only when a task needs architectural reasoning or a material replan.
 
 ![The Zavora terminal workspace](https://raw.githubusercontent.com/zavora-ai/zavora-cli/main/docs/images/welcome.jpg)
 
