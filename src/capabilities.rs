@@ -589,7 +589,7 @@ pub fn plan_enable(pack_id: &str, config_path: &Path, profile: &str) -> Result<E
                 command: Some(entry.command),
                 install: Some(entry.install),
                 available: true,
-                installed: program_on_path(entry.command),
+                installed: crate::mcp_catalog::entry_installed(entry),
                 configured: configured.contains(entry.id),
             },
             None => ServerReadiness {
@@ -857,13 +857,32 @@ pub struct CapabilityAgent {
     pub name: String,
     pub description: String,
     pub source: String,
+    pub definition_path: Option<String>,
+    pub allow_tools: Vec<String>,
+    pub deny_tools: Vec<String>,
+    pub allow_skills: Vec<String>,
+    pub deny_skills: Vec<String>,
+    pub max_turns: Option<u32>,
+    pub timeout_secs: Option<u64>,
+    pub coordinator_callable: bool,
+    pub tool_scope: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilityTeam {
+    pub name: String,
+    pub architecture: String,
+    pub source: String,
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CapabilitySnapshot {
+    pub essentials: Vec<crate::essentials::EssentialStatus>,
     pub skills: Vec<CapabilitySkill>,
     pub plugins: Vec<crate::plugins::PluginDescriptor>,
     pub agents: Vec<CapabilityAgent>,
+    pub teams: Vec<CapabilityTeam>,
     pub configured_mcp_servers: Vec<String>,
     pub connected_mcp_tools: Vec<String>,
 }
@@ -945,14 +964,44 @@ impl CapabilitySnapshot {
         resolved_agents.extend(crate::plugins::enabled_plugin_agents()?);
         let mut agents = resolved_agents
             .into_values()
-            .map(|agent| CapabilityAgent {
-                name: agent.name,
-                description: agent.config.description.unwrap_or_default(),
-                source: agent.source.label().to_string(),
+            .map(|agent| {
+                let tool_scope = crate::agents::capability::specialist_category(&agent.name)
+                    .map(|category| format!("category-routed: {}", category.label()))
+                    .unwrap_or_else(|| {
+                        if agent.config.allow_tools.is_empty() {
+                            "all parent-permitted".to_string()
+                        } else {
+                            "explicit allowlist".to_string()
+                        }
+                    });
+                CapabilityAgent {
+                    coordinator_callable: agent.name != "default" && agent.name != "ralph",
+                    name: agent.name,
+                    description: agent.config.description.unwrap_or_default(),
+                    source: agent.source.label().to_string(),
+                    definition_path: agent.definition_path.map(|path| path.display().to_string()),
+                    allow_tools: agent.config.allow_tools,
+                    deny_tools: agent.config.deny_tools,
+                    allow_skills: agent.config.skills,
+                    deny_skills: agent.config.deny_skills,
+                    max_turns: agent.config.max_turns,
+                    timeout_secs: agent.config.timeout_secs,
+                    tool_scope,
+                }
             })
             .collect::<Vec<_>>();
         agents.sort_by(|left, right| left.name.cmp(&right.name));
         let plugins = crate::plugins::discover_plugins()?;
+        let workspace = std::env::current_dir().unwrap_or_default();
+        let teams = crate::teams::discover_teams(&workspace)?
+            .into_values()
+            .map(|team| CapabilityTeam {
+                name: team.name().to_string(),
+                architecture: team.definition.architecture().to_string(),
+                source: team.source.label().to_string(),
+                members: team.definition.member_names(),
+            })
+            .collect::<Vec<_>>();
 
         let mut configured_mcp_servers = configured_servers.to_vec();
         configured_mcp_servers.sort();
@@ -960,10 +1009,13 @@ impl CapabilitySnapshot {
         let mut connected_mcp_tools = connected_tools.to_vec();
         connected_mcp_tools.sort();
         connected_mcp_tools.dedup();
+        let essentials = crate::essentials::statuses(&configured_mcp_servers);
         Ok(Self {
+            essentials,
             skills,
             plugins,
             agents,
+            teams,
             configured_mcp_servers,
             connected_mcp_tools,
         })
@@ -988,12 +1040,20 @@ pub fn format_prompt_capabilities(
     let mut lines = vec![
         "This is the live capability registry for the current session. Distinguish installed skills, configured servers, and connected tools; never claim a catalog recipe is usable unless its runtime dependency is connected.".to_string(),
         format!(
-            "Status: {} skills; {} plugins; {} registered agents; {} configured MCP servers; {} connected MCP tools.",
+            "Status: {} skills; {} plugins; {} registered agents; {} governed teams; {} configured MCP servers; {} connected MCP tools.",
             snapshot.skills.len(),
             snapshot.plugins.len(),
             snapshot.agents.len(),
+            snapshot.teams.len(),
             snapshot.configured_mcp_servers.len(),
             snapshot.connected_mcp_tools.len()
+        ),
+        format!(
+            "Essentials: {}/{} installed; {}/{} configured. Authorization and connection still require live evidence.",
+            snapshot.essentials.iter().filter(|item| item.installed).count(),
+            snapshot.essentials.len(),
+            snapshot.essentials.iter().filter(|item| item.configured).count(),
+            snapshot.essentials.len(),
         ),
     ];
     for category in CapabilityCategory::ALL {
@@ -1034,6 +1094,15 @@ pub fn format_prompt_capabilities(
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    lines.push(format!(
+        "Teams (invoke with `zavora-cli teams run NAME TASK` or `/teams run NAME TASK`): {}",
+        snapshot
+            .teams
+            .iter()
+            .map(|team| format!("{} [{}]", team.name, team.architecture))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     lines.join("\n")
 }
 
@@ -1066,10 +1135,23 @@ pub fn format_catalog_markdown_with_runtime(
         }
     };
     let mut output = format!(
-        "## Live capabilities\n\n- **Skills:** {} discovered\n- **Plugins:** {} discovered\n- **Agents:** {} registered\n- **MCP:** {} configured · {} connected tools\n\n",
+        "## Live capabilities\n\n- **Essentials:** {}/{} installed · {}/{} configured\n- **Skills:** {} discovered\n- **Plugins:** {} discovered\n- **Agents:** {} registered\n- **Teams:** {} governed definitions\n- **MCP:** {} configured · {} connected tools\n\n",
+        snapshot
+            .essentials
+            .iter()
+            .filter(|item| item.installed)
+            .count(),
+        snapshot.essentials.len(),
+        snapshot
+            .essentials
+            .iter()
+            .filter(|item| item.configured)
+            .count(),
+        snapshot.essentials.len(),
         snapshot.skills.len(),
         snapshot.plugins.len(),
         snapshot.agents.len(),
+        snapshot.teams.len(),
         snapshot.configured_mcp_servers.len(),
         snapshot.connected_mcp_tools.len()
     );

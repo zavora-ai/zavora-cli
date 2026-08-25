@@ -5,12 +5,14 @@ use clap::Parser;
 use serde_json::json;
 
 use zavora_cli::agent_catalog::*;
+use zavora_cli::agent_supervisor::*;
 use zavora_cli::capabilities::*;
 use zavora_cli::chat::*;
 use zavora_cli::cli::*;
 use zavora_cli::config::*;
 use zavora_cli::doctor::*;
 use zavora_cli::error::*;
+use zavora_cli::essentials;
 use zavora_cli::eval::*;
 use zavora_cli::guardrail::*;
 use zavora_cli::headless::*;
@@ -23,6 +25,7 @@ use zavora_cli::retrieval::*;
 use zavora_cli::runner::*;
 use zavora_cli::server::*;
 use zavora_cli::session::*;
+use zavora_cli::teams::*;
 use zavora_cli::telemetry::*;
 use zavora_cli::workflow::*;
 
@@ -112,10 +115,18 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
                 cli.command,
                 Some(Commands::Mcp {
                     command: McpCommands::Serve
+                }) | Some(Commands::Essentials {
+                    command: EssentialCommands::Serve { .. }
                 })
             ),
         terminal_ui,
     )?;
+    if let Some(Commands::Essentials {
+        command: EssentialCommands::Serve { server },
+    }) = cli.command.as_ref()
+    {
+        return essentials::serve(server).await;
+    }
     let mut profiles = load_profiles(&cli.config_path)?;
 
     // Initialize SQLite memory (eager, before any tool use)
@@ -138,6 +149,15 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
             | Some(Commands::ReleasePlan { .. })
             | Some(Commands::Agents {
                 command: AgentCommands::Run { .. }
+            })
+            | Some(Commands::Agents {
+                command: AgentCommands::Parallel { .. }
+            })
+            | Some(Commands::Agents {
+                command: AgentCommands::Worker { .. }
+            })
+            | Some(Commands::Teams {
+                command: TeamCommands::Run { .. }
             })
             | Some(Commands::Ralph { .. })
     );
@@ -188,6 +208,15 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
             | Some(Commands::Agents {
                 command: AgentCommands::Run { .. }
             })
+            | Some(Commands::Agents {
+                command: AgentCommands::Parallel { .. }
+            })
+            | Some(Commands::Agents {
+                command: AgentCommands::Worker { .. }
+            })
+            | Some(Commands::Teams {
+                command: TeamCommands::Run { .. }
+            })
             | Some(Commands::Ralph { .. })
     );
     zavora_cli::tools::confirming::set_headless_mode(automation_command);
@@ -212,6 +241,15 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
             | Some(Commands::ReleasePlan { .. })
             | Some(Commands::Agents {
                 command: AgentCommands::Run { .. }
+            })
+            | Some(Commands::Agents {
+                command: AgentCommands::Parallel { .. }
+            })
+            | Some(Commands::Agents {
+                command: AgentCommands::Worker { .. }
+            })
+            | Some(Commands::Teams {
+                command: TeamCommands::Run { .. }
             })
             | Some(Commands::Ralph { .. })
             | None
@@ -415,12 +453,12 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
             }
         },
         Commands::Agents { command } => match command {
-            AgentCommands::List => {
-                run_agents_list(&resolved_agents, &cfg.agent_name, &agent_paths)?;
+            AgentCommands::List { json } => {
+                run_agents_list(&resolved_agents, &cfg.agent_name, &agent_paths, json)?;
                 Ok(())
             }
-            AgentCommands::Show { name } => {
-                run_agents_show(&resolved_agents, &cfg.agent_name, name)?;
+            AgentCommands::Show { name, json } => {
+                run_agents_show(&resolved_agents, &cfg.agent_name, name, json)?;
                 Ok(())
             }
             AgentCommands::Select { name } => {
@@ -432,24 +470,7 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
                     anyhow::anyhow!("agent '{}' not found. Run 'zavora-cli agents list'.", name)
                 })?;
                 let mut agent_cfg = cfg.clone();
-                agent_cfg.agent_name = selected.name.clone();
-                agent_cfg.agent_source = selected.source;
-                agent_cfg.agent_description = selected.config.description.clone();
-                agent_cfg.agent_instruction = selected.config.instruction.clone();
-                agent_cfg.agent_resource_paths = selected.config.resource_paths.clone();
-                agent_cfg.agent_allow_tools = selected.config.allow_tools.clone();
-                agent_cfg.agent_deny_tools = selected.config.deny_tools.clone();
-                if let Some(provider) = selected.config.provider {
-                    agent_cfg.provider = provider;
-                    agent_cfg.worker_provider = provider;
-                }
-                if let Some(model) = selected.config.model.clone() {
-                    agent_cfg.model = Some(model.clone());
-                    agent_cfg.worker_model = model;
-                }
-                if let Some(mode) = selected.config.tool_confirmation_mode {
-                    agent_cfg.tool_confirmation_mode = mode;
-                }
+                zavora_cli::config::apply_agent_overrides(&mut agent_cfg, selected);
 
                 let prompt = load_prompt(&task, &headless_options)?;
                 enforce_prompt_limit(&prompt, agent_cfg.max_prompt_chars)?;
@@ -494,7 +515,393 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
                 .await?;
                 Ok(())
             }
+            AgentCommands::Parallel {
+                agents,
+                max_concurrency,
+                task,
+            } => {
+                let mut selected_agents = Vec::new();
+                let mut seen = std::collections::BTreeSet::new();
+                for name in agents {
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    if name == "ralph" {
+                        return Err(anyhow::anyhow!(
+                            "'ralph' is a pipeline, not a subagent; use `zavora-cli ralph`"
+                        ));
+                    }
+                    let selected = resolved_agents.get(&name).cloned().ok_or_else(|| {
+                        anyhow::anyhow!("agent '{}' not found. Run 'zavora-cli agents list'.", name)
+                    })?;
+                    selected_agents.push(selected);
+                }
+                let prompt = load_prompt(&task, &headless_options)?;
+                enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+                let runtime_tools = resolve_runtime_tools(&cfg).await;
+                approve_runtime_tools(&runtime_tools, headless_options.always_approve);
+                let retrieval = retrieval_service
+                    .clone()
+                    .context("retrieval service should be initialized for agents parallel")?;
+                let results = zavora_cli::subagents::run_parallel(
+                    selected_agents,
+                    &prompt,
+                    zavora_cli::subagents::ParallelRunContext {
+                        base_cfg: &cfg,
+                        parent_tools: &runtime_tools,
+                        retrieval,
+                        telemetry: &telemetry,
+                        max_concurrency,
+                        progress_format: headless_options.output_format,
+                        progress: None,
+                        session_service: None,
+                    },
+                )
+                .await;
+                let success = results.iter().all(|result| result.success);
+                zavora_cli::subagents::render_results(&results, headless_options.output_format);
+                if !success {
+                    return Err(anyhow::anyhow!("one or more parallel subagents failed"));
+                }
+                Ok(())
+            }
+            AgentCommands::Spawn {
+                name,
+                parent_run_id,
+                worktree,
+                task,
+            } => {
+                ensure_spawnable_agent(&resolved_agents, &name)?;
+                let task = load_prompt(&task, &headless_options)?;
+                enforce_prompt_limit(&task, cfg.max_prompt_chars)?;
+                let store = AgentRunStore::open_default().await?;
+                let parent_run_id =
+                    parent_run_id.or_else(|| std::env::var("ZAVORA_SUPERVISOR_RUN_ID").ok());
+                let run = store
+                    .create_run(
+                        NewAgentRun {
+                            parent_run_id,
+                            parent_session_id: cfg.session_id.clone(),
+                            agent: name,
+                            task,
+                            workspace: std::env::current_dir()?,
+                            worktree,
+                            retry_of: None,
+                        },
+                        &SupervisorPolicy::default(),
+                    )
+                    .await?;
+                launch_worker(
+                    &store,
+                    &run,
+                    LaunchOptions {
+                        cfg: &cfg,
+                        always_approve: headless_options.always_approve,
+                    },
+                )
+                .await?;
+                render_agent_run(
+                    &store.get(&run.id).await?.unwrap_or(run),
+                    headless_options.output_format != OutputFormat::Text,
+                )?;
+                Ok(())
+            }
+            AgentCommands::Runs { limit, json } => {
+                let store = AgentRunStore::open_default().await?;
+                render_agent_runs(
+                    &store.list(limit).await?,
+                    json || headless_options.output_format != OutputFormat::Text,
+                )?;
+                Ok(())
+            }
+            AgentCommands::Status { run_id, json } => {
+                let store = AgentRunStore::open_default().await?;
+                let run = required_agent_run(&store, &run_id).await?;
+                render_agent_run_status(
+                    &store,
+                    &run,
+                    json || headless_options.output_format != OutputFormat::Text,
+                )
+                .await?;
+                Ok(())
+            }
+            AgentCommands::Send { run_id, message } => {
+                let message = load_prompt(&message, &headless_options)?;
+                let store = AgentRunStore::open_default().await?;
+                let continuation = store.prepare_continuation(&run_id, &message).await?;
+                if continuation.launch_required {
+                    launch_worker(
+                        &store,
+                        &continuation.run,
+                        LaunchOptions {
+                            cfg: &cfg,
+                            always_approve: headless_options.always_approve,
+                        },
+                    )
+                    .await?;
+                }
+                render_agent_run(
+                    &required_agent_run(&store, &run_id).await?,
+                    headless_options.output_format != OutputFormat::Text,
+                )?;
+                Ok(())
+            }
+            AgentCommands::Wait {
+                run_id,
+                timeout_secs,
+                json,
+            } => {
+                let store = AgentRunStore::open_default().await?;
+                let run = store
+                    .wait_terminal(&run_id, Duration::from_secs(timeout_secs))
+                    .await?;
+                render_agent_run(
+                    &run,
+                    json || headless_options.output_format != OutputFormat::Text,
+                )?;
+                Ok(())
+            }
+            AgentCommands::Cancel { run_id } => {
+                let store = AgentRunStore::open_default().await?;
+                let run = cancel_run(&store, &run_id).await?;
+                render_agent_run(&run, headless_options.output_format != OutputFormat::Text)?;
+                Ok(())
+            }
+            AgentCommands::Retry { run_id, worktree } => {
+                let store = AgentRunStore::open_default().await?;
+                let previous = required_agent_run(&store, &run_id).await?;
+                ensure_spawnable_agent(&resolved_agents, &previous.agent)?;
+                let run = store
+                    .create_run(
+                        NewAgentRun {
+                            parent_run_id: previous.parent_run_id.clone(),
+                            parent_session_id: previous.parent_session_id.clone(),
+                            agent: previous.agent.clone(),
+                            task: previous.task.clone(),
+                            workspace: previous.workspace.clone(),
+                            worktree,
+                            retry_of: Some(previous.id.clone()),
+                        },
+                        &SupervisorPolicy::default(),
+                    )
+                    .await?;
+                launch_worker(
+                    &store,
+                    &run,
+                    LaunchOptions {
+                        cfg: &cfg,
+                        always_approve: headless_options.always_approve,
+                    },
+                )
+                .await?;
+                render_agent_run(
+                    &required_agent_run(&store, &run.id).await?,
+                    headless_options.output_format != OutputFormat::Text,
+                )?;
+                Ok(())
+            }
+            AgentCommands::Events {
+                run_id,
+                after,
+                follow,
+            } => run_agent_events(&run_id, after, follow).await,
+            AgentCommands::WorktreeRemove { run_id, force } => {
+                let store = AgentRunStore::open_default().await?;
+                let run = required_agent_run(&store, &run_id).await?;
+                if !run.status.is_terminal() {
+                    anyhow::bail!("agent run '{run_id}' is still {}", run.status.label());
+                }
+                remove_worktree(&run, force)?;
+                println!("removed worktree for agent run {run_id}");
+                Ok(())
+            }
+            AgentCommands::Worker { run_id } => {
+                let retrieval = retrieval_service
+                    .as_deref()
+                    .context("retrieval service should be initialized for agents worker")?;
+                run_supervised_worker(
+                    &run_id,
+                    &mut cfg,
+                    &resolved_agents,
+                    retrieval,
+                    &telemetry,
+                    headless_options.always_approve,
+                )
+                .await
+            }
         },
+        Commands::Teams { command } => {
+            let workspace = std::env::current_dir()?;
+            let teams = discover_teams(&workspace)?;
+            match command {
+                TeamCommands::List { json } => {
+                    println!(
+                        "{}",
+                        render_catalog(
+                            &teams,
+                            json || headless_options.output_format != OutputFormat::Text,
+                        )?
+                    );
+                    Ok(())
+                }
+                TeamCommands::Show { name, json } => {
+                    let team = teams.get(&name).ok_or_else(|| {
+                        anyhow::anyhow!("team '{}' not found. Run 'zavora-cli teams list'.", name)
+                    })?;
+                    println!(
+                        "{}",
+                        render_team(
+                            team,
+                            json || headless_options.output_format != OutputFormat::Text,
+                        )?
+                    );
+                    Ok(())
+                }
+                TeamCommands::Validate { name, json } => {
+                    let selected = if let Some(name) = name.as_deref() {
+                        vec![teams.get(name).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "team '{}' not found. Run 'zavora-cli teams list'.",
+                                name
+                            )
+                        })?]
+                    } else {
+                        teams.values().collect::<Vec<_>>()
+                    };
+                    let mut records = Vec::new();
+                    let mut failures = Vec::new();
+                    for team in selected {
+                        match validate_bindings(team, &cfg.available_agents) {
+                            Ok(()) => records.push(serde_json::json!({
+                                "name": team.name(),
+                                "valid": true,
+                                "architecture": team.definition.architecture(),
+                                "members": team.definition.member_names(),
+                            })),
+                            Err(error) => {
+                                records.push(serde_json::json!({
+                                    "name": team.name(),
+                                    "valid": false,
+                                    "error": error.to_string(),
+                                }));
+                                failures.push(format!("{}: {error}", team.name()));
+                            }
+                        }
+                    }
+                    if json || headless_options.output_format != OutputFormat::Text {
+                        println!("{}", serde_json::to_string_pretty(&records)?);
+                    } else {
+                        for record in &records {
+                            println!(
+                                "{} {}",
+                                if record["valid"].as_bool().unwrap_or(false) {
+                                    "✓"
+                                } else {
+                                    "✗"
+                                },
+                                record["name"].as_str().unwrap_or("<unknown>")
+                            );
+                        }
+                    }
+                    if !failures.is_empty() {
+                        anyhow::bail!("team validation failed: {}", failures.join("; "));
+                    }
+                    Ok(())
+                }
+                TeamCommands::Topology { name, json } => {
+                    let team = teams.get(&name).ok_or_else(|| {
+                        anyhow::anyhow!("team '{}' not found. Run 'zavora-cli teams list'.", name)
+                    })?;
+                    let graph = topology(&team.definition)?;
+                    if json || headless_options.output_format != OutputFormat::Text {
+                        println!("{}", serde_json::to_string_pretty(&graph)?);
+                    } else {
+                        println!("{} ({})", graph.name, graph.architecture);
+                        for node in &graph.nodes {
+                            println!("  • {node}");
+                        }
+                        for edge in &graph.edges {
+                            println!("  {} -> {} ({})", edge.from, edge.to, edge.relationship);
+                        }
+                    }
+                    Ok(())
+                }
+                TeamCommands::Run { name, task } => {
+                    let team = teams.get(&name).ok_or_else(|| {
+                        anyhow::anyhow!("team '{}' not found. Run 'zavora-cli teams list'.", name)
+                    })?;
+                    let prompt = load_prompt(&task, &headless_options)?;
+                    enforce_prompt_limit(&prompt, cfg.max_prompt_chars)?;
+                    let prompt = apply_guardrail(
+                        &cfg,
+                        &telemetry,
+                        "input",
+                        cfg.guardrail_input_mode,
+                        &prompt,
+                    )?;
+                    let runtime_tools = resolve_runtime_tools(&cfg).await;
+                    report_degraded_surface(&runtime_tools, &format!("teams.run.{name}"));
+                    approve_runtime_tools(&runtime_tools, headless_options.always_approve);
+                    let confirmation = resolve_tool_confirmation_settings(&cfg, &runtime_tools);
+                    let built = build_team(team, &cfg, &runtime_tools).await?;
+                    if headless_options.always_approve {
+                        trust_team_relationships(&built);
+                    } else {
+                        for member in &built.roster {
+                            if cfg.approve_tool.iter().any(|pattern| {
+                                zavora_cli::tool_policy::matches_wildcard(pattern, member)
+                            }) {
+                                zavora_cli::tools::confirming::trust_tool(member);
+                            }
+                        }
+                    }
+                    telemetry.emit(
+                        "team.compiled",
+                        json!({
+                            "team": built.name,
+                            "architecture": built.architecture,
+                            "roster": built.roster,
+                            "routes": built.routes,
+                            "source": team.source.label(),
+                            "api_version": team.definition.api_version(),
+                            "adk_version": "2.1.0",
+                        }),
+                    );
+                    let runner = build_runner_with_run_config(
+                        built.root.clone(),
+                        &cfg,
+                        Some(with_team_confirmation_handler(confirmation.run_config)),
+                    )
+                    .await?;
+                    let retrieval = retrieval_service
+                        .as_deref()
+                        .context("retrieval service should be initialized for teams run")?;
+                    run_headless(
+                        &runner,
+                        &cfg,
+                        &prompt,
+                        retrieval,
+                        &telemetry,
+                        &RunMetadata {
+                            command: format!("teams.run.{name}"),
+                            session_id: cfg.session_id.clone(),
+                            provider: "team".to_string(),
+                            model: built.routes.join(","),
+                        },
+                        headless_options.output_format,
+                    )
+                    .await?;
+                    for receipt in built.execution_receipts() {
+                        telemetry.emit("team.execution_receipt", serde_json::to_value(receipt)?);
+                    }
+                    Ok(())
+                }
+                TeamCommands::Schema => {
+                    println!("{}", schema_json()?);
+                    Ok(())
+                }
+            }
+        }
         Commands::Capabilities { command } => {
             let configured_servers = cfg
                 .mcp_servers
@@ -517,6 +924,17 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
                 CapabilityCommands::Disable { id } => run_capabilities_set_enabled(&id, false),
             }
         }
+        Commands::Essentials { command } => match command {
+            EssentialCommands::Status { json } => {
+                let configured_servers = cfg
+                    .mcp_servers
+                    .iter()
+                    .map(|server| server.name.clone())
+                    .collect::<Vec<_>>();
+                essentials::run_status(&configured_servers, json)
+            }
+            EssentialCommands::Serve { .. } => unreachable!("handled before runtime setup"),
+        },
         Commands::Mcp { command } => match command {
             McpCommands::Catalog { query, json } => {
                 zavora_cli::mcp_catalog::run_catalog(&query.join(" "), json)
@@ -860,6 +1278,276 @@ async fn run_cli(mut cli: Cli) -> Result<()> {
     zavora_cli::tools::confirming::set_headless_mode(false);
 
     execution
+}
+
+fn ensure_spawnable_agent(
+    agents: &std::collections::HashMap<String, ResolvedAgent>,
+    name: &str,
+) -> Result<()> {
+    if name == "ralph" {
+        anyhow::bail!("'ralph' is a pipeline, not a subagent; use `zavora-cli ralph`");
+    }
+    if !agents.contains_key(name) {
+        anyhow::bail!("agent '{name}' not found. Run 'zavora-cli agents list'.");
+    }
+    Ok(())
+}
+
+async fn required_agent_run(store: &AgentRunStore, id: &str) -> Result<AgentRun> {
+    store
+        .get(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("agent run '{id}' not found"))
+}
+
+async fn render_agent_run_status(
+    store: &AgentRunStore,
+    run: &AgentRun,
+    json_output: bool,
+) -> Result<()> {
+    let children = store.children(&run.id).await?;
+    let events = store.events(&run.id, 0).await?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": AGENT_RUN_SCHEMA_VERSION,
+                "run": run,
+                "children": children,
+                "events": events,
+            }))?
+        );
+        return Ok(());
+    }
+    render_agent_run(run, false)?;
+    if !children.is_empty() {
+        println!("\nChildren:");
+        for child in children {
+            println!(
+                "  {}  {:<16} {}",
+                child.id,
+                child.status.label(),
+                child.agent
+            );
+        }
+    }
+    println!("\nEvents: {}", events.len());
+    Ok(())
+}
+
+fn render_agent_run(run: &AgentRun, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": AGENT_RUN_SCHEMA_VERSION,
+                "run": run,
+            }))?
+        );
+    } else {
+        println!("{}  {}  {}", run.id, run.status.label(), run.agent);
+        println!("  session: {}", run.session_id);
+        if let Some(parent) = &run.parent_run_id {
+            println!("  parent: {parent}");
+        }
+        println!("  workspace: {}", run.workspace.display());
+        if let Some(path) = &run.worktree_path {
+            println!("  worktree: {}", path.display());
+        }
+        println!("  log: {}", run.log_path.display());
+        if let Some(response) = &run.response {
+            println!("\n{response}");
+        }
+        if let Some(error) = &run.error {
+            println!("\nerror: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn render_agent_runs(runs: &[AgentRun], json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": AGENT_RUN_SCHEMA_VERSION,
+                "runs": runs,
+            }))?
+        );
+        return Ok(());
+    }
+    if runs.is_empty() {
+        println!("No durable agent runs found.");
+        return Ok(());
+    }
+    println!("RUN ID                         STATUS            AGENT                 DEPTH");
+    for run in runs {
+        println!(
+            "{:<30} {:<17} {:<21} {}",
+            run.id,
+            run.status.label(),
+            run.agent,
+            run.depth
+        );
+    }
+    Ok(())
+}
+
+async fn run_agent_events(run_id: &str, mut after: i64, follow: bool) -> Result<()> {
+    let store = AgentRunStore::open_default().await?;
+    required_agent_run(&store, run_id).await?;
+    loop {
+        let events = store.events(run_id, after).await?;
+        for event in events {
+            after = event.sequence;
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "schema_version": AGENT_RUN_SCHEMA_VERSION,
+                    "type": "agent_run_event",
+                    "event": event,
+                }))?
+            );
+        }
+        let run = required_agent_run(&store, run_id).await?;
+        if !follow || run.status.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Ok(())
+}
+
+async fn run_supervised_worker(
+    run_id: &str,
+    cfg: &mut RuntimeConfig,
+    agents: &std::collections::HashMap<String, ResolvedAgent>,
+    retrieval: &dyn RetrievalService,
+    telemetry: &TelemetrySink,
+    always_approve: bool,
+) -> Result<()> {
+    let store = AgentRunStore::open_default().await?;
+    let launch_wait = Instant::now();
+    let run = loop {
+        let run = required_agent_run(&store, run_id).await?;
+        if run.status != AgentRunStatus::Queued {
+            break run;
+        }
+        if launch_wait.elapsed() >= Duration::from_secs(5) {
+            store
+                .fail(run_id, "worker was not activated by its supervisor")
+                .await?;
+            anyhow::bail!("agent run '{run_id}' was not activated by its supervisor");
+        }
+        // The detached process can be scheduled before its parent persists the
+        // PID. Do not race an early worker failure against that state update.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    if matches!(
+        run.status,
+        AgentRunStatus::Cancelled | AgentRunStatus::CancelRequested
+    ) {
+        return Ok(());
+    }
+    let selected = agents.get(&run.agent).ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent '{}' is no longer available for supervised run '{}'",
+            run.agent,
+            run.id
+        )
+    })?;
+    cfg.session_backend = SessionBackend::Sqlite;
+    cfg.session_db_url = default_agent_session_url();
+    cfg.session_id = run.session_id.clone();
+    apply_agent_overrides(cfg, selected);
+
+    let result: Result<()> = async {
+        let runtime_tools = resolve_runtime_tools(cfg).await;
+        approve_runtime_tools(&runtime_tools, always_approve);
+        let confirmation = resolve_tool_confirmation_settings(cfg, &runtime_tools);
+        let session_service = build_session_service(cfg).await?;
+        ensure_session_exists(&session_service, cfg).await?;
+        let (runner, provider, model) = build_single_runner_for_chat(
+            cfg,
+            session_service,
+            &runtime_tools,
+            &confirmation,
+            telemetry,
+        )
+        .await?;
+        let provider = format!("{provider:?}").to_ascii_lowercase();
+        let mut last_response = String::new();
+        loop {
+            let current = required_agent_run(&store, run_id).await?;
+            if matches!(
+                current.status,
+                AgentRunStatus::Cancelled | AgentRunStatus::CancelRequested
+            ) {
+                store.mark_cancelled(run_id).await?;
+                return Ok(());
+            }
+            let messages = store.drain_messages(run_id).await?;
+            if messages.is_empty() {
+                store
+                    .complete(run_id, &last_response, &provider, &model)
+                    .await?;
+                // Close the small enqueue/complete race: a sender that observed
+                // the worker as running may have committed just after completion.
+                let late_messages = store.drain_messages(run_id).await?;
+                if late_messages.is_empty() {
+                    return Ok(());
+                }
+                store.set_process(run_id, std::process::id()).await?;
+                let prompt = late_messages.join("\n\n--- follow-up ---\n\n");
+                last_response = run_supervised_turn(
+                    &runner, cfg, &prompt, retrieval, telemetry, run_id, &provider, &model,
+                )
+                .await?;
+                continue;
+            }
+            let prompt = messages.join("\n\n--- follow-up ---\n\n");
+            last_response = run_supervised_turn(
+                &runner, cfg, &prompt, retrieval, telemetry, run_id, &provider, &model,
+            )
+            .await?;
+        }
+    }
+    .await;
+
+    if let Err(error) = &result {
+        store.fail(run_id, &error.to_string()).await?;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_supervised_turn(
+    runner: &adk_rust::prelude::Runner,
+    cfg: &RuntimeConfig,
+    prompt: &str,
+    retrieval: &dyn RetrievalService,
+    telemetry: &TelemetrySink,
+    run_id: &str,
+    provider: &str,
+    model: &str,
+) -> Result<String> {
+    enforce_prompt_limit(prompt, cfg.max_prompt_chars)?;
+    let prompt = apply_guardrail(cfg, telemetry, "input", cfg.guardrail_input_mode, prompt)?;
+    run_headless(
+        runner,
+        cfg,
+        &prompt,
+        retrieval,
+        telemetry,
+        &RunMetadata {
+            command: format!("agents.worker.{run_id}"),
+            session_id: cfg.session_id.clone(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+        },
+        OutputFormat::StreamJson,
+    )
+    .await
 }
 
 /// Announce a degraded tool surface before a long run begins.

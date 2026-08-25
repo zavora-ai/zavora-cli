@@ -37,10 +37,12 @@ pub enum ChatCommand {
     Tools,
     Mcp,
     Capabilities,
+    Essentials,
     Skills,
     Plugins,
     Instructions(String),
     Agents,
+    Teams(String),
     Inspect,
     Doctor,
     Usage,
@@ -51,6 +53,11 @@ pub enum ChatCommand {
     Tangent(String),
     Todos(String),
     Delegate(String),
+    Parallel(String),
+    Spawn(String),
+    Runs,
+    AgentSend(String),
+    AgentCancel(String),
     Provider(String),
     PlannerProvider(String),
     Model(Option<String>),
@@ -76,6 +83,8 @@ pub enum ParsedChatCommand {
 }
 
 pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
+    use crate::interactive_commands::InteractiveCommandKind as Kind;
+
     let trimmed = input.trim();
 
     if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("/exit") {
@@ -97,150 +106,129 @@ pub fn parse_chat_command(input: &str) -> ParsedChatCommand {
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_default();
     let arg = parts.next().map(str::trim).unwrap_or_default();
+    let Some(spec) = crate::interactive_commands::find_shared_command(&command) else {
+        return ParsedChatCommand::UnknownCommand(format!("/{command}"));
+    };
 
-    match command.as_str() {
-        "exit" => ParsedChatCommand::Command(ChatCommand::Exit),
-        "status" => ParsedChatCommand::Command(ChatCommand::Status),
-        "help" => ParsedChatCommand::Command(ChatCommand::Help),
-        "tools" => ParsedChatCommand::Command(ChatCommand::Tools),
-        "mcp" => ParsedChatCommand::Command(ChatCommand::Mcp),
-        "mcps" => ParsedChatCommand::Command(ChatCommand::Mcp),
-        "capabilities" => ParsedChatCommand::Command(ChatCommand::Capabilities),
-        "skills" => ParsedChatCommand::Command(ChatCommand::Skills),
-        "plugins" | "extensions" => ParsedChatCommand::Command(ChatCommand::Plugins),
-        "instructions" | "context" => {
+    match spec.kind {
+        Kind::Exit => ParsedChatCommand::Command(ChatCommand::Exit),
+        Kind::Status => ParsedChatCommand::Command(ChatCommand::Status),
+        Kind::Help => ParsedChatCommand::Command(ChatCommand::Help),
+        Kind::Tools => ParsedChatCommand::Command(ChatCommand::Tools),
+        Kind::Mcp => ParsedChatCommand::Command(ChatCommand::Mcp),
+        Kind::Capabilities => ParsedChatCommand::Command(ChatCommand::Capabilities),
+        Kind::Essentials => ParsedChatCommand::Command(ChatCommand::Essentials),
+        Kind::Skills => ParsedChatCommand::Command(ChatCommand::Skills),
+        Kind::Plugins => ParsedChatCommand::Command(ChatCommand::Plugins),
+        Kind::Instructions => {
             ParsedChatCommand::Command(ChatCommand::Instructions(arg.to_string()))
         }
-        "agents" => ParsedChatCommand::Command(ChatCommand::Agents),
-        "inspect" => ParsedChatCommand::Command(ChatCommand::Inspect),
-        "doctor" => ParsedChatCommand::Command(ChatCommand::Doctor),
-        "usage" => ParsedChatCommand::Command(ChatCommand::Usage),
-        "sessions" | "resume" | "continue" => {
-            ParsedChatCommand::Command(ChatCommand::Sessions(arg.to_string()))
+        Kind::Agents => ParsedChatCommand::Command(ChatCommand::Agents),
+        Kind::Teams => ParsedChatCommand::Command(ChatCommand::Teams(arg.to_string())),
+        Kind::Inspect => ParsedChatCommand::Command(ChatCommand::Inspect),
+        Kind::Doctor => ParsedChatCommand::Command(ChatCommand::Doctor),
+        Kind::Usage => ParsedChatCommand::Command(ChatCommand::Usage),
+        Kind::Sessions => ParsedChatCommand::Command(ChatCommand::Sessions(arg.to_string())),
+        Kind::NewSession => ParsedChatCommand::Command(ChatCommand::NewSession(arg.to_string())),
+        Kind::Compact => ParsedChatCommand::Command(ChatCommand::Compact),
+        Kind::Agent => ParsedChatCommand::Command(ChatCommand::Agent),
+        Kind::AutoCompact => ParsedChatCommand::Command(ChatCommand::AutoCompact),
+        Kind::Memory => ParsedChatCommand::Command(ChatCommand::Memory(arg.to_string())),
+        Kind::Time => ParsedChatCommand::Command(ChatCommand::Time(arg.to_string())),
+        Kind::Checkpoint => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
+        Kind::Tangent => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
+        Kind::Todos => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
+        Kind::Delegate => ParsedChatCommand::Command(ChatCommand::Delegate(arg.to_string())),
+        Kind::Parallel => ParsedChatCommand::Command(ChatCommand::Parallel(arg.to_string())),
+        Kind::Spawn => required_argument(spec, arg, |value| ChatCommand::Spawn(value.to_string())),
+        Kind::Runs => ParsedChatCommand::Command(ChatCommand::Runs),
+        Kind::AgentSend => {
+            required_argument(spec, arg, |value| ChatCommand::AgentSend(value.to_string()))
         }
-        "new" => ParsedChatCommand::Command(ChatCommand::NewSession(arg.to_string())),
-        "compact" => ParsedChatCommand::Command(ChatCommand::Compact),
-        "agent" => ParsedChatCommand::Command(ChatCommand::Agent),
-        "autocompact" => ParsedChatCommand::Command(ChatCommand::AutoCompact),
-        "memory" => ParsedChatCommand::Command(ChatCommand::Memory(arg.to_string())),
-        "time" => ParsedChatCommand::Command(ChatCommand::Time(arg.to_string())),
-        "checkpoint" => ParsedChatCommand::Command(ChatCommand::Checkpoint(arg.to_string())),
-        "tangent" => ParsedChatCommand::Command(ChatCommand::Tangent(arg.to_string())),
-        "todos" => ParsedChatCommand::Command(ChatCommand::Todos(arg.to_string())),
-        "delegate" => ParsedChatCommand::Command(ChatCommand::Delegate(arg.to_string())),
-        "ralph" => ParsedChatCommand::Command(ChatCommand::Ralph(arg.to_string())),
-        "allow" => {
-            if arg.is_empty() {
-                ParsedChatCommand::MissingArgument {
-                    usage: "/allow <pattern> (e.g. 'execute_bash:git *', 'fs_read:*')",
-                }
-            } else {
-                ParsedChatCommand::Command(ChatCommand::Allow(arg.to_string()))
-            }
+        Kind::AgentCancel => required_argument(spec, arg, |value| {
+            ChatCommand::AgentCancel(value.to_string())
+        }),
+        Kind::Ralph => ParsedChatCommand::Command(ChatCommand::Ralph(arg.to_string())),
+        Kind::Allow => required_argument(spec, arg, |value| ChatCommand::Allow(value.to_string())),
+        Kind::Deny => required_argument(spec, arg, |value| ChatCommand::Deny(value.to_string())),
+        Kind::Undo => ParsedChatCommand::Command(ChatCommand::Undo),
+        Kind::Provider => {
+            required_argument(spec, arg, |value| ChatCommand::Provider(value.to_string()))
         }
-        "deny" => {
-            if arg.is_empty() {
-                ParsedChatCommand::MissingArgument {
-                    usage: "/deny <pattern> (e.g. 'execute_bash:rm -rf *', 'fs_write:/etc/*')",
-                }
-            } else {
-                ParsedChatCommand::Command(ChatCommand::Deny(arg.to_string()))
-            }
-        }
-        "undo" => ParsedChatCommand::Command(ChatCommand::Undo),
-        "provider" => {
-            if arg.is_empty() {
-                ParsedChatCommand::MissingArgument {
-                    usage: "/provider <auto|gemini|openai|anthropic|deepseek|groq|ollama>",
-                }
-            } else {
-                ParsedChatCommand::Command(ChatCommand::Provider(arg.to_string()))
-            }
-        }
-        "planner-provider" => {
-            if arg.is_empty() {
-                ParsedChatCommand::MissingArgument {
-                    usage: "/planner-provider <openai|gemini|anthropic|deepseek|groq|ollama>",
-                }
-            } else {
-                ParsedChatCommand::Command(ChatCommand::PlannerProvider(arg.to_string()))
-            }
-        }
-        "model" => {
-            if arg.is_empty() {
-                ParsedChatCommand::Command(ChatCommand::Model(None))
-            } else {
-                ParsedChatCommand::Command(ChatCommand::Model(Some(arg.to_string())))
-            }
-        }
-        "worker" => ParsedChatCommand::Command(ChatCommand::Worker(
+        Kind::PlannerProvider => required_argument(spec, arg, |value| {
+            ChatCommand::PlannerProvider(value.to_string())
+        }),
+        Kind::Model => ParsedChatCommand::Command(ChatCommand::Model(
             (!arg.is_empty()).then(|| arg.to_string()),
         )),
-        "planner" => ParsedChatCommand::Command(ChatCommand::Planner(
+        Kind::Worker => ParsedChatCommand::Command(ChatCommand::Worker(
             (!arg.is_empty()).then(|| arg.to_string()),
         )),
-        "models" => ParsedChatCommand::Command(ChatCommand::Models),
-        other => ParsedChatCommand::UnknownCommand(format!("/{other}")),
+        Kind::Planner => ParsedChatCommand::Command(ChatCommand::Planner(
+            (!arg.is_empty()).then(|| arg.to_string()),
+        )),
+        Kind::Models => ParsedChatCommand::Command(ChatCommand::Models),
+        Kind::Clear
+        | Kind::Mode
+        | Kind::Shell
+        | Kind::Copy
+        | Kind::Mouse
+        | Kind::Export
+        | Kind::Width
+        | Kind::Activity
+        | Kind::Keys => ParsedChatCommand::UnknownCommand(spec.name.to_string()),
     }
 }
 
+fn required_argument(
+    spec: &crate::interactive_commands::InteractiveCommandSpec,
+    argument: &str,
+    command: impl FnOnce(&str) -> ChatCommand,
+) -> ParsedChatCommand {
+    if argument.is_empty() {
+        ParsedChatCommand::MissingArgument {
+            usage: spec.missing_argument_usage(),
+        }
+    } else {
+        ParsedChatCommand::Command(command(argument))
+    }
+}
+
+pub(crate) fn format_chat_help() -> String {
+    let mut output = format!("\n  {BOLD}Commands{RESET}\n");
+    for category in crate::interactive_commands::COMMAND_CATEGORIES {
+        let commands = crate::interactive_commands::shared_command_specs()
+            .filter(|spec| spec.category == *category)
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            continue;
+        }
+        output.push_str(&format!("\n  {BOLD}{category}{RESET}\n"));
+        for spec in commands {
+            let aliases = spec
+                .aliases
+                .iter()
+                .map(|alias| format!("/{alias}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let description = if aliases.is_empty() {
+                spec.description.to_string()
+            } else {
+                format!("{} (aliases: {aliases})", spec.description)
+            };
+            output.push_str(&format!(
+                "  {CYAN}{:<42}{RESET} {DIM}{}{RESET}\n",
+                spec.usage, description
+            ));
+        }
+    }
+    output.push('\n');
+    output
+}
+
 pub fn print_chat_help() {
-    println!();
-    println!("  {BOLD}Commands{RESET}");
-    println!("  {CYAN}/help{RESET}              {DIM}show this reference{RESET}");
-    println!("  {CYAN}/status{RESET}            {DIM}active provider, model, session{RESET}");
-    println!("  {CYAN}/capabilities{RESET}      {DIM}browse bundled work capability packs{RESET}");
-    println!("  {CYAN}/mcps{RESET}              {DIM}show configured MCP servers and tools{RESET}");
-    println!("  {CYAN}/skills{RESET}            {DIM}browse invocable workspace skills{RESET}");
-    println!(
-        "  {CYAN}/plugins{RESET}           {DIM}inspect cross-CLI plugins and extensions{RESET}"
-    );
-    println!(
-        "  {CYAN}/instructions{RESET} [show] {DIM}inspect active project instruction files{RESET}"
-    );
-    println!("  {CYAN}/agents{RESET}            {DIM}browse specialist sub-agents{RESET}");
-    println!(
-        "  {CYAN}/inspect{RESET}           {DIM}inspect resolved runtime configuration{RESET}"
-    );
-    println!("  {CYAN}/doctor{RESET}            {DIM}check MCP configuration readiness{RESET}");
-    println!("  {CYAN}/usage{RESET}             {DIM}context window token breakdown{RESET}");
-    println!("  {CYAN}/compact{RESET}           {DIM}summarize history to free context{RESET}");
-    println!("  {CYAN}/autocompact{RESET}       {DIM}toggle automatic compaction{RESET}");
-    println!("  {CYAN}/memory{RESET} <cmd>      {DIM}recall|remember|forget learnings{RESET}");
-    println!("  {CYAN}/time{RESET} <query>      {DIM}get time context or parse dates{RESET}");
-    println!("  {CYAN}/ralph{RESET} <prompt>     {DIM}run Ralph autonomous dev pipeline{RESET}");
-    println!("  {CYAN}/tools{RESET}             {DIM}list active tools and policy{RESET}");
-    println!("  {CYAN}/mcp{RESET}               {DIM}MCP server diagnostics{RESET}");
-    println!();
-    println!("  {BOLD}Session{RESET}");
-    println!("  {CYAN}/sessions{RESET} [list]   {DIM}list persisted sessions{RESET}");
-    println!("  {CYAN}/new{RESET} [id]          {DIM}start a clean session{RESET}");
-    println!("  {CYAN}/checkpoint{RESET} save|list|restore  {DIM}manage snapshots{RESET}");
-    println!("  {CYAN}/tangent{RESET} start|end  {DIM}exploratory branch{RESET}");
-    println!("  {CYAN}/todos{RESET} list|show|clear  {DIM}task lists{RESET}");
-    println!("  {CYAN}/delegate{RESET} <task>    {DIM}run isolated sub-agent{RESET}");
-    println!();
-    println!("  {BOLD}Config{RESET}");
-    println!("  {CYAN}/provider{RESET} <name>    {DIM}switch provider{RESET}");
-    println!(
-        "  {CYAN}/model{RESET} [id]         {DIM}switch the worker model (legacy alias){RESET}"
-    );
-    println!("  {CYAN}/worker{RESET} [id]        {DIM}switch the everyday coding model{RESET}");
-    println!("  {CYAN}/planner{RESET} [id]       {DIM}switch the strong planning model{RESET}");
-    println!("  {CYAN}/planner-provider{RESET} <name> {DIM}switch the planner provider{RESET}");
-    println!(
-        "  {CYAN}/models{RESET}             {DIM}show roles, models, and shared quota pools{RESET}"
-    );
-    println!(
-        "  {CYAN}/allow{RESET} <pattern>    {DIM}auto-approve tool pattern for session{RESET}"
-    );
-    println!("  {CYAN}/deny{RESET} <pattern>     {DIM}deny tool pattern for session{RESET}");
-    println!("  {CYAN}/undo{RESET}              {DIM}restore last modified file{RESET}");
-    println!("  {CYAN}/exit{RESET}              {DIM}quit chat{RESET}");
-    println!(
-        "  {CYAN}/agent{RESET}             {DIM}toggle agent mode (auto-approve tools){RESET}"
-    );
-    println!();
+    let help = format_chat_help();
+    print!("{help}");
 }
 
 pub fn print_chat_usage() {
@@ -631,6 +619,7 @@ pub async fn dispatch_chat_command(
     session_service: &Arc<dyn SessionService>,
     runtime_tools: &ResolvedRuntimeTools,
     tool_confirmation: &ToolConfirmationSettings,
+    retrieval_service: &Arc<dyn RetrievalService>,
     telemetry: &TelemetrySink,
     context_usage: Option<&ContextUsage>,
     checkpoint_store: &mut CheckpointStore,
@@ -864,13 +853,21 @@ pub async fn dispatch_chat_command(
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Delegate(task) => {
-            if task.trim().is_empty() {
-                println!("Usage: /delegate <task description>");
-                println!("(experimental) Runs an isolated sub-agent prompt.");
+            let (agent, delegate_task) = match todos::parse_delegate_request(task.trim()) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    println!("Invalid delegate command: {error}");
+                    return Ok(ChatCommandAction::Continue);
+                }
+            };
+            if delegate_task.trim().is_empty() {
+                println!("Usage: /delegate [@agent|--agent NAME] <task>");
+                println!("Runs a governed sub-agent in an isolated, resumable session.");
             } else {
-                println!("[experimental] Running delegate task...");
-                let result = todos::run_delegate(
-                    task.trim(),
+                println!("Running delegated task...");
+                let result = todos::run_named_delegate(
+                    delegate_task.trim(),
+                    agent.as_deref(),
                     cfg,
                     session_service.clone(),
                     runtime_tools,
@@ -880,6 +877,121 @@ pub async fn dispatch_chat_command(
                 .await;
                 print!("{}", result.format_display());
             }
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Parallel(request) => {
+            let request = match crate::subagents::parse_parallel_request(&request) {
+                Ok(request) => request,
+                Err(error) => {
+                    println!("Invalid parallel command: {error}");
+                    println!("Usage: /parallel @AGENT [@AGENT ...] <task>");
+                    return Ok(ChatCommandAction::Continue);
+                }
+            };
+            let agents = match crate::subagents::resolve_parallel_agents(cfg, &request.agents) {
+                Ok(agents) => agents,
+                Err(error) => {
+                    println!("Cannot start parallel agents: {error}");
+                    return Ok(ChatCommandAction::Continue);
+                }
+            };
+            println!(
+                "Running {} governed subagent(s) with concurrency {}...",
+                agents.len(),
+                request.max_concurrency.min(agents.len())
+            );
+            let results = crate::subagents::run_parallel(
+                agents,
+                &request.task,
+                crate::subagents::ParallelRunContext {
+                    base_cfg: cfg,
+                    parent_tools: runtime_tools,
+                    retrieval: retrieval_service.clone(),
+                    telemetry,
+                    max_concurrency: request.max_concurrency,
+                    progress_format: crate::cli::OutputFormat::Text,
+                    progress: None,
+                    session_service: Some(session_service.clone()),
+                },
+            )
+            .await;
+            crate::subagents::render_results(&results, crate::cli::OutputFormat::Text);
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Spawn(request) => {
+            let request = crate::agent_supervisor::parse_spawn_request(&request)?;
+            if request.agent == "ralph"
+                || !cfg
+                    .available_agents
+                    .iter()
+                    .any(|agent| agent.name == request.agent)
+            {
+                println!("Agent '{}' is not an available specialist.", request.agent);
+                return Ok(ChatCommandAction::Continue);
+            }
+            let store = crate::agent_supervisor::AgentRunStore::open_default().await?;
+            let run = store
+                .create_run(
+                    crate::agent_supervisor::NewAgentRun {
+                        parent_run_id: std::env::var("ZAVORA_SUPERVISOR_RUN_ID").ok(),
+                        parent_session_id: cfg.session_id.clone(),
+                        agent: request.agent,
+                        task: request.task,
+                        workspace: std::env::current_dir()?,
+                        worktree: request.worktree,
+                        retry_of: None,
+                    },
+                    &crate::agent_supervisor::SupervisorPolicy::default(),
+                )
+                .await?;
+            crate::agent_supervisor::launch_worker(
+                &store,
+                &run,
+                crate::agent_supervisor::LaunchOptions {
+                    cfg,
+                    always_approve: false,
+                },
+            )
+            .await?;
+            println!(
+                "Started background agent '{}' as {}. Use /runs to inspect it.",
+                run.agent, run.id
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Runs => {
+            let store = crate::agent_supervisor::AgentRunStore::open_default().await?;
+            println!(
+                "{}",
+                crate::agent_supervisor::format_runs_markdown(&store.list(50).await?)
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::AgentSend(request) => {
+            let Some((run_id, message)) = request.split_once(char::is_whitespace) else {
+                println!("Usage: /send RUN_ID <message>");
+                return Ok(ChatCommandAction::Continue);
+            };
+            let store = crate::agent_supervisor::AgentRunStore::open_default().await?;
+            let continuation = store.prepare_continuation(run_id, message.trim()).await?;
+            if continuation.launch_required {
+                crate::agent_supervisor::launch_worker(
+                    &store,
+                    &continuation.run,
+                    crate::agent_supervisor::LaunchOptions {
+                        cfg,
+                        always_approve: false,
+                    },
+                )
+                .await?;
+            }
+            println!("Queued follow-up for {run_id}.");
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::AgentCancel(run_id) => {
+            let store = crate::agent_supervisor::AgentRunStore::open_default().await?;
+            let run = crate::agent_supervisor::cancel_run(&store, run_id.trim()).await?;
+            println!("Agent run {} is {}.", run.id, run.status.label());
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Tools => {
@@ -907,6 +1019,15 @@ pub async fn dispatch_chat_command(
                         .collect::<Vec<_>>(),
                 )
             );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Essentials => {
+            let configured = cfg
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect::<Vec<_>>();
+            print!("{}", crate::essentials::format_status_markdown(&configured));
             Ok(ChatCommandAction::Continue)
         }
         ChatCommand::Skills => {
@@ -942,6 +1063,53 @@ pub async fn dispatch_chat_command(
                         &agent.description
                     }
                 );
+            }
+            let store = crate::agent_supervisor::AgentRunStore::open_default().await?;
+            println!(
+                "\n{}",
+                crate::agent_supervisor::format_runs_markdown(&store.list(10).await?)
+            );
+            Ok(ChatCommandAction::Continue)
+        }
+        ChatCommand::Teams(subcommand) => {
+            match crate::teams::resolve_interactive_command(&subcommand, cfg)? {
+                crate::teams::InteractiveTeamAction::Display(output) => println!("{output}"),
+                crate::teams::InteractiveTeamAction::Run { name, task } => {
+                    let teams = crate::teams::discover_teams(&std::env::current_dir()?)?;
+                    let team = teams.get(&name).context("selected team disappeared")?;
+                    let built = crate::teams::build_team(team, cfg, runtime_tools).await?;
+                    telemetry.emit(
+                        "team.compiled",
+                        json!({
+                            "team": built.name,
+                            "architecture": built.architecture,
+                            "roster": built.roster,
+                            "routes": built.routes,
+                            "surface": "classic-chat",
+                        }),
+                    );
+                    let team_runner = crate::runner::build_runner_with_session_service(
+                        built.root.clone(),
+                        cfg,
+                        session_service.clone(),
+                        Some(crate::teams::with_team_confirmation_handler(
+                            tool_confirmation.run_config.clone(),
+                        )),
+                    )
+                    .await?;
+                    let answer = run_prompt_with_retrieval(
+                        &team_runner,
+                        cfg,
+                        &task,
+                        retrieval_service.as_ref(),
+                        telemetry,
+                    )
+                    .await?;
+                    println!("{answer}");
+                    for receipt in built.execution_receipts() {
+                        telemetry.emit("team.execution_receipt", serde_json::to_value(receipt)?);
+                    }
+                }
             }
             Ok(ChatCommandAction::Continue)
         }
@@ -1462,6 +1630,7 @@ async fn run_chat_classic(
                     &session_service,
                     &runtime_tools,
                     &tool_confirmation,
+                    &retrieval_service,
                     telemetry,
                     context_usage.as_ref(),
                     &mut checkpoint_store,

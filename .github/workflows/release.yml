@@ -118,12 +118,15 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Build essential companion payload
+        run: ./scripts/build_essential_companions.sh ${{ matrix.target }} dist
+
       - name: Package artifact
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/zavora-cli dist/zavora-cli
           chmod +x dist/zavora-cli
-          tar -czf "dist/zavora-cli-${{ needs.resolve.outputs.release_tag }}-${{ matrix.artifact_suffix }}.tar.gz" -C dist zavora-cli
+          tar -czf "dist/zavora-cli-${{ needs.resolve.outputs.release_tag }}-${{ matrix.artifact_suffix }}.tar.gz" -C dist zavora-cli libexec
           shasum -a 256 "dist/zavora-cli-${{ needs.resolve.outputs.release_tag }}-${{ matrix.artifact_suffix }}.tar.gz" > "dist/checksums-${{ matrix.artifact_suffix }}.txt"
 
       - name: Upload artifact bundle

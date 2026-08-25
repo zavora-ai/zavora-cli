@@ -98,11 +98,16 @@ pub enum ProfileCommands {
 #[derive(Debug, Subcommand)]
 pub enum AgentCommands {
     #[command(about = "List available agents from local/global catalogs")]
-    List,
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(about = "Show resolved agent configuration")]
     Show {
         #[arg(long)]
         name: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Select active agent for this workspace")]
     Select {
@@ -115,6 +120,108 @@ pub enum AgentCommands {
         name: String,
         task: Vec<String>,
     },
+    #[command(about = "Run the same task across named agents concurrently")]
+    Parallel {
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+        #[arg(long, default_value_t = 4)]
+        max_concurrency: usize,
+        task: Vec<String>,
+    },
+    #[command(about = "Start a durable subagent run in the background")]
+    Spawn {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        parent_run_id: Option<String>,
+        #[arg(long, default_value_t = false)]
+        worktree: bool,
+        task: Vec<String>,
+    },
+    #[command(about = "List durable subagent runs")]
+    Runs {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Show one durable subagent run")]
+    Status {
+        run_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Send a follow-up message to a durable subagent")]
+    Send {
+        run_id: String,
+        message: Vec<String>,
+    },
+    #[command(about = "Wait for a durable subagent run to finish")]
+    Wait {
+        run_id: String,
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Cancel a durable subagent run")]
+    Cancel { run_id: String },
+    #[command(about = "Retry a durable subagent run as a new linked run")]
+    Retry {
+        run_id: String,
+        #[arg(long, default_value_t = false)]
+        worktree: bool,
+    },
+    #[command(about = "Read the structured event stream for a subagent run")]
+    Events {
+        run_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+    },
+    #[command(name = "worktree-remove", about = "Remove a run-owned git worktree")]
+    WorktreeRemove {
+        run_id: String,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    #[command(hide = true)]
+    Worker {
+        #[arg(long)]
+        run_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TeamCommands {
+    #[command(about = "List built-in, user, and workspace team definitions")]
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Show a portable team definition and its exact topology")]
+    Show {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Validate team policy, topology, and local agent bindings")]
+    Validate {
+        name: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Print a team's nodes and governed relationships")]
+    Topology {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Run a governed ADK-Rust team")]
+    Run { name: String, task: Vec<String> },
+    #[command(about = "Print the portable Zavora/ADK team JSON Schema")]
+    Schema,
 }
 
 #[derive(Debug, Subcommand)]
@@ -144,6 +251,17 @@ pub enum CapabilityCommands {
     Enable { id: String },
     #[command(about = "Disable a capability pack for this workspace")]
     Disable { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EssentialCommands {
+    #[command(about = "Show built-in and managed essential capability readiness")]
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Run an essential MCP server over stdio", hide = true)]
+    Serve { server: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -457,6 +575,14 @@ const CLI_EXAMPLES: &str = "Examples:\n\
   zavora-cli --session-backend sqlite --session-db-url sqlite://.zavora/sessions.db sessions prune --keep 20 --dry-run\n\
   zavora-cli agents list\n\
   zavora-cli agents run --name research_agent \"Compare the primary sources\"\n\
+  zavora-cli agents parallel --agent developer_agent --agent reviewer_agent \"Assess this change\"\n\
+  zavora-cli agents spawn --name developer_agent --worktree \"Implement the change\"\n\
+  zavora-cli agents runs\n\
+  zavora-cli agents send <run-id> \"Also run the integration tests\"\n\
+  zavora-cli agents wait <run-id>\n\
+  zavora-cli teams list\n\
+  zavora-cli teams topology frontier-delivery --json\n\
+  zavora-cli teams run frontier-delivery \"Implement and independently verify the change\"\n\
   zavora-cli instructions show --json\n\
   zavora-cli skills search device\n\
   zavora-cli skills install device-fleet-management\n\
@@ -479,7 +605,7 @@ const CLI_EXAMPLES: &str = "Examples:\n\
 Switching behavior:\n\
   - Use --agent <name> to select a named agent profile for this invocation.\n\
   - Use --provider/--model to switch runtime model selection per invocation.\n\
-  - In chat, use /help for command discovery and /capabilities, /mcps, /skills, /plugins, /agents, /inspect, /doctor.";
+  - In chat, use /help for command discovery and /capabilities, /mcps, /skills, /plugins, /agents, /teams, /inspect, /doctor.";
 
 #[derive(Debug, Parser)]
 #[command(name = "zavora-cli")]
@@ -664,10 +790,20 @@ pub enum Commands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+    #[command(about = "Discover, validate, inspect, and run governed agent teams")]
+    Teams {
+        #[command(subcommand)]
+        command: TeamCommands,
+    },
     #[command(about = "Inspect live capabilities and bundled MCP recipes")]
     Capabilities {
         #[command(subcommand)]
         command: CapabilityCommands,
+    },
+    #[command(about = "Inspect prepackaged and managed essential capabilities")]
+    Essentials {
+        #[command(subcommand)]
+        command: EssentialCommands,
     },
     #[command(about = "Discover, configure, diagnose, and run MCP servers")]
     Mcp {
@@ -762,10 +898,29 @@ pub fn command_label(command: &Commands) -> String {
             ProfileCommands::Show => "profiles.show".to_string(),
         },
         Commands::Agents { command } => match command {
-            AgentCommands::List => "agents.list".to_string(),
+            AgentCommands::List { .. } => "agents.list".to_string(),
             AgentCommands::Show { .. } => "agents.show".to_string(),
             AgentCommands::Select { .. } => "agents.select".to_string(),
             AgentCommands::Run { .. } => "agents.run".to_string(),
+            AgentCommands::Parallel { .. } => "agents.parallel".to_string(),
+            AgentCommands::Spawn { .. } => "agents.spawn".to_string(),
+            AgentCommands::Runs { .. } => "agents.runs".to_string(),
+            AgentCommands::Status { .. } => "agents.status".to_string(),
+            AgentCommands::Send { .. } => "agents.send".to_string(),
+            AgentCommands::Wait { .. } => "agents.wait".to_string(),
+            AgentCommands::Cancel { .. } => "agents.cancel".to_string(),
+            AgentCommands::Retry { .. } => "agents.retry".to_string(),
+            AgentCommands::Events { .. } => "agents.events".to_string(),
+            AgentCommands::WorktreeRemove { .. } => "agents.worktree-remove".to_string(),
+            AgentCommands::Worker { .. } => "agents.worker".to_string(),
+        },
+        Commands::Teams { command } => match command {
+            TeamCommands::List { .. } => "teams.list".to_string(),
+            TeamCommands::Show { .. } => "teams.show".to_string(),
+            TeamCommands::Validate { .. } => "teams.validate".to_string(),
+            TeamCommands::Topology { .. } => "teams.topology".to_string(),
+            TeamCommands::Run { name, .. } => format!("teams.run.{name}"),
+            TeamCommands::Schema => "teams.schema".to_string(),
         },
         Commands::Capabilities { command } => match command {
             CapabilityCommands::List { .. } => "capabilities.list".to_string(),
@@ -773,6 +928,10 @@ pub fn command_label(command: &Commands) -> String {
             CapabilityCommands::Info { .. } => "capabilities.info".to_string(),
             CapabilityCommands::Enable { .. } => "capabilities.enable".to_string(),
             CapabilityCommands::Disable { .. } => "capabilities.disable".to_string(),
+        },
+        Commands::Essentials { command } => match command {
+            EssentialCommands::Status { .. } => "essentials.status".to_string(),
+            EssentialCommands::Serve { server } => format!("essentials.serve.{server}"),
         },
         Commands::Mcp { command } => match command {
             McpCommands::Catalog { .. } => "mcp.catalog".to_string(),

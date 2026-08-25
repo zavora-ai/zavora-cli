@@ -1,3 +1,4 @@
+pub mod agent_supervisor;
 pub mod bash_security;
 #[cfg(feature = "browser")]
 pub mod browser;

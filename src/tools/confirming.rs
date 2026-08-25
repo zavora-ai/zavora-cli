@@ -79,6 +79,7 @@ pub enum ApprovalDecision {
 }
 
 pub struct ApprovalRequest {
+    pub agent: String,
     pub tool: String,
     pub detail: String,
     pub response: tokio::sync::oneshot::Sender<ApprovalDecision>,
@@ -102,14 +103,84 @@ fn tui_active() -> bool {
     APPROVAL_SENDER.lock().unwrap().is_some()
 }
 
+/// Ask the active frontend to approve a named non-tool runtime action.
+///
+/// ADK team relationships use this adapter so their exact-call confirmation
+/// policy shares Zavora's TUI bridge, classic prompt, session trust, and
+/// fail-closed headless behavior.
+pub async fn confirm_runtime_action(agent: &str, action: &str, detail: &str) -> ApprovalDecision {
+    let session_decision = session_permission_decision(action, Some(detail));
+    if tool_is_trusted(agent, action)
+        || session_decision == crate::tool_policy::PermissionDecision::Allow
+    {
+        return ApprovalDecision::AllowOnce;
+    }
+    if session_decision == crate::tool_policy::PermissionDecision::Deny
+        || HEADLESS_MODE.load(Ordering::SeqCst)
+    {
+        return ApprovalDecision::Deny;
+    }
+    let approval_sender = { APPROVAL_SENDER.lock().unwrap().clone() };
+    if let Some(sender) = approval_sender {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(ApprovalRequest {
+                agent: agent.to_string(),
+                tool: action.to_string(),
+                detail: detail.to_string(),
+                response: response_tx,
+            })
+            .is_err()
+        {
+            return ApprovalDecision::Deny;
+        }
+        let decision = response_rx.await.unwrap_or(ApprovalDecision::Deny);
+        if decision == ApprovalDecision::TrustSession {
+            trust_tool_for_agent(agent, action);
+        }
+        return decision;
+    }
+
+    eprintln!(
+        "{DIM}Allow {action} for team member {agent}? [{GREEN}y{DIM}/{GREEN}n{DIM}/{GREEN}t{DIM}]:{RESET}"
+    );
+    eprintln!("{DIM}{detail}{RESET}");
+    eprint!("{BOLD}> {RESET}");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return ApprovalDecision::Deny;
+    }
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => ApprovalDecision::AllowOnce,
+        "t" | "trust" => {
+            trust_tool_for_agent(agent, action);
+            ApprovalDecision::TrustSession
+        }
+        _ => ApprovalDecision::Deny,
+    }
+}
+
 /// Trust a tool for the remainder of the session.
 pub fn trust_tool(name: &str) {
-    TRUSTED_TOOLS.lock().unwrap().insert(name.to_string());
+    TRUSTED_TOOLS.lock().unwrap().insert(format!("*\0{name}"));
     SESSION_RULES
         .lock()
         .unwrap()
         .always_allow
         .push(crate::tool_policy::ToolPattern(name.to_string()));
+}
+
+fn trust_tool_for_agent(agent: &str, name: &str) {
+    TRUSTED_TOOLS
+        .lock()
+        .unwrap()
+        .insert(format!("{agent}\0{name}"));
+}
+
+fn tool_is_trusted(agent: &str, name: &str) -> bool {
+    let trusted = TRUSTED_TOOLS.lock().unwrap();
+    trusted.contains(&format!("*\0{name}")) || trusted.contains(&format!("{agent}\0{name}"))
 }
 
 /// Deny a tool or tool-content pattern for the remainder of the session.
@@ -129,11 +200,9 @@ pub fn deny_tool(pattern: &str) {
 /// the enforcement layer, not from the model.
 pub const MODEL_FORBIDDEN_SAFETY_ARGS: &[&str] = &["approved", "allow_dangerous"];
 
-/// Lifecycle hooks for the pre/post-tool stage of the enforcement pipeline.
-///
-/// A process-global, matching how trust rules, the approval bridge, and headless
-/// mode are already installed here. The executor is set once when the tool
-/// surface is sealed, so every wrapped tool sees the same hooks.
+/// Legacy hook source for callers that construct `ConfirmingTool` directly.
+/// Sealed runtime surfaces bind their executor to each wrapper and never read
+/// this value during execution, which keeps parallel agents isolated.
 static HOOK_EXECUTOR: Mutex<Option<Arc<crate::hooks::HookExecutor>>> = Mutex::new(None);
 
 /// Install the hook executor for this process. Called during tool-surface seal.
@@ -180,8 +249,9 @@ fn session_permission_decision(
 
 /// Check if agent mode is active (all core tools trusted).
 pub fn is_agent_mode() -> bool {
-    let set = TRUSTED_TOOLS.lock().unwrap();
-    set.contains("fs_read") && set.contains("fs_write") && set.contains("execute_bash")
+    tool_is_trusted("*", "fs_read")
+        && tool_is_trusted("*", "fs_write")
+        && tool_is_trusted("*", "execute_bash")
 }
 
 /// Wraps a tool with an interactive confirmation prompt.
@@ -189,6 +259,7 @@ pub struct ConfirmingTool {
     inner: Arc<dyn Tool>,
     /// When true, show what the tool is doing but don't prompt — auto-approve.
     display_only: bool,
+    hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
 }
 
 impl ConfirmingTool {
@@ -196,6 +267,7 @@ impl ConfirmingTool {
         Arc::new(Self {
             inner: tool,
             display_only: false,
+            hook_executor: hook_executor(),
         })
     }
 
@@ -204,6 +276,29 @@ impl ConfirmingTool {
         Arc::new(Self {
             inner: tool,
             display_only: true,
+            hook_executor: hook_executor(),
+        })
+    }
+
+    pub fn wrap_with_hooks(
+        tool: Arc<dyn Tool>,
+        hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
+    ) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            inner: tool,
+            display_only: false,
+            hook_executor,
+        })
+    }
+
+    pub fn wrap_display_only_with_hooks(
+        tool: Arc<dyn Tool>,
+        hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
+    ) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            inner: tool,
+            display_only: true,
+            hook_executor,
         })
     }
 
@@ -218,7 +313,10 @@ impl ConfirmingTool {
         ctx: Arc<dyn ToolContext>,
         args: Value,
     ) -> adk_rust::Result<Value> {
-        let executor = hook_executor().filter(|executor| !executor.is_empty());
+        let executor = self
+            .hook_executor
+            .clone()
+            .filter(|executor| !executor.is_empty());
 
         if let Some(executor) = executor.as_ref() {
             let tool_ctx = crate::hooks::HookToolContext {
@@ -416,13 +514,14 @@ impl Tool for ConfirmingTool {
             "fs_read" | "fs_write" | "file_edit" => args.get("path").and_then(Value::as_str),
             _ => None,
         };
+        let agent_name = ctx.agent_name().to_string();
         let session_decision = session_permission_decision(self.inner.name(), content);
         if session_decision == crate::tool_policy::PermissionDecision::Deny {
             return Ok(serde_json::json!({
                 "error": format!("Tool '{}' denied by session policy", self.inner.name())
             }));
         }
-        let trusted = TRUSTED_TOOLS.lock().unwrap().contains(self.inner.name())
+        let trusted = tool_is_trusted(&agent_name, self.inner.name())
             || session_decision == crate::tool_policy::PermissionDecision::Allow;
 
         theme::pause_spinner();
@@ -509,6 +608,7 @@ impl Tool for ConfirmingTool {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if sender
                 .send(ApprovalRequest {
+                    agent: agent_name.clone(),
                     tool: self.inner.name().to_string(),
                     detail,
                     response: response_tx,
@@ -519,7 +619,7 @@ impl Tool for ConfirmingTool {
             }
             match response_rx.await.unwrap_or(ApprovalDecision::Deny) {
                 ApprovalDecision::TrustSession => {
-                    trust_tool(self.inner.name());
+                    trust_tool_for_agent(&agent_name, self.inner.name());
                     let mut approved_args = args;
                     if let Some(obj) = approved_args.as_object_mut() {
                         obj.insert("approved".to_string(), Value::Bool(true));
@@ -603,5 +703,13 @@ mod tests {
             session_permission_decision("test_shell", Some("git push origin main")),
             crate::tool_policy::PermissionDecision::Deny
         );
+    }
+
+    #[test]
+    fn delegated_session_trust_is_scoped_to_the_agent_identity() {
+        let tool = "scoped_test_tool";
+        trust_tool_for_agent("developer_agent", tool);
+        assert!(tool_is_trusted("developer_agent", tool));
+        assert!(!tool_is_trusted("reviewer_agent", tool));
     }
 }

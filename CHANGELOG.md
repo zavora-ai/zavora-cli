@@ -4,6 +4,42 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
+## [2.1.0] — 2026-08-25
+
+### Added
+
+- A governed frontier subagent supervisor built on ADK-Rust 2.1, with user-defined
+  agents, bounded parallel execution, team specifications, shared objectives,
+  handoffs, cancellation, and inspectable task state.
+- Nine embedded standard `SKILL.md` capabilities covering repository development,
+  source research, capability audit, DOCX, PPTX, XLSX, PDF, email operations, and
+  device management. Skills are available to every configured model provider.
+- Essential artifact servers linked into the default binary for DOCX, slides,
+  spreadsheets, and PDFs, plus discoverable computer-use and device-management
+  companions in release archives.
+- Consistent `/agents`, `/teams`, `/skills`, `/mcp`, `/essentials`, `/inspect`, and
+  `/capabilities` interaction surfaces across the TUI and classic shell.
+- Release payload construction for pinned computer-use 7.1.0 and device-management
+  1.7.0 companions on all four supported macOS and Linux targets.
+
+### Changed
+
+- Upgraded the runtime to ADK-Rust 2.1.0 and the bundled worksheet server to
+  `excel-mcp-server` 0.2.2 with MCP 2026 discovery and legacy initialization.
+- The default agent receives a concise live capability summary and can delegate
+  bounded work through the same governed tool and telemetry plane.
+- Capability reporting distinguishes bundled, installed, configured, connected,
+  and authorized states instead of treating catalog availability as readiness.
+- Documentation and release checks now cover essential artifacts, teams,
+  subagents, companion payloads, and clean registry-only installation.
+
+### Fixed
+
+- Office and device capabilities no longer advertise missing scripts or catalog
+  recipes as usable runtime tools.
+- TUI command coverage, capability details, and diagnostics now share the same
+  runtime inventory used by headless and classic modes.
+
 ## [2.0.0] — 2026-08-16
 
 ### Added

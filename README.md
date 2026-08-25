@@ -178,6 +178,8 @@ zavora-cli ask "Explain this workspace" # one response
 zavora-cli workflow parallel "Review the API and tests"
 zavora-cli ralph "Implement the accepted issue"
 zavora-cli agents list
+zavora-cli teams list
+zavora-cli teams run frontier-delivery "Implement and independently verify this change"
 zavora-cli capabilities list
 zavora-cli skills list
 zavora-cli skills search device
@@ -201,7 +203,41 @@ git diff | zavora-cli ask --output-format stream-json "Review this patch"
 See [`docs/HEADLESS.md`](docs/HEADLESS.md) for schemas, events, approvals, and
 exit codes.
 
+## The Zavora team advantage
+
+Most coding CLIs expose either one-shot subagents or a vendor-specific experimental team mode. Zavora's differentiator is a portable, multi-provider team contract: the same versioned definition can bind OpenAI, Gemini, Anthropic, DeepSeek, Groq, Ollama, imported agents, plugin agents, skills, and currently connected MCP tools while ADK-Rust enforces each relationship and the aggregate execution budget.
+
+This separates four concerns that are usually entangled: ADK owns semantic team governance and frozen execution receipts; Zavora owns capability discovery and cross-CLI compatibility; the retained supervisor owns processes, sessions, worktrees, mailboxes, and retries; the CLI, classic chat, TUI, and JSON/JSONL surfaces share one definition. Teams can therefore be inspected and validated before a model runs instead of existing only as prompt prose.
+
 ## Capabilities the agent can turn on
+
+### Essentials ship with the CLI
+
+The default build links the DOCX, PowerPoint, Excel, and PDF MCP servers into
+`zavora-cli`; their standard `SKILL.md` guidance is embedded and materialized into
+Zavora-owned state on first discovery. Release archives also carry the pinned
+`computer-use-mcp` 7.1.0 and device-management 1.7.0 companions. They are launched
+through the installed Zavora executable, so users do not need matching global
+commands on `PATH`.
+
+```text
+$ zavora-cli essentials status
+
+✓ docx-mcp              built-in          installed=true  configured=false
+✓ mcp-slides            built-in          installed=true  configured=false
+✓ worksheet-mcp         built-in          installed=true  configured=false
+✓ mcp-pdf               built-in          installed=true  configured=false
+✓ computer-use-mcp      managed-companion installed=true  configured=false
+✓ mcp-device-management managed-companion installed=true  configured=false
+```
+
+Installed essentials remain dormant until a capability configures them. This
+keeps startup lean and avoids asking for desktop or account authority before a
+task needs it. Configuration is still not a live MCP handshake, and desktop or
+device mutation still requires runtime authorization and Zavora approval. A
+source-only `cargo install` contains the four linked artifact servers but cannot
+install auxiliary companion files; `essentials status` reports those companions
+as missing instead of inferring them from `npm`, `npx`, or `cargo`.
 
 A capability is a curated set of MCP servers plus the specialist agent that uses them. `capabilities list` reports every one, with its maturity, risk, and how many of its servers are configured:
 
@@ -221,11 +257,9 @@ Development:
 The agent can find the capability a request needs and turn it on. `capability_status` is read-only and reports, per capability, its risk, its specialist agent, and for each MCP server whether it is installed and configured. `capability_enable` installs the missing packages, writes them into the profile, and enables the capability — behind an approval that names the exact commands:
 
 ```text
-Install 3 packages to enable "Office Artifacts" (productivity.office)?
-  cargo install slides-mcp-server
-  cargo install excel-mcp-server
-  cargo install mcp-pdf
-Then configures 4 MCP servers and enables the capability.
+Install 1 package to enable "Office Artifacts" (productivity.office)?
+  cargo install adk-rust-mcp-diagrams
+Then configures 5 MCP servers and enables the capability.
 risk high · certified · runs third-party code · enabling does not make the
 servers usable until they connect.
 ```
@@ -239,12 +273,13 @@ Once the servers are configured the workspace reconnects between turns, so a cap
 Zavora reports capability state from the live runtime rather than relying on a static prompt:
 
 - `AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` families supply additive, scope-resolved project instructions. Native `AGENTS.override.md` takes precedence in its directory; Gemini custom context names, Claude local/rules files, imports, deduplication, and inspection are supported.
-- `.agents/skills/<name>/SKILL.md` is the preferred portable skill layout. Compatible `.zavora`, Claude, Gemini, Grok, and OpenCode skill roots are discovered with deterministic precedence. Skills support install/link/update/enable/disable/uninstall and are injected through ADK-Rust's plugin runtime for every model provider.
+- `.agents/skills/<name>/SKILL.md` is the preferred portable skill layout. Zavora's essential skills are embedded in every distribution; compatible `.zavora`, Claude, Gemini, Grok, and OpenCode skill roots are then discovered with deterministic precedence. Skills support install/link/update/enable/disable/uninstall and are injected through ADK-Rust's plugin runtime for every model provider.
 - Plugins normalize native Zavora, Codex, Claude, Gemini, Grok, and OpenCode packages. Enabled packages contribute namespaced skills, portable Markdown agents/commands, and MCP servers. JavaScript/TypeScript entrypoints are reported but require an explicit trusted runtime; discovery never silently executes package code.
 - Specialist subagents cover productivity artifacts, development, research, operations/devices, and independent review.
+- Portable governed teams add exact delegation/handoff policy, deterministic workflows, blackboard councils, registry-selected rosters, aggregate budgets, semantic receipts, topology inspection, and multi-provider member routes through ADK-Rust 2.1. See [`docs/TEAMS.md`](docs/TEAMS.md).
 - `configured`, `connected`, and `authorized` are reported separately; enabling a recipe never claims that its servers are usable.
 
-Use `zavora-cli capabilities list`, `zavora-cli skills list`, `zavora-cli agents list`, and `zavora-cli mcp doctor` for progressively deeper inspection.
+Use `zavora-cli essentials status`, `zavora-cli capabilities list`, `zavora-cli skills list`, `zavora-cli agents list`, `zavora-cli teams list`, and `zavora-cli mcp doctor` for progressively deeper inspection. The same essentials view is available as `/essentials` in classic chat and the TUI.
 
 The dated competitor and gap assessment lives in [`docs/CLI_CAPABILITY_MATRIX.md`](docs/CLI_CAPABILITY_MATRIX.md).
 The exact instruction discovery and precedence contract is documented in [`docs/PROJECT_INSTRUCTIONS.md`](docs/PROJECT_INSTRUCTIONS.md).
@@ -270,9 +305,9 @@ Write, shell, GitHub, and externally supplied MCP tools pass through confirmatio
 
 The workspace puts the terminal into states a shell cannot undo on its own: raw mode, the alternate screen, bracketed paste, and mouse reporting. All of it is undone on exit, on a panic, and on a signal — including `SIGTERM` and the `SIGHUP` a closing window sends. Without that, a killed process leaves mouse reporting on, and every pointer movement prints escape sequences into the shell. See [`docs/TUI.md`](docs/TUI.md#handing-the-terminal-back).
 
-## ADK-Rust 2.0 architecture
+## ADK-Rust 2.1 architecture
 
-Zavora uses the v2 `Runner`, typed events, `AgentTool`, session services, tool traits, model clients, skills, memory, guardrails, telemetry, MCP integration, A2A server support, and compaction APIs. The old `adk-ralph` 0.5 dependency and duplicate ADK runtime graph have been removed; Ralph now runs through the same v2 worker/planner runtime as chat.
+Zavora uses the v2 `Runner`, typed events, `AgentTool`, portable governed teams, session services, tool traits, model clients, skills, memory, guardrails, telemetry, MCP integration, A2A server support, and compaction APIs. The team surface currently consumes the local sibling ADK-Rust 2.1 workspace through `make local-adk`; see [`docs/TEAMS.md`](docs/TEAMS.md). The old `adk-ralph` 0.5 dependency and duplicate ADK runtime graph have been removed; Ralph now runs through the same v2 worker/planner runtime as chat.
 
 See the implementation specification in [`.kiro/specs/v2-upgrade/`](.kiro/specs/v2-upgrade/) and the v1 migration notes in [`docs/MIGRATION_GUIDE_v2.md`](docs/MIGRATION_GUIDE_v2.md).
 

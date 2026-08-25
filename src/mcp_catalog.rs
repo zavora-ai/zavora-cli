@@ -27,7 +27,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Productivity,
         command: "docx-mcp-server",
         args: &[],
-        install: "cargo install docx-mcp-server",
+        install: "cargo install docx-mcp-server --version 2.2.0",
     },
     McpCatalogEntry {
         id: "mcp-slides",
@@ -36,7 +36,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Productivity,
         command: "slides-mcp-server",
         args: &[],
-        install: "cargo install slides-mcp-server",
+        install: "cargo install slides-mcp-server --version 0.1.0",
     },
     McpCatalogEntry {
         id: "worksheet-mcp",
@@ -45,7 +45,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Productivity,
         command: "excel-mcp-server",
         args: &[],
-        install: "cargo install excel-mcp-server",
+        install: "cargo install excel-mcp-server --version 0.2.2",
     },
     McpCatalogEntry {
         id: "mcp-pdf",
@@ -54,7 +54,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Productivity,
         command: "mcp-pdf",
         args: &[],
-        install: "cargo install mcp-pdf",
+        install: "cargo install mcp-pdf --version 3.1.0",
     },
     McpCatalogEntry {
         id: "mcp-email",
@@ -126,7 +126,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Operations,
         command: "npx",
         args: &["--yes", "--prefer-offline", "@zavora-ai/computer-use-mcp"],
-        install: "npm install --global @zavora-ai/computer-use-mcp",
+        install: "npm install --global @zavora-ai/computer-use-mcp@7.1.0",
     },
     McpCatalogEntry {
         id: "mcp-device-management",
@@ -135,7 +135,7 @@ const CATALOG: &[McpCatalogEntry] = &[
         category: CapabilityCategory::Operations,
         command: "mcp-device-management",
         args: &[],
-        install: "cargo install mcp-device-management",
+        install: "cargo install --git https://github.com/zavora-ai/mcp-device-management --tag v1.7.0 --all-features",
     },
     McpCatalogEntry {
         id: "mcp-registry",
@@ -598,6 +598,19 @@ fn command_available(command: &str) -> bool {
     })
 }
 
+/// Installation evidence for a curated server.
+///
+/// Essentials have a stronger probe than their launch command: built-ins are
+/// compile-time capabilities and managed companions must resolve to the actual
+/// companion executable. In particular, `npx` alone is not computer-use.
+pub fn entry_installed(entry: &McpCatalogEntry) -> bool {
+    if crate::essentials::is_essential(entry.id) {
+        crate::essentials::is_installed(entry.id)
+    } else {
+        command_available(entry.command)
+    }
+}
+
 fn read_document(path: &Path) -> Result<DocumentMut> {
     if !path.exists() {
         return Ok(DocumentMut::new());
@@ -685,11 +698,23 @@ pub fn add_server(path: &Path, profile: &str, id: &str) -> Result<bool> {
 
     let mut table = Table::new();
     table.insert("name", value(entry.id));
-    table.insert("command", value(entry.command));
-    if !entry.args.is_empty() {
+    let (command, arguments) = if crate::essentials::is_essential(id) {
+        crate::essentials::launcher(id)?
+    } else {
+        (
+            entry.command.to_string(),
+            entry
+                .args
+                .iter()
+                .map(|argument| (*argument).to_string())
+                .collect(),
+        )
+    };
+    table.insert("command", value(command));
+    if !arguments.is_empty() {
         let mut args = Array::new();
-        for argument in entry.args {
-            args.push(*argument);
+        for argument in arguments {
+            args.push(argument);
         }
         table.insert("args", value(args));
     }
@@ -766,7 +791,7 @@ pub fn run_catalog(query: &str, json: bool) -> Result<()> {
                     "category": entry.category,
                     "command": entry.command,
                     "args": entry.args,
-                    "installed": command_available(entry.command),
+                    "installed": entry_installed(entry),
                     "install": entry.install,
                 })
             })
@@ -790,16 +815,12 @@ pub fn run_catalog(query: &str, json: bool) -> Result<()> {
         for entry in category_entries {
             println!(
                 "  {} {:<24} {} — {}",
-                if command_available(entry.command) {
-                    "✓"
-                } else {
-                    "·"
-                },
+                if entry_installed(entry) { "✓" } else { "·" },
                 entry.id,
                 entry.name,
                 entry.description
             );
-            if !command_available(entry.command) {
+            if !entry_installed(entry) {
                 println!("      install: {}", entry.install);
             }
         }
@@ -819,7 +840,7 @@ pub fn run_add(path: &Path, profile: &str, id: &str) -> Result<()> {
     } else {
         println!("MCP server '{id}' is already configured for profile '{profile}'.");
     }
-    if !command_available(entry.command) {
+    if !entry_installed(entry) {
         println!(
             "The server is configured but not installed. Run: {}",
             entry.install
@@ -890,7 +911,7 @@ mod tests {
         let configured = std::fs::read_to_string(&path).expect("read config");
         assert!(configured.contains("# keep this comment"));
         assert!(configured.contains("worker_model = \"test-model\""));
-        assert!(configured.contains("command = \"docx-mcp-server\""));
+        assert!(configured.contains("args = [\"essentials\", \"serve\", \"docx-mcp\"]"));
 
         assert!(set_server_enabled(&path, "default", "docx-mcp", false).expect("disable"));
         assert!(!set_server_enabled(&path, "default", "docx-mcp", false).expect("idempotent"));

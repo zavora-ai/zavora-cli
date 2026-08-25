@@ -2,6 +2,10 @@
 
 Install the ADK-Rust 2.0 Zavora terminal agent from npm with a prebuilt binary from GitHub Releases.
 
+The npm distribution also installs the governed `computer-use-mcp` companion.
+DOCX, PowerPoint, Excel, and PDF MCP servers are linked into the Zavora binary,
+so the essential artifact surface does not require separate global packages.
+
 ## Install
 
 ```bash

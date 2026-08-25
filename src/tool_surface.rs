@@ -67,6 +67,15 @@ impl ToolSurface {
         self.push_all(crate::tools::build_builtin_tools(), ToolProvenance::BuiltIn)
     }
 
+    /// Durable local subagent controls. These capture the resolved runtime
+    /// configuration so detached workers inherit the same profile and catalog.
+    pub fn add_agent_supervisor(self, cfg: &RuntimeConfig) -> Self {
+        self.push_all(
+            crate::tools::agent_supervisor::build_tools(cfg),
+            ToolProvenance::BuiltIn,
+        )
+    }
+
     /// Tools behind optional features that drive a remote or out-of-process
     /// surface. Classified as egress because their blast radius is not knowable
     /// from here.
@@ -164,18 +173,19 @@ impl ToolSurface {
     ///
     /// Nothing may be added after this returns.
     pub fn seal(mut self, cfg: &RuntimeConfig) -> ResolvedRuntimeTools {
-        // Install the hook stage for this surface. Doing it here rather than at
-        // each call site means a tool cannot be wrapped without hooks applying
-        // to it. Requirement 7.8.
-        if cfg.hooks.is_empty() {
-            crate::tools::confirming::clear_hook_executor();
+        // Bind hooks to this sealed surface. A process-global executor lets one
+        // parallel agent overwrite another agent's policy between sealing and
+        // execution, so wrappers retain their own immutable executor instead.
+        let hook_executor = if cfg.hooks.is_empty() {
+            None
         } else {
             let configured = cfg.hooks.values().map(Vec::len).sum::<usize>();
-            tracing::info!(hooks = configured, "installing lifecycle hook executor");
-            crate::tools::confirming::install_hook_executor(Arc::new(
-                crate::hooks::HookExecutor::new(cfg.hooks.clone()),
-            ));
-        }
+            tracing::info!(
+                hooks = configured,
+                "binding lifecycle hooks to tool surface"
+            );
+            Some(Arc::new(crate::hooks::HookExecutor::new(cfg.hooks.clone())))
+        };
 
         let mut classes = BTreeMap::<String, ToolClass>::new();
         let mut mcp_names = BTreeSet::<String>::new();
@@ -220,7 +230,7 @@ impl ToolSurface {
                     // A tool that appeared without being classified is a bug in
                     // the builder. Fail closed.
                     .unwrap_or(ToolClass::Mutating);
-                wrap_for_policy(tool, class, &rules, cfg)
+                wrap_for_policy(tool, class, &rules, cfg, hook_executor.clone())
             })
             .collect::<Vec<_>>();
 
@@ -298,34 +308,37 @@ fn wrap_for_policy(
     class: ToolClass,
     rules: &PermissionRules,
     cfg: &RuntimeConfig,
+    hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
 ) -> Arc<dyn Tool> {
     let name = tool.name();
 
     match rules.evaluate(name, None) {
         PermissionDecision::Allow => {
             if class.is_auto_approvable() {
-                ConfirmingTool::wrap_display_only(tool)
+                ConfirmingTool::wrap_display_only_with_hooks(tool, hook_executor)
             } else {
                 // The developer allowed it explicitly, so do not prompt — but
                 // egress and mutation stay visible.
-                ConfirmingTool::wrap_display_only(tool)
+                ConfirmingTool::wrap_display_only_with_hooks(tool, hook_executor)
             }
         }
         // Name-level denials are already filtered out. A surviving deny rule
         // targets content patterns, so per-call denial happens at execute time.
-        PermissionDecision::Deny => ConfirmingTool::wrap(tool),
-        PermissionDecision::Ask => ConfirmingTool::wrap(tool),
+        PermissionDecision::Deny => ConfirmingTool::wrap_with_hooks(tool, hook_executor),
+        PermissionDecision::Ask => ConfirmingTool::wrap_with_hooks(tool, hook_executor),
         PermissionDecision::NoMatch => {
             if class.is_auto_approvable() {
-                return ConfirmingTool::wrap_display_only(tool);
+                return ConfirmingTool::wrap_display_only_with_hooks(tool, hook_executor);
             }
 
             match cfg.tool_confirmation_mode {
-                ToolConfirmationMode::Always => ConfirmingTool::wrap(tool),
+                ToolConfirmationMode::Always => {
+                    ConfirmingTool::wrap_with_hooks(tool, hook_executor)
+                }
                 // Egress is confirmed in every mode; local mutation of the
                 // developer's own workspace is what `Never` may skip.
                 ToolConfirmationMode::McpOnly | ToolConfirmationMode::Never => {
-                    ConfirmingTool::wrap(tool)
+                    ConfirmingTool::wrap_with_hooks(tool, hook_executor)
                 }
             }
         }
@@ -390,6 +403,28 @@ impl ResolvedRuntimeTools {
             .collect()
     }
 
+    /// Create a strictly narrower surface for a delegated agent. This can only
+    /// remove tools from an already sealed parent surface, so it cannot bypass
+    /// provenance classification, confirmation wrappers, hooks, or profile
+    /// policy.
+    pub fn restricted(&self, allow_patterns: &[String], deny_patterns: &[String]) -> Self {
+        let tools = filter_tools_by_policy(self.tools.clone(), allow_patterns, deny_patterns);
+        let names = tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<BTreeSet<_>>();
+        let mut classes = self.classes.clone();
+        classes.retain(|name, _| names.contains(name));
+        let mut mcp_tool_names = self.mcp_tool_names.clone();
+        mcp_tool_names.retain(|name| names.contains(name));
+        Self {
+            tools,
+            classes,
+            mcp_tool_names,
+            connect_failures: self.connect_failures.clone(),
+        }
+    }
+
     /// Recorded class for a tool, or `None` if it is not on this surface.
     pub fn class_of(&self, name: &str) -> Option<ToolClass> {
         self.classes.get(name).copied()
@@ -425,6 +460,7 @@ pub async fn resolve_runtime_tools(cfg: &RuntimeConfig) -> ResolvedRuntimeTools 
 
     ToolSurface::new()
         .add_builtins()
+        .add_agent_supervisor(cfg)
         .add_feature_gated()
         .await
         .add_mcp(mcp_tools)

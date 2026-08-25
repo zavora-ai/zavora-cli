@@ -1,6 +1,6 @@
 # Migrating Zavora CLI from v1 to v2
 
-Zavora CLI v2 uses ADK-Rust 2.0 throughout the application. The visible configuration change is the split between the model that performs everyday work and the model that plans complex work.
+Zavora CLI v2.1 uses ADK-Rust 2.1 throughout the application. The visible configuration change from v1 is the split between the model that performs everyday work and the model that plans complex work.
 
 ## Toolchain
 
@@ -8,7 +8,7 @@ Rust 1.95 or newer is required; `rust-toolchain.toml` pins it.
 
 ```bash
 rustup update stable
-cargo install zavora-cli --version 2.0.0
+cargo install zavora-cli --version 2.1.0
 ```
 
 ## Model configuration

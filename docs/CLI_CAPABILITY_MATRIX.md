@@ -1,57 +1,106 @@
 # Agent CLI capability matrix
 
-This initial, capability-by-capability comparison is the canonical product roadmap for Zavora CLI.
+This capability-by-capability comparison is the canonical product roadmap for Zavora CLI.
 
-Status date: 2026-08-15. `✓` means the capability is usable, `◐` means partial or preview, and `—` means it is not implemented in Zavora yet. Competitor entries summarize documented product surfaces, not implementation equivalence.
+Status date: 2026-08-25. `✓` means mature and usable, `◐` means usable but partial, preview, or missing an important control surface, and `—` means no documented native implementation. Competitor entries describe documented product surfaces. Zavora entries are also checked against the live CLI, so cataloged, installed, enabled, configured, connected, and authorized remain distinct states.
 
-| Capability | Gemini CLI | OpenCode | Codex CLI | Grok Build CLI | Zavora CLI today |
-|---|---|---|---|---|---|
-| Primary position | Google coding agent | Provider-neutral coding platform | Integrated coding/work agent | Extensible coding agent | ADK-Rust agent platform |
-| Model providers | Gemini/Vertex | ✓ 75+ and local | Primarily OpenAI; managed Bedrock | xAI plus custom compatible models | ✓ OpenAI, Gemini, Anthropic, DeepSeek, Groq, Ollama |
-| Interactive TUI | ✓ polished | ✓ polished | ✓ polished | ✓ rich mouse TUI | ✓ searchable command palette, full chat-command parity, history/completion, live tool activity, approvals, sessions/checkpoints/export, route switching, build/plan/shell modes, cancellation, and responsive mouse/keyboard navigation |
-| Headless automation | ✓ text/JSON/stream-JSON | ✓ JSON, server, attach | ✓ exec, JSONL, SDK/app server | ✓ JSON/streaming JSON | ✓ versioned text/JSON/JSONL contract across ask, workflows, release plans, named agents, and Ralph; composed stdin/files, clean stdout, stable exits, safe approvals, buffered output guards |
-| Project instructions | `GEMINI.md`; configurable `AGENTS.md` | ✓ `AGENTS.md` | ✓ hierarchical `AGENTS.md` | ✓ `AGENTS.md` plus Claude compatibility | ✓ additive root-to-CWD `AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` families; overrides/local files, configurable Gemini names, unscoped Claude rules with scoped-rule deferral, safe imports, deduplication, limits, CLI/TUI inspection |
-| Standard `SKILL.md` | ✓ progressive loading | ✓ native on-demand | ✓ progressive loading | ✓ standard plus Claude skills | ✓ `.agents`, Zavora, Claude, Gemini, Grok, and OpenCode discovery; deterministic precedence, plugin namespacing, ADK runtime injection, direct invocation |
-| Skill management | ✓ install/link/update/enable/disable | ◐ discovery/loading | ✓ skills plus plugin distribution | ✓ skills plus plugins/marketplaces | ✓ validate/install/link/update/enable/disable/uninstall at workspace and user scope, with managed copies and live linked development |
-| Custom subagents | ✓ Markdown definitions, tool isolation | ✓ Markdown agents and permissions | ✓ custom agents and thread UI | ✓ agents and independent sessions | ◐ TOML agents plus five built-in specialists |
-| Parallel subagents | ✓ local and remote | ✓ task-based parallel work | ✓ visible concurrent agent threads | ✓ parallel child sessions | ◐ ADK parallel workflow, with limited user control and visibility |
-| MCP transports | ✓ stdio, SSE, Streamable HTTP | ✓ stdio/remote | ✓ stdio/Streamable HTTP | ✓ stdio/HTTP | ✓ stdio/Streamable HTTP |
-| MCP resources/prompts | ✓ first-class UI and `@resource` | ✓ tools, prompts, instructions | ✓ tools and server instructions | ✓ integrated MCP management | ✓ commands for resources and prompts |
-| MCP OAuth | ✓ managed OAuth | ✓ remote OAuth | ✓ bearer/OAuth/session auth | ✓ auth and doctor workflow | ◐ optional compile feature |
-| MCP 2026 completeness | Strong modern implementation | Strong V2 implementation | Strong managed implementation | Strong managed implementation | ◐ native `2026-07-28` stdio discovery and negotiated tool-call tasks; HTTP discovery lifecycle, interactive elicitation, authorization validation, and MRTR resume remain gated |
-| Plugins/extensions | ✓ installable extensions | ◐ npm/TypeScript plugin API; V2 beta | ✓ universal plugin directory | ✓ plugins and marketplaces | ✓ normalized Zavora/Codex/Claude/Gemini/Grok/OpenCode discovery and manifests; validate/install/link/update/enable/disable/uninstall/doctor; skills, portable Markdown agents/commands, and MCP runtime contributions. Executable JS/TS requires an explicit trusted runtime |
-| Hooks | ✓ lifecycle hooks | ✓ plugin hooks | ✓ comprehensive trusted hooks | ✓ project/plugin hooks | ◐ executor exists but is not wired into the runtime |
-| Permissions/policy | ✓ policy engine plus sandbox | ✓ granular agent/tool rules | ✓ sandbox, profiles, approvals | ✓ modes, rules, and sandbox | ◐ confirmations and guardrails; no unified policy engine |
-| Sessions/checkpoints | ✓ resume and automatic checkpoints | ✓ resume/fork/share/export | ✓ resume/fork/worktrees | ✓ resume/fork/worktrees/export | ✓ SQLite sessions and persisted conversation checkpoints |
-| ACP/IDE protocol | ✓ `gemini --acp` | ✓ `opencode acp` | App Server/IDE integration | ✓ `grok agent stdio` | — ADK-Rust has `adk-acp`, but Zavora does not expose it |
-| Remote A2A agents | ✓ | — | — | — | ✓ A2A server foundation; weak discovery/client UX |
-| Artifact creation | Primarily extensions/MCP | Primarily skills/MCP | Strong plugin and artifact ecosystem | Broad Build capabilities | ◐ DOCX/PPTX/XLSX/PDF skills and MCP recipes exist, but bundled execution assets are incomplete |
-| Email/calendar/apps | Extensions/MCP | MCP/plugins | Plugins/connectors | Plugins/MCP | ◐ catalog recipes only; configured is not connected or authorized |
-| Device/computer management | Extensions/MCP | MCP/plugins | Computer-use/plugin surfaces | Plugins/MCP | ◐ catalog recipes only; configured is not connected or authorized |
-| Self-inspection | `/about`, `/tools`, `/agents`, `/skills`, `/mcp` | Config/agents/tools views | Rich runtime inspection | ✓ `grok inspect` | ✓ live capability snapshot shared by `/inspect`, `/doctor`, `/capabilities`, and the default-agent prompt |
-| Evals/telemetry/A2A server | ◐ | ◐ | Strong product telemetry | Strong enterprise controls | ✓ unusually strong ADK foundation |
+| Capability | Gemini CLI | OpenCode | Codex CLI | Claude Code | Grok Build CLI | Zavora CLI today |
+|---|---|---|---|---|---|---|
+| Primary position | Google coding agent | Provider-neutral coding platform | Integrated coding/work agent | Anthropic terminal coding agent | Extensible coding agent | Multi-provider ADK-Rust work-agent platform |
+| Model providers | Gemini API and Vertex AI | ✓ broad provider catalog and local models | OpenAI plus local OSS through Ollama/LM Studio | Anthropic API, Bedrock, Vertex AI, and Microsoft Foundry | xAI plus custom compatible models | ✓ OpenAI, Gemini, Anthropic, DeepSeek, Groq, and Ollama |
+| Interactive TUI | ✓ polished | ✓ polished | ✓ polished | ✓ polished | ✓ rich mouse TUI | ✓ searchable command palette, chat-command parity, history/completion, live tool activity, approvals, sessions, route switching, build/plan/shell modes, cancellation, mouse and keyboard navigation |
+| Headless automation | ✓ text, JSON, stream-JSON, stable exits | ✓ raw JSON events, server, attach | ✓ `exec`, JSONL events, schema output, SDK/app server | ✓ print mode, text/JSON/stream-JSON, JSON Schema, budgets and turn limits | ✓ JSON and streaming JSON | ✓ versioned text/JSON/JSONL across ask, workflows, release plans, named agents, and Ralph; composed stdin/files, clean stdout, stable exits, buffered-output guards |
+| Project instructions | Hierarchical `GEMINI.md`; configurable names including `AGENTS.md` | ✓ `AGENTS.md` | ✓ hierarchical `AGENTS.md` | ✓ hierarchical `CLAUDE.md`, local files, imports, and scoped rules | ✓ `AGENTS.md` plus Claude compatibility | ✓ additive root-to-CWD `AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` families; overrides/local files, imports, deduplication, limits, scoped-rule deferral, CLI/TUI inspection |
+| Standard `SKILL.md` | ✓ progressive/on-demand | ✓ native on-demand; `.agents` and Claude compatibility | ✓ progressive/on-demand | ✓ progressive/on-demand; agent-preloaded skills | ✓ standard plus Claude skills | ✓ `.agents`, Zavora, Claude, Gemini, Grok, and OpenCode discovery; deterministic precedence, plugin namespacing, ADK injection, direct invocation |
+| Skill management | ✓ install/link/update/enable/disable | ◐ discovery, loading, and permissions; no first-class marketplace | ✓ skills plus plugin distribution | ✓ standalone skills plus plugin marketplace distribution | ✓ skills plus plugins/marketplaces | ✓ validate/install/link/update/enable/disable/uninstall at workspace and user scope, with managed copies and live links |
+| Custom subagents | ✓ Markdown definitions, model/tool/MCP isolation | ✓ Markdown agents, models, tools, permissions, foreground/background | ✓ custom agents with model/reasoning config and visible threads | ✓ rich Markdown definitions: tools, model, permissions, skills, MCP, hooks, memory, background, worktree isolation | ✓ agents and independent sessions | ✓ portable Markdown/TOML/plugin definitions; model, tool, skill, child-agent, turn, timeout, hook, resource and worktree policy; durable parent/child graph |
+| Parallel subagents | ✓ local and A2A remote specialists | ✓ foreground/background child sessions; children cannot recurse | ✓ visible concurrent agent threads | ✓ background subagents; experimental peer-to-peer agent teams with shared tasks | ✓ parallel child sessions | ✓ foreground parallel dispatch and durable detached runs; bounded nested spawning, queued messages, wait/status/events/retry/cancel, optional worktrees, JSON/JSONL and TUI activity |
+| Agent workflow architectures | ✓ subagent routing and worktree execution | ✓ foreground/background subagent workflows | ✓ parallel thread workflows | ✓ subagents plus experimental teams | ✓ parallel child sessions | ✓ user-facing sequential, parallel, fan-out/fan-in, review-loop, supervisor, router, hierarchical, blackboard and exact governed-team definitions compile to ADK-Rust primitives |
+| Portable governed teams | ◐ local/remote agent definitions, not a portable team contract | — no documented portable team contract | ◐ concurrent threads, not a portable team contract | ◐ experimental process teams with mailbox/shared tasks | ◐ child-session orchestration, not a portable team contract | ✓ ADK-Rust 2.1 `TeamSpec`, exact delegate/handoff edges, edge contracts, aggregate budgets, blackboard councils, deterministic registry resolution with frozen rosters, execution receipts, topology/schema inspection, built-in teams, and CLI/classic/TUI/headless execution |
+| Agent coordination UX | ✓ `/agents`, local/remote registry | ◐ child-session lifecycle | ✓ inspect and switch thread UI | ✓ direct teammate interaction, mailbox and shared task list in experimental teams | ✓ independent session controls | ◐ durable supervisor and mailbox are stronger than a one-shot Task tool, but child-token multiplexing, expandable run tree, shared task dependencies, and peer messaging are missing |
+| MCP transports | ✓ stdio, SSE, Streamable HTTP | ✓ stdio and Streamable HTTP | ✓ stdio and Streamable HTTP | ✓ stdio, Streamable HTTP, and legacy SSE | ✓ stdio and HTTP | ✓ stdio and Streamable HTTP |
+| MCP resources/prompts | ✓ first-class UI and resource references | ✓ tools, prompts and resources | ✓ tools and server instructions | ✓ tools, prompts/resources and `/mcp` management | ✓ integrated MCP management | ◐ CLI commands exist for resources and prompts; TUI/model-context presentation is not yet competitor-grade |
+| MCP OAuth | ✓ managed OAuth | ✓ OAuth discovery, PKCE, refresh and DCR | ✓ bearer, OAuth, CIMD/DCR and session auth | ✓ OAuth, CIMD/DCR, secure credential storage | ✓ auth and doctor workflow | ◐ implementation is feature-gated; the audited build reports `oauth_pkce: false` |
+| MCP 2026 readiness | ✓ modern client surface | ✓ V2 client with modern HTTP/OAuth | ✓ managed modern client surface | ✓ modern HTTP/OAuth surface; exact negotiated revision is not advertised | ✓ managed modern client surface | ◐ native `2026-07-28` stdio discovery and negotiated tool-call tasks; HTTP discovery lifecycle, issuer/resource validation, interactive elicitation, and MRTR resume remain gated |
+| Plugins/extensions | ✓ installable extensions | ◐ in-process npm/TypeScript V2 API is beta | ✓ universal plugin directory and marketplaces | ✓ mature plugin bundles and marketplaces with install/update/enable/disable | ✓ plugins and marketplaces | ◐ cross-CLI manifest discovery and package lifecycle; portable skills/agents/commands/MCP contributions work, but trusted executable JS/TS runtimes, signed packages, lockfiles, and marketplace search are missing; the live installed inventory is empty |
+| Hooks | ✓ broad lifecycle hooks | ✓ in-process plugin hooks | ✓ broad trusted lifecycle hooks and `/hooks` review | ✓ broad command, HTTP, prompt, agent and MCP-aware lifecycle hooks | ✓ trusted project/plugin hooks | ◐ `pre_tool` and `post_tool` are enforced on the sealed tool surface; spawn/prompt/stop are defined but not wired, and there is no trust/review UI |
+| Permissions/policy | ✓ policy engine plus sandbox | ✓ granular agent/tool/resource rules | ✓ OS sandbox, profiles, approvals and execpolicy | ✓ allow/ask/deny rules, managed policy, filesystem/network sandbox | ✓ modes, rules and sandbox | ◐ unified allow/deny/ask rules, provenance classification and mandatory egress confirmation; sandbox is optional and policy scopes/inspection are less mature |
+| Sessions/checkpoints | ✓ resume and checkpoints | ✓ resume/fork/share/export | ✓ resume/fork/worktrees | ✓ resume/fork plus automatic edit checkpoints and selective rewind | ✓ resume/fork/worktrees/export | ✓ SQLite sessions and conversation checkpoints; ◐ no automatic reversible workspace-edit checkpoints |
+| Worktree isolation | ◐ experimental automated worktrees | ◐ worktree-aware runtime | ✓ worktrees and task isolation | ✓ per-subagent worktree isolation | ✓ managed worktrees | ✓ optional worktrees for durable subagent runs; lifecycle polish remains |
+| ACP/IDE protocol | ✓ `gemini --acp` | ✓ `opencode acp` | ✓ App Server and IDE integration (not ACP) | ◐ IDE integrations and Agent SDK; no documented ACP command | ✓ `grok agent stdio` | — ADK-Rust has `adk-acp`, but Zavora does not expose it |
+| Remote A2A agents | ✓ authenticated A2A remote subagents and Agent Cards | — | — | — | — | ◐ legacy ping/server foundation only; ADK-Rust v2 has an A2A v1 client/server, but Zavora lacks conformant Agent Card discovery and task UX |
+| Artifact creation | Primarily extensions/MCP | Primarily skills/MCP | Strong plugin and artifact ecosystem | Skills/plugins/MCP | Broad Build capabilities | ✓ DOCX/PPTX/XLSX/PDF skills and first-party MCP engines are linked into the default binary; each workflow requires reopen/render verification |
+| Email/calendar/apps | Extensions/MCP | MCP/plugins | Plugins/connectors | Plugins/MCP | Plugins/MCP | ◐ recipes and skills only in the audited workspace; no server is configured, connected, or authorized |
+| Device/computer management | Extensions/MCP and browser agent | MCP/plugins | Computer-use/plugin surfaces | Computer use plus plugins/MCP | Plugins/MCP | ◐ release payloads prepackage pinned computer-use and device-management companions with governed ADK computer-use contracts; configuration, OS authority, connection, and mutation approval remain live states |
+| Self-inspection | `/about`, `/tools`, `/agents`, `/skills`, `/mcp` | config/agents/tools views | rich runtime inspection and `doctor` | `/status`, `/doctor`, `/agents`, `/mcp`, `/hooks`, `/plugin` | ✓ `grok inspect` | ✓ live capability snapshot shared by `/inspect`, `/doctor`, `/capabilities`, and the default-agent prompt |
+| Evals/telemetry | ✓ OpenTelemetry logs, metrics and traces | ◐ events/plugins and server observability | ✓ strong product telemetry and eval ecosystem | ✓ OpenTelemetry metrics, events and traces | ✓ enterprise controls | ✓ strong ADK eval/telemetry foundation and agent-run spans; operational dashboards and cross-surface consistency still need hardening |
 
-## Implemented in this milestone
+## Current assessment
 
-1. Standards-first `SKILL.md` discovery and scoped `AGENTS.md` resolution.
-2. A live capability registry shared by CLI, classic chat, TUI, and the default-agent prompt.
-3. Curated, actionable MCP recipes for documents, slides, spreadsheets, PDF, email, research, development, devices, computer use, and registry operations.
-4. MCP lifecycle commands with configuration-preserving edits, diagnostics, OAuth entry point, resources, prompts, and explicit protocol reporting.
-5. Five bounded specialist subagents and capability-aware tool routing.
+Zavora is no longer merely a skeleton. Its strongest competitive surfaces are multi-provider routing, the interactive TUI, headless contracts, cross-CLI instruction and skill discovery, durable nested subagents, and ADK-Rust telemetry/eval foundations. Its subagent supervisor already exceeds Claude Code's ordinary subagent model in one respect: Zavora permits bounded nested delegation, while Claude subagents cannot recursively spawn subagents.
 
-## Next maturity gates
+The previous assessment understated ADK-Rust itself. Zavora now intentionally consumes the local ADK-Rust 2.1 workspace, including its richer portable team plane. Zavora exposes that plane through built-in and workspace/user definitions, native validation and registry compilation, CLI/classic/TUI execution, topology/schema inspection, headless output contracts, and telemetry receipts. Crates.io still lacks the audited 2.1 release, so clean-clone distribution remains gated and is reported as such in `docs/TEAMS.md`.
 
-1. Add marketplace/registry search, signed package verification, lockfiles, and policy-controlled executable plugin runtimes.
-2. Add per-agent skill permissions and hot reload inside a running session.
-3. Wire declarative plugin hooks into runner/tool events with trust prompts and `/hooks` inspection.
-4. Expose ADK-Rust ACP as a supported CLI host command and test editor handoff.
-5. Close the remaining MCP 2026 gates reported by `zavora-cli mcp protocol --json` before calling protocol support complete.
+Claude Code raises the frontier in five places that the earlier matrix underweighted:
+
+1. **Agent ergonomics:** unusually rich per-agent configuration plus background execution; experimental agent teams add peer messaging and a shared dependency-aware task list.
+2. **Safety:** layered allow/ask/deny policy, managed controls, and OS-enforced filesystem/network sandboxing.
+3. **Extension maturity:** installable plugin marketplaces bundle skills, agents, hooks, MCP, LSP and monitors, with clear scopes and hot reload.
+4. **Hooks:** a broad, inspectable lifecycle that supports more than tool interception.
+5. **Recovery:** automatic edit checkpoints and selective rewind across resumed sessions.
+
+The live Zavora audit is less mature than the code breadth suggests:
+
+- 10 capabilities are registered, but none is enabled in the current workspace.
+- Essential standard skills are embedded in the binary and workspace/user skills retain precedence; seven agents are registered in this workspace.
+- No plugin is installed.
+- No capability MCP server is configured; therefore none is connected or authorized.
+- The active build reports MCP OAuth/PKCE as disabled and lists four remaining 2026 protocol gates.
+
+## ADK-Rust adoption audit
+
+| Capability | Published ADK-Rust 2.0 baseline | Local ADK-Rust 2.1 | Zavora exposure | Next product decision |
+|---|---|---|---|---|
+| Nested subagents | `LlmAgent::sub_agent`, transfer handoffs, multi-level trees | Retained for compatibility | Partly exposed through imported agent definitions; the default coordinator deliberately uses `AgentTool` to avoid transfer-loop/provider-response issues | Keep `AgentTool` for return-to-caller delegation; expose handoff explicitly as a distinct relationship |
+| Deterministic workflows | Sequential, parallel, loop, conditional and LLM-conditional agents; parallel branches can share state | Adds portable sequential, parallel, fan-out/fan-in and review-loop templates | General `kind: workflow` definitions, built-in evidence review, validation, topology and all execution surfaces | Add richer workflow-state inspection |
+| Portable teams | Not present | `TeamSpec` + `CompiledTeam`, validated exact `Delegate` and `Handoff` edges | Implemented through versioned YAML/JSON/TOML, JSON Schema, built-ins, CLI/classic/TUI/headless execution | Publish or audit-pin the 2.1 dependency |
+| Team policy | Basic agent/tool/runner controls | Depth, concurrency, event/model/tool/token/cost/relationship/wall-time budgets; edge schemas, context/history/state/artifact scope, approvals, retry/fallback and circuit breakers | Native `TeamPolicy` and `RelationshipPolicy` deserialize directly and ADK enforces them | Add policy editing/explanation UX; keep the process supervisor's orthogonal bounds |
+| Team discovery | Agent trees and server registry primitives | `TeamAgentRegistry` with capability, health, priority, version, digest, expiry and trust-label selection | Local, imported and plugin agents are registered with capabilities, priorities, version, health and trust labels; ADK selects and freezes the roster | Add ADK A2A remote candidates and live health adapters |
+| Team recovery | Session persistence and graph/managed checkpoints | Frozen roster, execution receipt, snapshot restore, safe resume plan, causal replay validation | ADK receipts persist in session state and are emitted to telemetry; Zavora still owns durable process/session/worktree lifecycle | Expose snapshot restore, resume-plan and replay validation commands |
+| Group collaboration | Shared state in `ParallelAgent` | `BlackboardSpec` with bounded round-robin or allowlisted selector scheduling | `kind: blackboard`, a built-in work council, CLI/chat/TUI execution and bounded policies | Add transcript/speaker inspection and connect mailboxes/shared task dependencies |
+| Team observability | Agent/runner/tool spans and events | Native team/member/relationship spans, stable failure codes and provider-neutral topology | Static topology and schema are visible; compiled roster/routes and semantic receipts use telemetry | Merge live edge events into JSONL, `/runs`, `/inspect`, and the expandable TUI tree |
+| Runtime plugins/hooks | `EnhancedPlugin`: before/after run, tool and model plus every-event observation | Teams preserve plugins and add team/member/relationship lifecycle hooks and governed transfers | Zavora's command hooks only enforce pre/post tool today | Use ADK plugins as the in-process lifecycle backbone; keep trusted external command hooks as an adapter |
+| Skills | Read/discover/inject skills | Adds atomic `SkillWriter`, remove/exists and reload support | Zavora has broader cross-CLI discovery and lifecycle commands | Reuse `SkillWriter` for canonical persistence while retaining compatibility discovery |
+| ACP | Full local-stdio client/server, persistent sessions, load/replay/fork, modes/config, permissions, MCP and multimodal content | Retained and evolving | Not exposed by Zavora | Expose `zavora acp`; this is integration work, not a new protocol implementation |
+| A2A | V1 Agent Cards, client/server, all 11 operations, SSE, authentication, tasks and input-required resume | Retained; teams can resolve remote agents through registry adapters | Legacy Zavora ping/server UX only | Expose ADK A2A discovery and task commands; use remote agents as governed team bindings |
+
+The architectural boundary should therefore be:
+
+```text
+Portable definitions and CLI/TUI UX       Zavora
+Team semantics, policies, replay, topology ADK-Rust CompiledTeam
+Process durability, worktrees, mailboxes   Zavora AgentSupervisor
+Sessions, events, plugins, telemetry        ADK-Rust Runner services
+Remote agents                               ADK-Rust A2A via TeamAgentRegistry
+```
+
+## Priority to reach frontier parity
+
+1. **Finish the team operations view:** the portable runtime and command surfaces are implemented; add snapshot restore/resume commands, topology-aware JSONL edge events, blackboard transcript inspection, and an expandable live TUI tree while preserving the current supervisor as the durable process layer.
+2. **Make the ADK 2.1 source reproducible:** publish the audited 2.1 crates or pin an audited source so clean clones do not depend on a sibling checkout.
+3. **Make capabilities real on first use:** searchable registries, one-command install/configure/authenticate, connection health, and explicit cataloged → installed → enabled → configured → connected → authorized state transitions.
+4. **Finish MCP 2026 and OAuth:** Streamable HTTP discovery lifecycle, issuer/resource-indicator validation, form/URL elicitation, MRTR resume, secure credentials, and end-to-end conformance tests.
+5. **Complete the plugin runtime on ADK hooks:** use `EnhancedPlugin` and team lifecycle hooks for in-process behavior, then add signed packages, lockfiles, trust review, marketplace search/update and a sandboxed executable compatibility host for approved external extensions.
+6. **Complete policy and reversible execution:** map team/edge policy into the unified permission surface, make OS sandboxing a normal profile, and add automatic workspace-edit checkpoints with selective rewind.
+7. **Expose existing ACP and A2A:** ship `zavora acp`, then replace legacy A2A ping with ADK Agent Card discovery, authentication, task lifecycle, streaming and remote-agent bindings.
+8. **Productize work capabilities:** bundle and verify artifact runtimes, then prove email/calendar/device integrations through connected-server tests rather than catalog entries.
 
 ## Sources
 
-- [Gemini CLI command reference](https://geminicli.com/docs/cli/commands/), [skills](https://geminicli.com/docs/cli/using-agent-skills/), and [MCP](https://geminicli.com/docs/tools/mcp-server/)
-- [OpenCode commands](https://opencode.ai/docs/commands/), [skills](https://opencode.ai/docs/skills), [agents](https://opencode.ai/docs/agents), and [plugins](https://opencode.ai/v2/docs/build/plugins)
-- [Codex CLI slash commands](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli), [AGENTS.md](https://learn.chatgpt.com/docs/custom-instructions.md), and [MCP](https://learn.chatgpt.com/docs/extend/mcp.md)
-- [Grok Build skills, plugins, and marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces) and [CLI reference](https://docs.x.ai/build/cli/reference)
-- [Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference)
-- [Gemini CLI extension reference](https://geminicli.com/docs/extensions/reference/)
+- [Gemini CLI commands](https://geminicli.com/docs/reference/commands/), [headless mode](https://geminicli.com/docs/cli/headless/), [subagents](https://geminicli.com/docs/core/subagents/), [remote A2A agents](https://geminicli.com/docs/core/remote-agents/), and [telemetry](https://geminicli.com/docs/cli/telemetry/)
+- [OpenCode CLI](https://opencode.ai/docs/cli/), [skills](https://opencode.ai/docs/skills), [agents](https://opencode.ai/v2/docs/agents), [MCP](https://opencode.ai/v2/docs/mcp-servers), and [V2 plugins](https://opencode.ai/v2/docs/build/plugins)
+- [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli), [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents.md), [hooks](https://learn.chatgpt.com/docs/hooks.md), [MCP](https://learn.chatgpt.com/docs/extend/mcp.md), and [plugins](https://learn.chatgpt.com/docs/plugins.md)
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage), [custom subagents](https://code.claude.com/docs/en/sub-agents), [agent teams](https://code.claude.com/docs/en/agent-teams), [MCP](https://code.claude.com/docs/en/mcp), [plugins](https://code.claude.com/docs/en/plugins-reference), [permissions](https://code.claude.com/docs/en/permissions), [sandboxing](https://code.claude.com/docs/en/sandboxing), [checkpointing](https://code.claude.com/docs/en/checkpointing), and [monitoring](https://code.claude.com/docs/en/monitoring-usage)
+- [Grok Build overview](https://docs.x.ai/build/overview), [CLI reference](https://docs.x.ai/build/cli/reference), and [skills, plugins and marketplaces](https://docs.x.ai/build/features/skills-plugins-marketplaces)
+- [A2A Protocol v1.0 specification](https://a2a-protocol.org/latest/specification/)
+- [ADK-Rust 2.1 workspace](https://github.com/zavora-ai/adk-rust/blob/main/Cargo.toml), [portable teams](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/agents/multi-agent.md), [ACP support matrix](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/acp/testing.md), and [A2A v1](https://github.com/zavora-ai/adk-rust/blob/main/docs/official_docs/deployment/a2a.md)

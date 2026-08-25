@@ -1,6 +1,6 @@
 [package]
 name = "zavora-cli"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Rust CLI AI agent built on ADK-Rust with provider-aware runtime, workflow orchestration, and tool safety controls"
@@ -17,8 +17,14 @@ exclude = ["docs/images/*", ".kiro/*", "docs/history/*"]
 # `semantic-search` is on by default: it is a single small dependency (strsim)
 # and it powers the "did you mean" hint on a failed file_edit match, which is an
 # error path users actually hit. Without it the hint degrades to a prefix search.
-default = ["semantic-search"]
+default = ["semantic-search", "bundled-artifacts"]
 semantic-search = ["dep:strsim"]
+bundled-artifacts = [
+    "dep:docx-mcp-server",
+    "dep:slides-mcp-server",
+    "dep:excel-mcp-server",
+    "dep:mcp-pdf",
+]
 checkpoints = []
 web-fetch = ["dep:reqwest", "dep:htmd"]
 oauth = ["dep:reqwest", "dep:sha2", "dep:rand", "dep:base64", "dep:open", "dep:url"]
@@ -29,23 +35,26 @@ rag = ["dep:adk-rag"]
 lsp = ["dep:lsp-types"]
 
 [dependencies]
-# ADK-Rust 2.0 crates are consumed from crates.io so that a clean checkout
-# builds with no sibling repositories. To develop against a local ADK-Rust
-# working tree, run `make local-adk`, which installs the ignored
-# `.cargo/config.toml` from `.cargo/config.toml.local-adk`. That file carries
-# a [patch.crates-io] section pointing at ../adk-rust; Cargo picks it up
-# automatically and no tracked file needs editing.
-adk-rust = { version = "2.0.0", features = ["standard", "openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
-adk-session = { version = "2.0.0", features = ["database"] }
-adk-skill = { version = "2.0.0" }
-adk-memory = { version = "2.0.0", features = ["sqlite-memory"] }
+# Zavora's governed team plane uses the published ADK-Rust 2.1 APIs. Run
+# `make local-adk` only when developing ADK and Zavora together locally.
+adk-rust = { version = "2.1.0", features = ["standard", "openai", "anthropic", "deepseek", "groq", "ollama", "graph"] }
+adk-session = { version = "2.1.0", features = ["database"] }
+adk-skill = { version = "2.1.0" }
+adk-memory = { version = "2.1.0", features = ["sqlite-memory"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-adk-telemetry = { version = "2.0.0", features = ["otlp"] }
-adk-guardrail = { version = "2.0.0" }
-adk-browser = { version = "2.0.0", optional = true }
-adk-sandbox = { version = "2.0.0", optional = true }
-adk-rag = { version = "2.0.0", optional = true }
-adk-tool = { version = "2.0.0", features = ["http-transport"] }
+adk-telemetry = { version = "2.1.0", features = ["otlp"] }
+adk-guardrail = { version = "2.1.0" }
+adk-browser = { version = "2.1.0", optional = true }
+adk-sandbox = { version = "2.1.0", optional = true }
+adk-rag = { version = "2.1.0", optional = true }
+adk-tool = { version = "2.1.0", features = ["http-transport"] }
+# First-party office MCP servers are linked into the default binary. They run
+# behind Zavora's ordinary MCP client boundary, so every provider sees the same
+# tools and the existing confirmation/policy layer remains authoritative.
+docx-mcp-server = { version = "2.2.1", optional = true }
+slides-mcp-server = { version = "0.1.1", optional = true }
+excel-mcp-server = { version = "0.2.2", optional = true }
+mcp-pdf = { version = "=3.1.1", optional = true }
 anyhow = "1.0.101"
 axum = { version = "0.8.6", features = ["json"] }
 chrono = "0.4"
@@ -53,6 +62,7 @@ clap = { version = "4.5.58", features = ["derive", "env"] }
 md5 = "0.7"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+serde_yaml = "0.9"
 shlex = "1.3"
 strsim = { version = "0.11.1", optional = true }
 lsp-types = { version = "0.97", optional = true }

@@ -344,13 +344,11 @@ async fn discover_stdio_mcp_tools(server: &McpServerConfig) -> Result<Vec<Arc<dy
     // server correctly reports server/discover as unsupported. Bounding the
     // handshake prevents a non-compliant server from hanging startup forever.
     let handler = AdkClientHandler::new(Arc::new(AutoDeclineElicitationHandler)).with_tasks();
-    let connect = handler.serve_with_lifecycle(
-        transport,
-        ClientLifecycleMode::Auto {
-            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
-            legacy_version: Some(ProtocolVersion::V_2025_11_25),
-        },
-    );
+    let lifecycle = ClientLifecycleMode::Auto {
+        preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        legacy_version: Some(ProtocolVersion::V_2025_11_25),
+    };
+    let connect = handler.serve_with_lifecycle(transport, lifecycle);
     let client = tokio::time::timeout(
         Duration::from_secs(server.timeout_secs.unwrap_or(15)),
         connect,
@@ -923,6 +921,7 @@ fn to_adk_mcp_config(server: &McpServerConfig) -> Option<AdkMcpServerConfig> {
         disabled: !server.enabled.unwrap_or(true),
         restart_policy: Some(RestartPolicy::default()),
         auto_approve: vec![],
+        ..Default::default()
     })
 }
 
@@ -1006,7 +1005,7 @@ mod mcp_tests {
     }
 
     fn cfg_with(servers: Vec<McpServerConfig>) -> RuntimeConfig {
-        let mut cfg = crate::tests::base_cfg();
+        let mut cfg = crate::test_support::base_cfg();
         cfg.mcp_servers = servers;
         cfg
     }
