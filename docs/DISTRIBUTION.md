@@ -31,9 +31,9 @@ companions relative to its own executable before consulting its managed prefix o
 
 `cargo install` can only install one Cargo binary and therefore receives the
 linked office servers and embedded skills, not the release archive's companion
-directory. The Homebrew formula must preserve `libexec` when it moves from its
-source-build formula to release artifacts. Until then, both channels report the
-missing companion truthfully and can use an already installed system companion.
+directory. npm and Homebrew both install the checksummed platform archive and
+preserve its `libexec` payload, so their computer-use and device-management
+companions are ready to configure without a compiler or package-manager fallback.
 
 ## Required Secrets
 
@@ -104,9 +104,8 @@ Then release Zavora:
    - `Cargo.toml`: `version = "X.Y.Z"`
    - `npm/zavora-cli/package.json`: `"version": "X.Y.Z"`
 2. Run checks: `make dist-check`
-3. Nothing to do for Homebrew by hand: the release workflow repoints
-   `zavora-ai/homebrew-tap` at the new tag. The formula is pinned by git tag and
-   revision, so there is no digest to regenerate.
+3. Nothing to do for Homebrew by hand: the release workflow updates all four
+   platform archive URLs and sha256 values in `zavora-ai/homebrew-tap`.
 4. Commit, push, and create tag:
    - `git tag -a vX.Y.Z -m "zavora-cli vX.Y.Z"`
    - `git push origin main --tags`

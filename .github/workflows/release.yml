@@ -297,12 +297,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # The formula lives in zavora-ai/homebrew-tap, because Homebrew 6 no longer
-  # installs a formula from a URL or a loose file — `brew install` takes a formula
-  # or cask name and rejects anything outside a tap. It is pinned there by git tag
-  # and revision rather than by a digest over the generated source tarball, which
-  # GitHub does not guarantee to be byte-stable, so there is no digest for a release
-  # job to compute and push back. That job used to do exactly that, and its failure
-  # left the old in-repo formula carrying a placeholder sha256.
+  # installs a formula from a URL or a loose file. It consumes the same immutable,
+  # checksummed platform archives as npm, so Homebrew installs do not need a Rust
+  # toolchain and retain the computer-use and device-management companion payload.
   #
   # Updating the tap means writing to another repository, which GITHUB_TOKEN cannot
   # do, so it needs a PAT in HOMEBREW_TAP_TOKEN with contents:write on the tap.
@@ -320,10 +317,10 @@ jobs:
             echo "present=true" >> "${GITHUB_OUTPUT}"
           else
             echo "present=false" >> "${GITHUB_OUTPUT}"
-            echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_TOKEN is not set, so zavora-ai/homebrew-tap still points at the previous release."
+            echo "::warning title=Homebrew tap not updated::HOMEBREW_TAP_TOKEN is not set, so zavora-ai/homebrew-tap still points at the previous release archives."
             {
               echo "- Homebrew: **not updated**, \`HOMEBREW_TAP_TOKEN\` not set"
-              echo "  Update by hand in zavora-ai/homebrew-tap: set \`tag\` and \`revision\` in \`Formula/zavora-cli.rb\`."
+              echo "  Update the four release URLs and sha256 values in \`Formula/zavora-cli.rb\` by hand."
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
 
@@ -335,26 +332,56 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
+      - name: Download release checksums
+        if: steps.tap_token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/zavora-release"
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern checksums.txt \
+            --dir "${RUNNER_TEMP}/zavora-release"
+
       - name: Point the formula at this release
         if: steps.tap_token.outputs.present == 'true'
         working-directory: tap
         env:
           TAG: ${{ needs.resolve.outputs.release_tag }}
+          CHECKSUMS: ${{ runner.temp }}/zavora-release/checksums.txt
         run: |
-          REVISION="$(git ls-remote https://github.com/zavora-ai/zavora-cli.git "refs/tags/${TAG}^{}" | cut -f1)"
-          if [[ -z "${REVISION}" ]]; then
-            echo "::error title=Tag not found::${TAG} has no commit on zavora-ai/zavora-cli."
-            exit 1
-          fi
-          python3 - "$TAG" "$REVISION" <<'PY'
-          import re, sys
-          tag, revision = sys.argv[1], sys.argv[2]
+          python3 - "$TAG" "$CHECKSUMS" <<'PY'
+          import re
+          import sys
+
+          tag, checksums_path = sys.argv[1], sys.argv[2]
+          checksums = {}
+          with open(checksums_path) as manifest:
+              for line in manifest:
+                  digest, filename = line.split()
+                  checksums[filename] = digest
+
           path = "Formula/zavora-cli.rb"
           text = open(path).read()
-          text = re.sub(r'tag:\s+"[^"]*"', f'tag:      "{tag}"', text, count=1)
-          text = re.sub(r'revision:\s+"[^"]*"', f'revision: "{revision}"', text, count=1)
+          for suffix in ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"):
+              filename = f"zavora-cli-{tag}-{suffix}.tar.gz"
+              if filename not in checksums:
+                  raise SystemExit(f"{checksums_path} does not contain {filename}")
+              pattern = re.compile(
+                  rf'(?m)^(?P<indent>\s*)url "[^"]*zavora-cli-v[^"]+-{suffix}\.tar\.gz"\n'
+                  rf'(?P=indent)sha256 "[0-9a-f]{{64}}"'
+              )
+              replacement = (
+                  rf'\g<indent>url "https://github.com/zavora-ai/zavora-cli/releases/download/'
+                  f'{tag}/{filename}"\n'
+                  rf'\g<indent>sha256 "{checksums[filename]}"'
+              )
+              text, count = pattern.subn(replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit(f"could not update {suffix} in {path}")
           open(path, "w").write(text)
-          print(f"{path} -> {tag} @ {revision}")
+          print(f"{path} -> {tag} with four verified archive checksums")
           PY
           git diff --stat
 
