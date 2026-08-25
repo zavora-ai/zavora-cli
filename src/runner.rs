@@ -384,7 +384,7 @@ pub fn build_single_agent_with_tools_and_telemetry(
         let connected_mcp_tools = tools
             .iter()
             .map(|tool| tool.name())
-            .filter(|name| name.starts_with("mcp:"))
+            .filter(|name| name.starts_with("mcp__"))
             .map(str::to_string)
             .collect::<Vec<_>>();
         sections.push(format!(
