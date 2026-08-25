@@ -18,6 +18,23 @@ Tag pushes (`vX.Y.Z`) trigger `.github/workflows/release.yml` to build and uploa
 
 The npm package downloads these artifacts during `postinstall`.
 
+Each archive contains two distribution layers:
+
+- `zavora-cli`, with DOCX, slides, worksheet, and PDF MCP servers linked in;
+- `libexec/zavora-cli`, with pinned computer-use and device-management
+  companions built by `scripts/build_essential_companions.sh`.
+
+The computer-use npm package is pinned to 7.1.0. Device management is built from
+the exact audited v1.7.0 commit rather than a moving branch. Zavora resolves these
+companions relative to its own executable before consulting its managed prefix or
+`PATH`, and never treats a package manager such as `npx` as installation evidence.
+
+`cargo install` can only install one Cargo binary and therefore receives the
+linked office servers and embedded skills, not the release archive's companion
+directory. The Homebrew formula must preserve `libexec` when it moves from its
+source-build formula to release artifacts. Until then, both channels report the
+missing companion truthfully and can use an already installed system companion.
+
 ## Required Secrets
 
 Optional publish steps run only when secrets are configured:
@@ -71,6 +88,17 @@ requires npm 11.19.0 or newer, which is why the job installs the CLI explicitly
 rather than trusting whichever npm the runner image ships.
 
 ## Maintainer Release Steps
+
+The linked worksheet stack has a strict upstream publish order because each local
+path dependency is replaced by its matching registry version when Cargo packages
+the next crate:
+
+1. Publish `zavora-xlsx` 0.1.2 from the sibling `zavora-xlsx` repository.
+2. Package and publish `excel-mcp-server` 0.2.2 from
+   `mcp-servers/worksheet-mcp`.
+3. Package Zavora only after both versions are visible in the registry index.
+
+Then release Zavora:
 
 1. Keep versions in sync:
    - `Cargo.toml`: `version = "X.Y.Z"`

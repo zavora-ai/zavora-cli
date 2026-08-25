@@ -59,35 +59,11 @@ pub static CLEAR_LINE: Ansi = Ansi("\x1b[K");
 // Known commands for fuzzy matching
 // ---------------------------------------------------------------------------
 
-/// All registered slash commands with descriptions.
-pub const COMMAND_PALETTE: &[(&str, &str)] = &[
-    ("help", "show command quick reference"),
-    ("status", "show active profile/provider/model/session"),
-    ("provider", "switch provider and rebuild runtime"),
-    ("model", "pick a model interactively or switch by id"),
-    ("worker", "switch the everyday coding model"),
-    ("planner", "switch the strong planning model"),
-    ("planner-provider", "switch the planning provider"),
-    ("models", "show model roles and shared quota pools"),
-    ("tools", "show active tools and confirmation policy"),
-    ("mcp", "show MCP server and tool summary"),
-    ("mcps", "show configured MCP servers"),
-    ("capabilities", "browse bundled work capability packs"),
-    ("skills", "browse invocable workspace skills"),
-    ("agents", "browse specialist sub-agents"),
-    ("inspect", "inspect the resolved runtime"),
-    ("doctor", "check MCP configuration readiness"),
-    ("usage", "show context usage and token breakdown"),
-    ("compact", "summarize conversation to free context space"),
-    (
-        "checkpoint",
-        "manage conversation snapshots (save|list|restore)",
-    ),
-    ("tangent", "enter/exit exploratory branch"),
-    ("todos", "view/delete/clear-finished task lists"),
-    ("delegate", "(experimental) run isolated sub-agent task"),
-    ("exit", "end interactive chat"),
-];
+/// All registered classic-chat commands and aliases with descriptions.
+///
+/// The data is generated from the canonical interactive command catalog; this
+/// compatibility constant preserves the existing public theme API.
+pub const COMMAND_PALETTE: &[(&str, &str)] = crate::interactive_commands::CLASSIC_COMMAND_PALETTE;
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -317,7 +293,7 @@ const THINKING_VERBS: &[(&str, &str)] = &[
 const SPINNER_TIPS: &[&str] = &[
     "Use /compact to free up context when conversations get long",
     "Use /allow <pattern> to auto-approve tools for this session",
-    "Use /delegate <task> to fork an isolated sub-agent",
+    "Use /delegate @agent <task> to fork a governed sub-agent",
     "Use file_edit for surgical changes — it's faster than fs_write",
     "Use glob and grep instead of shell find/grep — they're safer and structured",
     "Use /agent to trust all tools for the session (agent mode)",

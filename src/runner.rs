@@ -24,6 +24,121 @@ fn cfg_or_default_specialist_timeout(runtime_cfg: Option<&RuntimeConfig>) -> u64
         .unwrap_or(300)
 }
 
+struct ConfiguredSubagent {
+    catalog_name: String,
+    tool_name: String,
+    agent: Arc<dyn Agent>,
+    timeout_secs: u64,
+}
+
+fn safe_agent_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_configured_subagents(
+    runtime_cfg: Option<&RuntimeConfig>,
+    tools: &[Arc<dyn Tool>],
+) -> Vec<ConfiguredSubagent> {
+    let Some(cfg) = runtime_cfg.filter(|cfg| cfg.agent_name == "default") else {
+        return Vec::new();
+    };
+    let workspace = crate::skills::resolve_workspace_instructions()
+        .ok()
+        .filter(|instructions| !instructions.content.is_empty())
+        .map(|instructions| {
+            format!(
+                "\n\n<workspace_instructions>\n{}\n</workspace_instructions>",
+                instructions.content
+            )
+        })
+        .unwrap_or_default();
+    let mut configured = Vec::new();
+    for resolved in cfg.available_agents.iter().filter(|agent| {
+        agent.source != crate::config::AgentSource::Implicit
+            && agent.name != "default"
+            && agent.name != "ralph"
+            && crate::config::child_agent_allowed(cfg, &agent.name)
+    }) {
+        let mut child_cfg = cfg.clone();
+        crate::config::apply_agent_overrides(&mut child_cfg, resolved);
+        let (model, _, _) = match resolve_model(&child_cfg) {
+            Ok(model) => model,
+            Err(error) => {
+                tracing::warn!(agent = %resolved.name, %error, "configured subagent model unavailable");
+                continue;
+            }
+        };
+        let scoped_tools = crate::tool_policy::filter_tools_by_policy(
+            tools.to_vec(),
+            &resolved.config.allow_tools,
+            &resolved.config.deny_tools,
+        );
+        let mut instruction =
+            resolved.config.instruction.clone().unwrap_or_else(|| {
+                "Complete the delegated task and return verifiable results.".into()
+            });
+        instruction.push_str(&workspace);
+        if !resolved.config.resource_paths.is_empty() {
+            instruction.push_str("\n\n<agent_resources>\n");
+            for path in &resolved.config.resource_paths {
+                instruction.push_str(&format!("- {path}\n"));
+            }
+            instruction.push_str("</agent_resources>");
+        }
+        let mut builder = LlmAgentBuilder::new(resolved.name.clone())
+            .description(
+                resolved
+                    .config
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Custom {} subagent", resolved.name)),
+            )
+            .instruction(instruction)
+            .model(model)
+            .toolset(Arc::new(crate::capabilities::CapabilityToolset::routed(
+                format!("{}-scoped-capabilities", resolved.name),
+                scoped_tools,
+            )))
+            .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto);
+        if let Some(max_turns) = resolved.config.max_turns {
+            builder = builder.max_iterations(max_turns.max(1));
+        }
+        match crate::skills::load_agent_skills(
+            &resolved.config.skills,
+            &resolved.config.deny_skills,
+        ) {
+            Ok(index) if !index.is_empty() => builder = builder.with_skills(index),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(agent = %resolved.name, %error, "subagent skills unavailable")
+            }
+        }
+        match builder.build() {
+            Ok(agent) => configured.push(ConfiguredSubagent {
+                catalog_name: resolved.name.clone(),
+                tool_name: safe_agent_tool_name(&resolved.name),
+                agent: Arc::new(agent),
+                timeout_secs: resolved
+                    .config
+                    .timeout_secs
+                    .unwrap_or_else(|| cfg_or_default_specialist_timeout(Some(cfg))),
+            }),
+            Err(error) => {
+                tracing::warn!(agent = %resolved.name, %error, "configured subagent unavailable")
+            }
+        }
+    }
+    configured
+}
+
 /// Descriptions for every agent the orchestrator may be told about.
 ///
 /// The prompt section is rendered from this table filtered against what is
@@ -315,11 +430,22 @@ pub fn build_single_agent_with_tools_and_telemetry(
     // Intentional: search sub-agent is only enabled when the invocation explicitly
     // runs with --provider gemini. Auto-detected provider mode does not attach it.
     let search_subagent = build_search_subagent_for_provider(runtime_cfg, model.clone());
-    let capability_subagents = runtime_cfg
+    let mut capability_subagents = runtime_cfg
         .filter(|cfg| cfg.agent_name == "default")
         .map(|_| crate::agents::capability::build_specialist_agents(model.clone(), tools))
         .transpose()?
         .unwrap_or_default();
+    if let Some(cfg) = runtime_cfg {
+        let overridden = cfg
+            .available_agents
+            .iter()
+            .filter(|agent| agent.source != crate::config::AgentSource::Implicit)
+            .map(|agent| agent.name.as_str())
+            .collect::<BTreeSet<_>>();
+        capability_subagents.retain(|agent| !overridden.contains(agent.name()));
+        capability_subagents.retain(|agent| crate::config::child_agent_allowed(cfg, agent.name()));
+    }
+    let configured_subagents = build_configured_subagents(runtime_cfg, tools);
 
     // Property 3: a name the prompt advertises must be a name the runtime can
     // serve. The v2 prompt advertised three workflow agents that were never
@@ -350,6 +476,11 @@ pub fn build_single_agent_with_tools_and_telemetry(
     for specialist in &capability_subagents {
         advertised.push(specialist.name().to_string());
     }
+    advertised.extend(
+        configured_subagents
+            .iter()
+            .map(|subagent| subagent.tool_name.clone()),
+    );
 
     let surface = crate::prompt_surface::PromptSurface::from_names(advertised);
 
@@ -358,6 +489,13 @@ pub fn build_single_agent_with_tools_and_telemetry(
     // turn" no longer describes anything real.
     let tool_section = surface.render_section(AGENT_TOOL_CATALOGUE);
     let specialist_section = surface.render_section(SUBAGENT_CATALOGUE);
+    let configured_catalogue = configured_subagents
+        .iter()
+        .map(|subagent| {
+            let description = subagent.agent.description().to_string();
+            (subagent.tool_name.clone(), description)
+        })
+        .collect::<Vec<_>>();
 
     let mut instruction = instruction;
     if !tool_section.is_empty() || !specialist_section.is_empty() {
@@ -366,6 +504,9 @@ pub fn build_single_agent_with_tools_and_telemetry(
         );
         instruction.push_str(&tool_section);
         instruction.push_str(&specialist_section);
+        for (name, description) in &configured_catalogue {
+            instruction.push_str(&format!("- `{name}`: {description}\n"));
+        }
         instruction.push_str(
             "\nCall a specialist only when its domain is clearly the task, and use its \
              result to answer the user yourself. Prefer your own tools for anything \
@@ -385,13 +526,20 @@ pub fn build_single_agent_with_tools_and_telemetry(
         );
     }
 
-    let mut builder = LlmAgentBuilder::new("assistant")
+    let runtime_agent_name = runtime_cfg
+        .map(|cfg| cfg.agent_name.as_str())
+        .filter(|name| *name != "default")
+        .unwrap_or("assistant");
+    let mut builder = LlmAgentBuilder::new(runtime_agent_name)
         .description("General purpose engineering assistant")
         .instruction(instruction)
         .model(model)
         .tool_confirmation_policy(tool_confirmation_policy)
         .tool_timeout(tool_timeout)
         .tool_execution_strategy(adk_rust::ToolExecutionStrategy::Auto);
+    if let Some(max_turns) = runtime_cfg.and_then(|cfg| cfg.agent_max_turns) {
+        builder = builder.max_iterations(max_turns.max(1));
+    }
 
     if runtime_cfg.is_some() {
         builder = builder.toolset(Arc::new(crate::capabilities::CapabilityToolset::routed(
@@ -430,6 +578,21 @@ pub fn build_single_agent_with_tools_and_telemetry(
             Duration::from_secs(cfg_or_default_specialist_timeout(runtime_cfg)),
         )));
         tracing::debug!(specialist = %name, "registered specialist as a callable tool");
+    }
+    for configured in configured_subagents {
+        let catalog_name = configured.catalog_name;
+        let mut tool: Arc<dyn Tool> = Arc::new(
+            adk_tool::AgentTool::new(configured.agent)
+                .timeout(Duration::from_secs(configured.timeout_secs.max(1))),
+        );
+        if configured.tool_name != catalog_name {
+            tool = Arc::new(crate::tool_policy::AliasedTool::new(
+                configured.tool_name.clone(),
+                tool,
+            ));
+        }
+        builder = builder.tool(tool);
+        tracing::debug!(agent = %catalog_name, tool = %configured.tool_name, "registered configured subagent");
     }
 
     if let Some(cfg) = runtime_cfg {
@@ -578,7 +741,7 @@ pub async fn build_runner_with_session_service(
         builder = builder.memory_service(mem);
     }
 
-    match crate::skills::load_workspace_skills() {
+    match crate::skills::load_agent_skills(&cfg.agent_allow_skills, &cfg.agent_deny_skills) {
         Ok(index) if !index.is_empty() => {
             let injector = adk_skill::SkillInjector::from_index(
                 index,

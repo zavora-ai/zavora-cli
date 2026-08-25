@@ -186,13 +186,50 @@ use crate::runner::{ResolvedRuntimeTools, ToolConfirmationSettings, build_single
 use crate::streaming::run_prompt;
 use crate::telemetry::TelemetrySink;
 
+pub struct DelegateContext<'a> {
+    pub cfg: &'a RuntimeConfig,
+    pub session_service: Arc<dyn SessionService>,
+    pub runtime_tools: &'a ResolvedRuntimeTools,
+    pub tool_confirmation: &'a ToolConfirmationSettings,
+    pub telemetry: &'a TelemetrySink,
+}
+
+/// Parse `/delegate` arguments. Supports `@agent task`, `--agent NAME task`,
+/// and an unqualified task for the default isolated agent.
+pub fn parse_delegate_request(input: &str) -> Result<(Option<String>, String)> {
+    let mut parts = shlex::split(input).ok_or_else(|| anyhow::anyhow!("invalid quoting"))?;
+    if parts.is_empty() {
+        return Ok((None, String::new()));
+    }
+    let agent = if let Some(name) = parts[0].strip_prefix('@') {
+        let name = name.trim().to_string();
+        parts.remove(0);
+        (!name.is_empty()).then_some(name)
+    } else if parts[0] == "--agent" {
+        if parts.len() < 2 {
+            return Err(anyhow::anyhow!("--agent requires a name"));
+        }
+        parts.remove(0);
+        Some(parts.remove(0))
+    } else if let Some(name) = parts[0].strip_prefix("--agent=") {
+        let name = name.to_string();
+        parts.remove(0);
+        Some(name)
+    } else {
+        None
+    };
+    Ok((agent, parts.join(" ")))
+}
+
 /// Result of a delegate run.
 #[derive(Debug, Clone)]
 pub struct DelegateResult {
     pub task: String,
+    pub agent: String,
     pub session_id: String,
     pub output: String,
     pub success: bool,
+    pub duration_ms: u128,
 }
 
 impl DelegateResult {
@@ -200,8 +237,8 @@ impl DelegateResult {
     pub fn format_display(&self) -> String {
         let status = if self.success { "✓" } else { "✗" };
         format!(
-            "[{status}] Delegate '{}' (session: {})\n{}",
-            self.task, self.session_id, self.output
+            "[{status}] {} · {} ms · session {}\nTask: {}\n{}",
+            self.agent, self.duration_ms, self.session_id, self.task, self.output
         )
     }
 }
@@ -218,11 +255,39 @@ pub async fn run_delegate(
     fork_sub_agent(
         task,
         None,
-        cfg,
-        session_service,
-        runtime_tools,
-        tool_confirmation,
-        telemetry,
+        None,
+        DelegateContext {
+            cfg,
+            session_service,
+            runtime_tools,
+            tool_confirmation,
+            telemetry,
+        },
+    )
+    .await
+}
+
+/// Run a task with a named catalog agent in an isolated, retained session.
+pub async fn run_named_delegate(
+    task: &str,
+    agent_name: Option<&str>,
+    cfg: &RuntimeConfig,
+    session_service: Arc<dyn SessionService>,
+    runtime_tools: &ResolvedRuntimeTools,
+    tool_confirmation: &ToolConfirmationSettings,
+    telemetry: &TelemetrySink,
+) -> DelegateResult {
+    fork_sub_agent(
+        task,
+        agent_name,
+        None,
+        DelegateContext {
+            cfg,
+            session_service,
+            runtime_tools,
+            tool_confirmation,
+            telemetry,
+        },
     )
     .await
 }
@@ -233,16 +298,23 @@ pub async fn run_delegate(
 /// The session is always cleaned up on completion or error.
 pub async fn fork_sub_agent(
     task: &str,
+    agent_name: Option<&str>,
     file_context: Option<&str>,
-    cfg: &RuntimeConfig,
-    session_service: Arc<dyn SessionService>,
-    runtime_tools: &ResolvedRuntimeTools,
-    tool_confirmation: &ToolConfirmationSettings,
-    telemetry: &TelemetrySink,
+    context: DelegateContext<'_>,
 ) -> DelegateResult {
+    let DelegateContext {
+        cfg,
+        session_service,
+        runtime_tools,
+        tool_confirmation,
+        telemetry,
+    } = context;
+    let started = std::time::Instant::now();
+    let requested_agent = agent_name.unwrap_or("default");
     let delegate_session_id = format!(
-        "fork-{}-{}",
+        "fork-{}-{}-{}",
         cfg.session_id,
+        requested_agent.replace(|character: char| !character.is_ascii_alphanumeric(), "-"),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -251,6 +323,37 @@ pub async fn fork_sub_agent(
 
     let mut delegate_cfg = cfg.clone();
     delegate_cfg.session_id = delegate_session_id.clone();
+    if let Some(name) = agent_name {
+        let Some(agent) = cfg.available_agents.iter().find(|agent| agent.name == name) else {
+            return DelegateResult {
+                task: task.to_string(),
+                agent: name.to_string(),
+                session_id: delegate_session_id,
+                output: format!("Agent '{name}' is not registered"),
+                success: false,
+                duration_ms: started.elapsed().as_millis(),
+            };
+        };
+        crate::config::apply_agent_overrides(&mut delegate_cfg, agent);
+    }
+    let scoped_tools = runtime_tools.restricted(
+        &delegate_cfg.agent_allow_tools,
+        &delegate_cfg.agent_deny_tools,
+    );
+    let scoped_confirmation = if agent_name.is_some() {
+        crate::runner::resolve_tool_confirmation_settings(&delegate_cfg, &scoped_tools)
+    } else {
+        tool_confirmation.clone()
+    };
+    let agent = delegate_cfg.agent_name.clone();
+    telemetry.emit(
+        "subagent.started",
+        serde_json::json!({
+            "agent": agent,
+            "parent_session_id": cfg.session_id,
+            "child_session_id": delegate_session_id,
+        }),
+    );
 
     // Build prompt with optional file context
     let prompt = match file_context {
@@ -258,13 +361,14 @@ pub async fn fork_sub_agent(
         None => task.to_string(),
     };
 
-    let timeout = std::time::Duration::from_secs(300); // 5 minutes
+    let timeout =
+        std::time::Duration::from_secs(delegate_cfg.agent_timeout_secs.unwrap_or(300).max(1));
 
     let result = match build_single_runner_for_chat(
         &delegate_cfg,
         session_service.clone(),
-        runtime_tools,
-        tool_confirmation,
+        &scoped_tools,
+        &scoped_confirmation,
         telemetry,
     )
     .await
@@ -278,40 +382,53 @@ pub async fn fork_sub_agent(
             {
                 Ok(Ok(output)) => DelegateResult {
                     task: task.to_string(),
+                    agent: agent.clone(),
                     session_id: delegate_session_id.clone(),
                     output,
                     success: true,
+                    duration_ms: started.elapsed().as_millis(),
                 },
                 Ok(Err(e)) => DelegateResult {
                     task: task.to_string(),
+                    agent: agent.clone(),
                     session_id: delegate_session_id.clone(),
                     output: format!("Error: {e}"),
                     success: false,
+                    duration_ms: started.elapsed().as_millis(),
                 },
                 Err(_) => DelegateResult {
                     task: task.to_string(),
+                    agent: agent.clone(),
                     session_id: delegate_session_id.clone(),
-                    output: "Sub-agent timed out after 5 minutes".to_string(),
+                    output: format!("Sub-agent timed out after {} seconds", timeout.as_secs()),
                     success: false,
+                    duration_ms: started.elapsed().as_millis(),
                 },
             }
         }
         Err(e) => DelegateResult {
             task: task.to_string(),
+            agent: agent.clone(),
             session_id: delegate_session_id.clone(),
             output: format!("Failed to build sub-agent: {e}"),
             success: false,
+            duration_ms: started.elapsed().as_millis(),
         },
     };
 
-    // Always clean up the fork session
-    let _ = session_service
-        .delete(adk_session::DeleteRequest {
-            app_name: delegate_cfg.app_name.clone(),
-            user_id: delegate_cfg.user_id.clone(),
-            session_id: delegate_session_id,
-        })
-        .await;
+    telemetry.emit(
+        if result.success {
+            "subagent.completed"
+        } else {
+            "subagent.failed"
+        },
+        serde_json::json!({
+            "agent": result.agent,
+            "parent_session_id": cfg.session_id,
+            "child_session_id": result.session_id,
+            "duration_ms": result.duration_ms,
+        }),
+    );
 
     result
 }

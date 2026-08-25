@@ -671,6 +671,7 @@ pub fn enabled_plugin_agents() -> Result<HashMap<String, crate::config::Resolved
                     crate::config::ResolvedAgent {
                         name,
                         source: crate::config::AgentSource::Plugin,
+                        definition_path: Some(path.clone()),
                         config: crate::config::AgentFileConfig {
                             description: frontmatter.get("description").cloned(),
                             instruction: Some(body),
@@ -683,6 +684,12 @@ pub fn enabled_plugin_agents() -> Result<HashMap<String, crate::config::Resolved
                             resource_paths: vec![plugin.root.display().to_string()],
                             allow_tools: Vec::new(),
                             deny_tools: Vec::new(),
+                            skills: Vec::new(),
+                            deny_skills: Vec::new(),
+                            agents: Vec::new(),
+                            deny_agents: Vec::new(),
+                            max_turns: None,
+                            timeout_secs: None,
                             hooks: HashMap::new(),
                         },
                     },

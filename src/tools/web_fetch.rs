@@ -146,10 +146,10 @@ fn check_blocked_host(url: &reqwest::Url) -> Result<(), String> {
     // Block addresses that are not routable on the public internet. The v4 set
     // adds shared address space (CGNAT) and the v6 set adds unique-local and
     // link-local, all of which reach infrastructure a fetch tool must not.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_non_public_address(ip) {
-            return Err(format!("private/loopback IP '{}' is blocked", ip));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_non_public_address(ip)
+    {
+        return Err(format!("private/loopback IP '{}' is blocked", ip));
     }
 
     Ok(())

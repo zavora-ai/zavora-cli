@@ -9,12 +9,12 @@ use std::collections::BTreeSet;
 use crate::cli::ToolConfirmationMode;
 use crate::config::RuntimeConfig;
 use crate::tool_policy::{ToolClass, ToolProvenance, classify};
-use crate::tool_surface::ToolSurface;
+use crate::tool_surface::{ResolvedRuntimeTools, ToolSurface};
 use crate::tools::build_builtin_tools;
 use crate::tools::confirming::{MODEL_FORBIDDEN_SAFETY_ARGS, scrub_model_supplied_safety_args};
 
 fn base_config() -> RuntimeConfig {
-    crate::tests::base_cfg()
+    crate::test_support::base_cfg()
 }
 
 /// Property 2: nothing may be added to the surface after `seal`.
@@ -297,7 +297,6 @@ fn the_removed_placeholder_agents_are_not_advertised() {
 #[tokio::test]
 async fn a_pre_tool_hook_blocks_the_call() {
     use crate::hooks::{HookConfig, HookPoint};
-    use crate::tools::confirming::{ConfirmingTool, clear_hook_executor};
 
     let mut cfg = base_config();
     cfg.hooks.insert(
@@ -311,16 +310,16 @@ async fn a_pre_tool_hook_blocks_the_call() {
         }],
     );
 
-    // Sealing installs the executor.
+    // Sealing binds the executor to every wrapped tool in this surface.
     let sealed = ToolSurface::new().add_builtins().seal(&cfg);
     assert!(!sealed.is_empty());
 
-    let tool = ConfirmingTool::wrap_display_only(
-        build_builtin_tools()
-            .into_iter()
-            .find(|tool| tool.name() == "current_unix_time")
-            .expect("current_unix_time is registered"),
-    );
+    let tool = sealed
+        .tools()
+        .iter()
+        .find(|tool| tool.name() == "current_unix_time")
+        .cloned()
+        .expect("current_unix_time is registered");
 
     let ctx: std::sync::Arc<dyn adk_rust::ToolContext> =
         std::sync::Arc::new(adk_tool::SimpleToolContext::new("hook-test"));
@@ -329,13 +328,58 @@ async fn a_pre_tool_hook_blocks_the_call() {
         .await
         .expect("execute should return a payload");
 
-    clear_hook_executor();
-
     let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         error.contains("blocked by pre_tool hook"),
         "the pre_tool hook did not block the call: {result}"
     );
+}
+
+#[tokio::test]
+async fn parallel_tool_surfaces_keep_hook_policy_isolated() {
+    use crate::hooks::{HookConfig, HookPoint};
+
+    let mut blocked_cfg = base_config();
+    blocked_cfg.hooks.insert(
+        HookPoint::PreTool,
+        vec![HookConfig {
+            command: "exit 2".to_string(),
+            timeout_ms: 5_000,
+            max_output: 4_096,
+            matcher: None,
+        }],
+    );
+    let open_cfg = base_config();
+    let blocked = ToolSurface::new().add_builtins().seal(&blocked_cfg);
+    let open = ToolSurface::new().add_builtins().seal(&open_cfg);
+    let find_time = |surface: &ResolvedRuntimeTools| {
+        surface
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == "current_unix_time")
+            .cloned()
+            .expect("current_unix_time is registered")
+    };
+    let blocked_tool = find_time(&blocked);
+    let open_tool = find_time(&open);
+    let blocked_ctx: std::sync::Arc<dyn adk_rust::ToolContext> =
+        std::sync::Arc::new(adk_tool::SimpleToolContext::new("blocked-agent"));
+    let open_ctx: std::sync::Arc<dyn adk_rust::ToolContext> =
+        std::sync::Arc::new(adk_tool::SimpleToolContext::new("open-agent"));
+
+    let (blocked_result, open_result) = tokio::join!(
+        blocked_tool.execute(blocked_ctx, serde_json::json!({})),
+        open_tool.execute(open_ctx, serde_json::json!({}))
+    );
+    let blocked_result = blocked_result.expect("blocked tool returns policy payload");
+    let open_result = open_result.expect("open tool runs");
+    assert!(
+        blocked_result
+            .get("error")
+            .and_then(|value| value.as_str())
+            .is_some_and(|error| error.contains("blocked by pre_tool hook"))
+    );
+    assert!(open_result.get("unix_utc_seconds").is_some());
 }
 
 /// Requirement 6.5: a conditionally attached agent must be absent from the

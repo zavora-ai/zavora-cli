@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -18,6 +18,17 @@ pub struct RuntimeConfig {
     pub agent_resource_paths: Vec<String>,
     pub agent_allow_tools: Vec<String>,
     pub agent_deny_tools: Vec<String>,
+    pub agent_allow_skills: Vec<String>,
+    pub agent_deny_skills: Vec<String>,
+    /// Child-agent names or wildcard patterns this agent may spawn. Empty means
+    /// all configured specialists; deny rules always win.
+    pub agent_allow_agents: Vec<String>,
+    pub agent_deny_agents: Vec<String>,
+    pub agent_max_turns: Option<u32>,
+    pub agent_timeout_secs: Option<u64>,
+    /// Resolved agent definitions available to the coordinator. These are
+    /// configuration records, not connected or running agents.
+    pub available_agents: Vec<ResolvedAgent>,
     /// Lifecycle hooks keyed by hook point, resolved from the active agent.
     ///
     /// Previously the agent config accepted a `hooks` table that nothing ever
@@ -139,7 +150,7 @@ impl AgentSource {
 
 use crate::hooks::HookConfig;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentFileConfig {
     pub description: Option<String>,
@@ -153,6 +164,20 @@ pub struct AgentFileConfig {
     pub allow_tools: Vec<String>,
     #[serde(default)]
     pub deny_tools: Vec<String>,
+    /// Skill names or wildcard patterns this agent may load. Empty means all
+    /// enabled workspace skills; deny rules always win.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub deny_skills: Vec<String>,
+    #[serde(default, alias = "subagents", alias = "allowed_agents")]
+    pub agents: Vec<String>,
+    #[serde(default, alias = "disallowed_agents")]
+    pub deny_agents: Vec<String>,
+    /// Bound model/tool iterations for this agent.
+    pub max_turns: Option<u32>,
+    /// Bound a delegated invocation independently of the parent turn.
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub hooks: HashMap<String, Vec<HookConfig>>,
 }
@@ -174,6 +199,7 @@ pub struct AgentSelectionFile {
 pub struct ResolvedAgent {
     pub name: String,
     pub source: AgentSource,
+    pub definition_path: Option<PathBuf>,
     pub config: AgentFileConfig,
 }
 
@@ -182,6 +208,202 @@ pub struct AgentPaths {
     pub local_catalog: PathBuf,
     pub global_catalog: Option<PathBuf>,
     pub selection_file: PathBuf,
+    pub local_markdown_roots: Vec<PathBuf>,
+    pub global_markdown_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MarkdownAgentFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    provider: Option<Provider>,
+    model: Option<String>,
+    #[serde(default, alias = "tools", alias = "allowedTools")]
+    allow_tools: StringList,
+    #[serde(
+        default,
+        alias = "disallowedTools",
+        alias = "denyTools",
+        alias = "disallowed_tools"
+    )]
+    deny_tools: StringList,
+    #[serde(default)]
+    skills: StringList,
+    #[serde(default, alias = "disallowedSkills")]
+    deny_skills: StringList,
+    #[serde(default, alias = "subagents", alias = "allowedAgents")]
+    agents: StringList,
+    #[serde(default, alias = "disallowedAgents")]
+    deny_agents: StringList,
+    #[serde(alias = "permissionMode", alias = "permission_mode")]
+    tool_confirmation_mode: Option<ToolConfirmationMode>,
+    #[serde(alias = "maxTurns", alias = "max_iterations")]
+    max_turns: Option<u32>,
+    #[serde(alias = "timeout", alias = "timeoutSeconds")]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(untagged)]
+enum StringList {
+    #[default]
+    Empty,
+    One(String),
+    Many(Vec<String>),
+    Flags(BTreeMap<String, bool>),
+}
+
+impl StringList {
+    fn into_vec(self) -> Vec<String> {
+        let values = match self {
+            Self::Empty => Vec::new(),
+            Self::One(value) => value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect(),
+            Self::Many(values) => values,
+            Self::Flags(values) => values
+                .into_iter()
+                .filter_map(|(name, enabled)| enabled.then_some(name))
+                .collect(),
+        };
+        values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
+    fn into_tools(self) -> Vec<String> {
+        self.into_vec()
+            .into_iter()
+            .map(|value| normalize_imported_tool_name(&value))
+            .collect()
+    }
+}
+
+fn normalize_imported_tool_name(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "read" => "fs_read".to_string(),
+        "write" => "fs_write".to_string(),
+        "edit" => "file_edit".to_string(),
+        "bash" | "shell" => "execute_bash".to_string(),
+        "glob" => "glob".to_string(),
+        "grep" => "grep".to_string(),
+        "webfetch" | "web_fetch" => "web_fetch".to_string(),
+        _ => value.trim().to_string(),
+    }
+}
+
+fn normalize_agent_name(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':') {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
+fn parse_markdown_agent(path: &Path, source: AgentSource) -> Result<Option<ResolvedAgent>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read agent definition '{}'", path.display()))?;
+    let (frontmatter, body) = if let Some(rest) = content.strip_prefix("---") {
+        let (frontmatter, body) = rest.split_once("\n---").ok_or_else(|| {
+            anyhow::anyhow!(
+                "agent definition '{}' has an unterminated YAML frontmatter block",
+                path.display()
+            )
+        })?;
+        let parsed = serde_yaml::from_str::<MarkdownAgentFrontmatter>(frontmatter)
+            .with_context(|| format!("invalid agent frontmatter in '{}'", path.display()))?;
+        (parsed, body.trim_start_matches(['\r', '\n']).trim())
+    } else {
+        (MarkdownAgentFrontmatter::default(), content.trim())
+    };
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let name = frontmatter
+        .name
+        .as_deref()
+        .map(normalize_agent_name)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(normalize_agent_name)
+                .filter(|name| !name.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("agent definition '{}' has no usable name", path.display())
+        })?;
+    let resource_paths = path
+        .parent()
+        .map(|parent| vec![parent.display().to_string()])
+        .unwrap_or_default();
+    Ok(Some(ResolvedAgent {
+        name,
+        source,
+        definition_path: Some(path.to_path_buf()),
+        config: AgentFileConfig {
+            description: frontmatter.description,
+            instruction: Some(body.to_string()),
+            provider: frontmatter.provider,
+            model: frontmatter.model,
+            tool_confirmation_mode: frontmatter.tool_confirmation_mode,
+            resource_paths,
+            allow_tools: frontmatter.allow_tools.into_tools(),
+            deny_tools: frontmatter.deny_tools.into_tools(),
+            skills: frontmatter.skills.into_vec(),
+            deny_skills: frontmatter.deny_skills.into_vec(),
+            agents: frontmatter.agents.into_vec(),
+            deny_agents: frontmatter.deny_agents.into_vec(),
+            max_turns: frontmatter.max_turns,
+            timeout_secs: frontmatter.timeout_secs,
+            hooks: HashMap::new(),
+        },
+    }))
+}
+
+fn load_markdown_agents(
+    roots: &[PathBuf],
+    source: AgentSource,
+) -> Result<HashMap<String, ResolvedAgent>> {
+    let mut resolved = HashMap::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut files = ignore::WalkBuilder::new(root)
+            .max_depth(Some(3))
+            .hidden(false)
+            .build()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| entry.into_path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        for path in files {
+            if let Some(agent) = parse_markdown_agent(&path, source)? {
+                resolved.insert(agent.name.clone(), agent);
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -265,10 +487,40 @@ pub fn default_agent_paths() -> AgentPaths {
         .ok()
         .map(PathBuf::from)
         .map(|home| home.join(".zavora/agents.toml"));
+    let local_markdown_roots = [
+        ".opencode/agents",
+        ".gemini/agents",
+        ".grok/agents",
+        ".claude/agents",
+        ".zavora/agents",
+        ".agents/agents",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    let global_markdown_roots = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .map(|home| {
+            [
+                ".config/opencode/agents",
+                ".gemini/agents",
+                ".grok/agents",
+                ".claude/agents",
+                ".zavora/agents",
+                ".agents/agents",
+            ]
+            .into_iter()
+            .map(|relative| home.join(relative))
+            .collect()
+        })
+        .unwrap_or_default();
     AgentPaths {
         local_catalog,
         global_catalog,
         selection_file,
+        local_markdown_roots,
+        global_markdown_roots,
     }
 }
 
@@ -290,6 +542,14 @@ pub fn load_agent_catalog_file(path: &Path) -> Result<AgentCatalogFile> {
 pub fn load_resolved_agents(paths: &AgentPaths) -> Result<HashMap<String, ResolvedAgent>> {
     let mut resolved = implicit_agent_map();
 
+    // Lowest-to-highest precedence: portable global Markdown, global TOML,
+    // portable project Markdown, project TOML. Within Markdown roots the
+    // canonical `.agents/agents` directory is processed last.
+    resolved.extend(load_markdown_agents(
+        &paths.global_markdown_roots,
+        AgentSource::Global,
+    )?);
+
     if let Some(global_path) = paths.global_catalog.as_ref() {
         let global = load_agent_catalog_file(global_path)?;
         for (name, config) in global.agents {
@@ -298,11 +558,17 @@ pub fn load_resolved_agents(paths: &AgentPaths) -> Result<HashMap<String, Resolv
                 ResolvedAgent {
                     name,
                     source: AgentSource::Global,
+                    definition_path: Some(global_path.clone()),
                     config,
                 },
             );
         }
     }
+
+    resolved.extend(load_markdown_agents(
+        &paths.local_markdown_roots,
+        AgentSource::Local,
+    )?);
 
     let local = load_agent_catalog_file(&paths.local_catalog)?;
     for (name, config) in local.agents {
@@ -311,6 +577,7 @@ pub fn load_resolved_agents(paths: &AgentPaths) -> Result<HashMap<String, Resolv
             ResolvedAgent {
                 name,
                 source: AgentSource::Local,
+                definition_path: Some(paths.local_catalog.clone()),
                 config,
             },
         );
@@ -326,6 +593,7 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
         ResolvedAgent {
             name: "default".to_string(),
             source: AgentSource::Implicit,
+            definition_path: None,
             config: AgentFileConfig {
                 description: Some("Built-in default assistant".to_string()),
                 instruction: None,
@@ -335,6 +603,12 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
                 resource_paths: Vec::new(),
                 allow_tools: Vec::new(),
                 deny_tools: Vec::new(),
+                skills: Vec::new(),
+                deny_skills: Vec::new(),
+                agents: Vec::new(),
+                deny_agents: Vec::new(),
+                max_turns: None,
+                timeout_secs: None,
                 hooks: HashMap::new(),
             },
         },
@@ -344,6 +618,7 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
         ResolvedAgent {
             name: "ralph".to_string(),
             source: AgentSource::Implicit,
+            definition_path: None,
             config: AgentFileConfig {
                 description: Some(
                     "Ralph autonomous development pipeline (PRD → Architect → Loop)".to_string(),
@@ -355,6 +630,12 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
                 resource_paths: Vec::new(),
                 allow_tools: Vec::new(),
                 deny_tools: Vec::new(),
+                skills: Vec::new(),
+                deny_skills: Vec::new(),
+                agents: Vec::new(),
+                deny_agents: Vec::new(),
+                max_turns: None,
+                timeout_secs: None,
                 hooks: HashMap::new(),
             },
         },
@@ -365,6 +646,7 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
             ResolvedAgent {
                 name: name.to_string(),
                 source: AgentSource::Implicit,
+                definition_path: None,
                 config: AgentFileConfig {
                     description: crate::agents::capability::specialist_description(name)
                         .map(str::to_string),
@@ -377,6 +659,16 @@ pub fn implicit_agent_map() -> HashMap<String, ResolvedAgent> {
                     resource_paths: Vec::new(),
                     allow_tools: Vec::new(),
                     deny_tools: Vec::new(),
+                    skills: crate::agents::capability::specialist_skill_patterns(name)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|pattern| pattern.to_string())
+                        .collect(),
+                    deny_skills: Vec::new(),
+                    agents: Vec::new(),
+                    deny_agents: Vec::new(),
+                    max_turns: Some(12),
+                    timeout_secs: None,
                     hooks: HashMap::new(),
                 },
             },
@@ -560,6 +852,8 @@ pub fn resolve_runtime_config_with_agents(
         }
     };
     let mcp_servers = profile.mcp_servers.clone();
+    let mut available_agents = resolved_agents.values().cloned().collect::<Vec<_>>();
+    available_agents.sort_by(|left, right| left.name.cmp(&right.name));
 
     Ok(RuntimeConfig {
         profile: selected.to_string(),
@@ -571,6 +865,13 @@ pub fn resolve_runtime_config_with_agents(
         agent_resource_paths: active_agent.config.resource_paths.clone(),
         agent_allow_tools: active_agent.config.allow_tools.clone(),
         agent_deny_tools: active_agent.config.deny_tools.clone(),
+        agent_allow_skills: active_agent.config.skills.clone(),
+        agent_deny_skills: active_agent.config.deny_skills.clone(),
+        agent_allow_agents: active_agent.config.agents.clone(),
+        agent_deny_agents: active_agent.config.deny_agents.clone(),
+        agent_max_turns: active_agent.config.max_turns,
+        agent_timeout_secs: active_agent.config.timeout_secs,
+        available_agents,
         hooks: resolve_agent_hooks(&active_agent.config.hooks),
         provider,
         model: Some(worker_model.clone()),
@@ -654,6 +955,7 @@ pub fn resolve_runtime_config_with_agents(
         approve_tool,
         tool_timeout_secs: cli
             .tool_timeout_secs
+            .or(active_agent.config.timeout_secs)
             .or(profile.tool_timeout_secs)
             .unwrap_or(45)
             .max(1),
@@ -699,6 +1001,55 @@ pub fn resolve_runtime_config_with_agents(
         compaction_threshold: profile.compaction_threshold.unwrap_or(0.75),
         compaction_target: profile.compaction_target.unwrap_or(0.10),
     })
+}
+
+/// Apply a resolved agent to an already-resolved profile configuration.
+///
+/// This is used by direct runs, delegated sessions, and coordinator-created
+/// agent tools so every execution surface receives identical model, prompt,
+/// tool, skill, hook, and timeout policy.
+pub fn apply_agent_overrides(cfg: &mut RuntimeConfig, agent: &ResolvedAgent) {
+    cfg.agent_name = agent.name.clone();
+    cfg.agent_source = agent.source;
+    cfg.agent_description = agent.config.description.clone();
+    cfg.agent_instruction = agent.config.instruction.clone();
+    cfg.agent_resource_paths = agent.config.resource_paths.clone();
+    cfg.agent_allow_tools = agent.config.allow_tools.clone();
+    cfg.agent_deny_tools = agent.config.deny_tools.clone();
+    cfg.agent_allow_skills = agent.config.skills.clone();
+    cfg.agent_deny_skills = agent.config.deny_skills.clone();
+    cfg.agent_allow_agents = agent.config.agents.clone();
+    cfg.agent_deny_agents = agent.config.deny_agents.clone();
+    cfg.agent_max_turns = agent.config.max_turns;
+    cfg.agent_timeout_secs = agent.config.timeout_secs;
+    cfg.hooks = resolve_agent_hooks(&agent.config.hooks);
+    if let Some(provider) = agent.config.provider {
+        cfg.provider = provider;
+        cfg.worker_provider = provider;
+    }
+    if let Some(model) = agent.config.model.clone() {
+        cfg.model = Some(model.clone());
+        cfg.worker_model = model;
+    }
+    if let Some(mode) = agent.config.tool_confirmation_mode {
+        cfg.tool_confirmation_mode = mode;
+    }
+    if let Some(timeout_secs) = agent.config.timeout_secs {
+        cfg.tool_timeout_secs = timeout_secs.max(1);
+    }
+}
+
+pub fn child_agent_allowed(cfg: &RuntimeConfig, name: &str) -> bool {
+    let allowed = cfg.agent_allow_agents.is_empty()
+        || cfg
+            .agent_allow_agents
+            .iter()
+            .any(|pattern| crate::tool_policy::matches_wildcard(pattern, name));
+    let denied = cfg
+        .agent_deny_agents
+        .iter()
+        .any(|pattern| crate::tool_policy::matches_wildcard(pattern, name));
+    allowed && !denied
 }
 
 #[cfg(test)]

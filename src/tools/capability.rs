@@ -380,6 +380,11 @@ pub fn build_capability_tools() -> Vec<Arc<dyn Tool>> {
 mod tests {
     use super::*;
 
+    fn capability_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     fn temp_config() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
@@ -614,6 +619,7 @@ mod tests {
     /// the machine running it.
     #[tokio::test]
     async fn enable_uses_the_injected_installer() {
+        let _env_guard = capability_env_lock().lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         // Point config and capability state at the temporary directory so the
         // test cannot touch the developer's workspace.
@@ -674,6 +680,7 @@ mod tests {
     /// recorded as on.
     #[tokio::test]
     async fn enabling_asks_the_workspace_to_reconnect() {
+        let _env_guard = capability_env_lock().lock().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("config.toml");
         let state = dir.path().join("capabilities.toml");
