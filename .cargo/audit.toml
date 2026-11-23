@@ -11,15 +11,6 @@ ignore = [
   # Transitive via sqlx-mysql in adk-session; no upstream fix available.
   # Reviewed 2026-08-15.
   "RUSTSEC-2023-0071",
-  # Transitive via async-openai in adk-model; upstream crate unmaintained.
-  # Reviewed 2026-08-15.
-  "RUSTSEC-2025-0012",
-  # Transitive via backoff in the async-openai path; unmaintained warning.
-  # Reviewed 2026-08-15.
-  "RUSTSEC-2024-0384",
-  # Transitive via the reqwest 0.11 path in adk-model; unmaintained warning.
-  # Reviewed 2026-08-15.
-  "RUSTSEC-2025-0134",
   # paste 1.0.15 — proc-macro crate marked unmaintained. No fixed version
   # published; reached through several proc-macro dependencies. Reviewed
   # 2026-08-15.
